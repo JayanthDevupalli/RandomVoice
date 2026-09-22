@@ -8,6 +8,8 @@ import { AudioSettingsModal } from "./AudioSettingsModal";
 import { ModeratorControlModal } from "./ModeratorControlModal";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import confetti from "canvas-confetti";
+import { LiveKitRoom, useTracks } from "@livekit/components-react";
+import { Track } from "livekit-client";
 import {
   Mic,
   MicOff,
@@ -60,6 +62,34 @@ const EMOJI_REACTIONS = [
   { id: "party", label: "Party", emoji: "🎉", color: "#3B82F6" },
 ];
 
+function ParticipantAudio({ identity, volume, isDeafened }: { identity: string; volume: number; isDeafened: boolean }) {
+  const tracks = useTracks([Track.Source.Microphone]).filter(
+    (t) => t.participant.identity === identity
+  );
+  const audioRef = useRef<HTMLAudioElement>(null);
+
+  useEffect(() => {
+    const track = tracks[0]?.publication?.track;
+    const el = audioRef.current;
+    if (el && track) {
+      track.attach(el);
+    }
+    return () => {
+      if (el && track) {
+        track.detach(el);
+      }
+    };
+  }, [tracks]);
+
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.volume = isDeafened ? 0 : volume / 100;
+    }
+  }, [volume, isDeafened]);
+
+  return <audio ref={audioRef} autoPlay playsInline style={{ display: "none" }} />;
+}
+
 export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
   const router = useRouter();
 
@@ -77,6 +107,10 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
   const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
   const [isAudioSettingsOpen, setIsAudioSettingsOpen] = useState(false);
   const [participantVolumes, setParticipantVolumes] = useState<Record<string, number>>({});
+
+  // LiveKit state
+  const [liveKitToken, setLiveKitToken] = useState<string | null>(null);
+  const [liveKitUrl, setLiveKitUrl] = useState<string | null>(null);
 
   // Moderation state
   const [isModDeckOpen, setIsModDeckOpen] = useState(false);
@@ -259,6 +293,25 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
             timestamp: Date.now(),
           },
         ]);
+        
+        // Fetch LiveKit Token
+        try {
+          const role = data.junction.moderatorIdentity === guest.name ? "moderator" : "speaker";
+          const lkRes = await fetch(
+            `/api/token?room=${junctionId}&username=${encodeURIComponent(
+              guest.name
+            )}&avatar=${encodeURIComponent(guest.avatar || "zap")}&color=${encodeURIComponent(
+              guest.color || "#6366F1"
+            )}&role=${encodeURIComponent(role)}`
+          );
+          const lkData = await lkRes.json();
+          if (lkRes.ok && lkData.token) {
+            setLiveKitToken(lkData.token);
+            setLiveKitUrl(lkData.serverUrl);
+          }
+        } catch (e) {
+          console.error("Failed to fetch LiveKit token", e);
+        }
         
         return true;
       } catch (err: any) {
@@ -563,6 +616,29 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
 
   return (
     <div className="relative min-h-[calc(100vh-3.5rem)] sm:min-h-[calc(100vh-4rem)] flex flex-col justify-between pb-24 overflow-hidden bg-background">
+      {/* LiveKit Hidden Audio Manager */}
+      {liveKitToken && liveKitUrl && (
+        <LiveKitRoom
+          token={liveKitToken}
+          serverUrl={liveKitUrl}
+          connect={true}
+          audio={!isMuted && !isMutedByMod}
+          video={false}
+          style={{ display: 'none' }}
+        >
+          {participants
+            .filter((p) => p.identity !== guest.name)
+            .map((p) => (
+              <ParticipantAudio
+                key={p.identity}
+                identity={p.identity}
+                volume={participantVolumes[p.identity] ?? 100}
+                isDeafened={isDeafened}
+              />
+            ))}
+        </LiveKitRoom>
+      )}
+
       {/* Mod Mute Alert Banner */}
       {isMutedByMod && (
         <div className="bg-rose-900/90 text-rose-200 border-b border-rose-700/60 px-4 py-2 text-center text-xs font-semibold flex items-center justify-center gap-2 animate-fadeIn z-30">
