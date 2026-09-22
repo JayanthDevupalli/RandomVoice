@@ -7,6 +7,7 @@ import { useGuestUser } from "@/hooks/useGuestUser";
 import { Navbar } from "@/components/layout/Navbar";
 import { JunctionCard } from "@/components/lobby/JunctionCard";
 import { CreateJunctionModal } from "@/components/lobby/CreateJunctionModal";
+import { PullToRefresh } from "@/components/ui/PullToRefresh";
 import { Junction } from "@/lib/types";
 import {
   Plus,
@@ -57,36 +58,33 @@ export default function JunctionsPage() {
     }
   }, [isLoaded, hasCompletedOnboarding, router]);
 
+  const fetchJunctions = async (signal?: AbortSignal) => {
+    try {
+      const res = await fetch("/api/junctions", { signal });
+      const data = await res.json();
+      if (data.junctions) {
+        setJunctions((prev) => {
+          if (JSON.stringify(prev) === JSON.stringify(data.junctions)) return prev;
+          return data.junctions;
+        });
+        setTotalOnline((prev) => data.totalOnline || prev);
+      }
+    } catch (e: any) {
+      if (e.name !== "AbortError") console.warn("Failed to fetch junctions:", e);
+    }
+  };
+
   useEffect(() => {
     let abortController: AbortController | null = null;
     let timeoutId: NodeJS.Timeout;
 
     const poll = async () => {
-      if (abortController) {
-        abortController.abort();
-      }
+      if (abortController) abortController.abort();
       abortController = new AbortController();
-
-      try {
-        const res = await fetch("/api/junctions", { signal: abortController.signal });
-        const data = await res.json();
-        if (data.junctions) {
-          setJunctions((prev) => {
-            if (JSON.stringify(prev) === JSON.stringify(data.junctions)) {
-              return prev;
-            }
-            return data.junctions;
-          });
-          setTotalOnline((prev) => data.totalOnline || prev);
-        }
-      } catch (e: any) {
-        if (e.name !== "AbortError") {
-          console.warn("Failed to fetch junctions:", e);
-        }
-      } finally {
-        setIsLoading(false);
-        timeoutId = setTimeout(poll, 4000);
-      }
+      
+      await fetchJunctions(abortController.signal);
+      setIsLoading(false);
+      timeoutId = setTimeout(poll, 4000);
     };
 
     poll();
@@ -97,8 +95,16 @@ export default function JunctionsPage() {
     };
   }, []);
 
+  const handleManualRefresh = async () => {
+    await fetchJunctions();
+  };
+
   const handleJunctionCreated = (newJunction: Junction) => {
     setJunctions((prev) => [newJunction, ...prev.filter((j) => j.id !== newJunction.id)]);
+  };
+
+  const handleJunctionDeleted = (id: string) => {
+    setJunctions((prev) => prev.filter((j) => j.id !== id));
   };
 
   const filteredJunctions = junctions.filter((j) => {
@@ -122,8 +128,9 @@ export default function JunctionsPage() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col text-slate-200">
-      <Navbar guest={guest} onUpdateGuest={updateGuest} onClearProfile={clearProfile} totalOnline={totalOnline} />
+    <PullToRefresh onRefresh={handleManualRefresh}>
+      <div className="min-h-screen flex flex-col text-slate-200">
+        <Navbar guest={guest} onUpdateGuest={updateGuest} onClearProfile={clearProfile} totalOnline={totalOnline} />
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 py-3 sm:py-6">
         {/* Sleek Top Header & Action Row */}
@@ -213,7 +220,7 @@ export default function JunctionsPage() {
         ) : filteredJunctions.length > 0 ? (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
             {filteredJunctions.map((junction) => (
-              <JunctionCard key={junction.id} junction={junction} />
+              <JunctionCard key={junction.id} junction={junction} onDelete={handleJunctionDeleted} />
             ))}
           </div>
         ) : (
@@ -245,6 +252,7 @@ export default function JunctionsPage() {
         guest={guest}
         onCreated={handleJunctionCreated}
       />
-    </div>
+      </div>
+    </PullToRefresh>
   );
 }

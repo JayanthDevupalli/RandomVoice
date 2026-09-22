@@ -9,6 +9,7 @@ import { useGuestUser } from "@/hooks/useGuestUser";
 
 interface JunctionCardProps {
   junction: Junction;
+  onDelete?: (id: string) => void;
 }
 
 const CATEGORY_ICONS: Record<string, any> = {
@@ -34,7 +35,7 @@ const CATEGORY_COLORS: Record<string, { bg: string; text: string; border: string
 import React from "react";
 
 export const JunctionCard = React.memo(
-  function JunctionCard({ junction }: JunctionCardProps) {
+  function JunctionCard({ junction, onDelete }: JunctionCardProps) {
     const { guest } = useGuestUser();
     const [isDeleting, setIsDeleting] = useState(false);
 
@@ -54,7 +55,9 @@ export const JunctionCard = React.memo(
       await fetch(`/api/junctions/${junction.id}?creatorId=${encodeURIComponent(guest?.name || "")}`, {
         method: "DELETE",
       });
-      window.location.reload();
+      if (onDelete) {
+        onDelete(junction.id);
+      }
     } catch (err) {
       console.error(err);
       setIsDeleting(false);

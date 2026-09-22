@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { GuestUser, Junction, JunctionParticipant, RoomChatMessage } from "@/lib/types";
 import { useAudioVisualizer } from "@/hooks/useAudioVisualizer";
@@ -8,8 +8,8 @@ import { AudioSettingsModal } from "./AudioSettingsModal";
 import { ModeratorControlModal } from "./ModeratorControlModal";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import confetti from "canvas-confetti";
-import { LiveKitRoom, useTracks } from "@livekit/components-react";
-import { Track } from "livekit-client";
+import { LiveKitRoom, useTracks, useLocalParticipant, useRoomContext } from "@livekit/components-react";
+import { Track, RoomEvent } from "livekit-client";
 import {
   Mic,
   MicOff,
@@ -90,6 +90,56 @@ function ParticipantAudio({ identity, volume, isDeafened }: { identity: string; 
   return <audio ref={audioRef} autoPlay playsInline style={{ display: "none" }} />;
 }
 
+function LiveKitDataSync({
+  onMessage,
+  publishRef
+}: {
+  onMessage: (data: any) => void;
+  publishRef: React.MutableRefObject<((data: any) => void) | null>;
+}) {
+  const room = useRoomContext();
+  const { localParticipant } = useLocalParticipant();
+
+  useEffect(() => {
+    if (!room) return;
+    const handleData = (
+      payload: Uint8Array,
+      participant?: any,
+      kind?: any,
+      topic?: string
+    ) => {
+      try {
+        const strData = new TextDecoder().decode(payload);
+        const parsed = JSON.parse(strData);
+        onMessage(parsed);
+      } catch (err) {}
+    };
+    room.on(RoomEvent.DataReceived, handleData);
+    return () => {
+      room.off(RoomEvent.DataReceived, handleData);
+    };
+  }, [room, onMessage]);
+
+  useEffect(() => {
+    if (localParticipant) {
+      publishRef.current = async (data: any) => {
+        try {
+          const strData = JSON.stringify(data);
+          const encoded = new TextEncoder().encode(strData);
+          await localParticipant.publishData(encoded, { reliable: true });
+        } catch (err) {
+          console.error("Failed to publish LiveKit data", err);
+        }
+      };
+    }
+    return () => {
+      publishRef.current = null;
+    };
+  }, [localParticipant, publishRef]);
+
+  return null;
+}
+
 export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
   const router = useRouter();
 
@@ -124,8 +174,8 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
   const [isReactionsOpen, setIsReactionsOpen] = useState(false);
   const [isCopied, setIsCopied] = useState(false);
 
-  // Isolated Broadcast Channel Ref for this specific junction
-  const channelRef = useRef<BroadcastChannel | null>(null);
+  // LiveKit Data Publish Ref
+  const liveKitPublishRef = useRef<((data: any) => void) | null>(null);
 
   // Web Audio Visualizer for local mic
   const { isSpeaking: isLocalSpeaking } = useAudioVisualizer(
@@ -174,56 +224,41 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
     }
   }, [isMuted, isDeafened, isMutedByMod, mediaStream]);
 
-  // 2. Setup Strict Per-Junction Isolated BroadcastChannel (Guarantees zero cross-room glitches)
-  useEffect(() => {
-    if (typeof window === "undefined" || !junctionId) return;
+  const onRoomMessage = useCallback((data: any) => {
+    const { type, payload } = data;
 
-    // Isolate by junction ID channel name
-    const channelName = `junction_isolated_audio_${junctionId}`;
-    const channel = new BroadcastChannel(channelName);
-    channelRef.current = channel;
-
-    channel.onmessage = (event) => {
-      const { type, payload } = event.data;
-
-      if (type === "chat_message") {
-        setChatMessages((prev) => {
-          if (prev.some((m) => m.id === payload.id)) return prev;
-          return [...prev, payload];
-        });
-      } else if (type === "reaction") {
-        setReactions((prev) => [...prev, payload]);
-        setTimeout(() => {
-          setReactions((prev) => prev.filter((r) => r.id !== payload.id));
-        }, 2800);
-      } else if (type === "clear_chat") {
-        setChatMessages([]);
-      } else if (type === "moderation_event") {
-        const { targetIdentity, action } = payload;
-        if (targetIdentity === guest.name) {
-          if (action === "mute") {
-            setIsMutedByMod(true);
-            setIsMuted(true);
-          } else if (action === "unmute") {
-            setIsMutedByMod(false);
-          } else if (action === "kick" || action === "ban") {
-            setKickedNotice(
-              action === "ban"
-                ? "You have been banned from this junction by the moderator."
-                : "You were kicked from this junction by the moderator."
-            );
-          }
+    if (type === "chat_message") {
+      setChatMessages((prev) => {
+        if (prev.some((m) => m.id === payload.id)) return prev;
+        return [...prev, payload];
+      });
+    } else if (type === "reaction") {
+      setReactions((prev) => [...prev, payload]);
+      setTimeout(() => {
+        setReactions((prev) => prev.filter((r) => r.id !== payload.id));
+      }, 2800);
+    } else if (type === "clear_chat") {
+      setChatMessages([]);
+    } else if (type === "moderation_event") {
+      const { targetIdentity, action } = payload;
+      if (targetIdentity === guest.name) {
+        if (action === "mute") {
+          setIsMutedByMod(true);
+          setIsMuted(true);
+        } else if (action === "unmute") {
+          setIsMutedByMod(false);
+        } else if (action === "kick" || action === "ban") {
+          setKickedNotice(
+            action === "ban"
+              ? "You have been banned from this junction by the moderator."
+              : "You were kicked from this junction by the moderator."
+          );
         }
-      } else if (type === "room_ended") {
-        setKickedNotice("This junction was ended by the moderator.");
       }
-    };
-
-    return () => {
-      channel.close();
-      channelRef.current = null;
-    };
-  }, [junctionId, guest.name]);
+    } else if (type === "room_ended") {
+      setKickedNotice("This junction was ended by the moderator.");
+    }
+  }, [guest.name]);
 
   // Refs to avoid re-triggering the main effect on polling state changes
   const kickedNoticeRef = useRef(kickedNotice);
@@ -289,7 +324,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
             senderName: "Junction Bot",
             senderAvatar: "bot",
             senderColor: "#6366F1",
-            text: `Welcome ${guest.name} to the 7-seat voice junction! Room audio is 100% isolated & secure.`,
+            text: `Welcome ${guest.name} to the ${data.junction.maxParticipants}-seat voice junction! Room audio is 100% isolated & secure.`,
             timestamp: Date.now(),
           },
         ]);
@@ -458,7 +493,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
     }
 
     // Broadcast isolated moderation event
-    channelRef.current?.postMessage({
+    liveKitPublishRef.current?.({
       type: "moderation_event",
       payload: { targetIdentity, action: modAction },
     });
@@ -470,7 +505,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
 
   const handleClearChat = () => {
     setChatMessages([]);
-    channelRef.current?.postMessage({ type: "clear_chat" });
+    liveKitPublishRef.current?.({ type: "clear_chat" });
   };
 
   const handleEndJunction = async () => {
@@ -480,7 +515,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
       method: "DELETE",
     });
 
-    channelRef.current?.postMessage({ type: "room_ended" });
+    liveKitPublishRef.current?.({ type: "room_ended" });
     if (mediaStream) {
       mediaStream.getTracks().forEach((t) => t.stop());
     }
@@ -504,7 +539,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
     };
 
     setChatMessages((prev) => [...prev, newMsg]);
-    channelRef.current?.postMessage({ type: "chat_message", payload: newMsg });
+    liveKitPublishRef.current?.({ type: "chat_message", payload: newMsg });
     setInputMessage("");
   };
 
@@ -520,7 +555,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
     };
 
     setReactions((prev) => [...prev, newReaction]);
-    channelRef.current?.postMessage({ type: "reaction", payload: newReaction });
+    liveKitPublishRef.current?.({ type: "reaction", payload: newReaction });
 
     setTimeout(() => {
       setReactions((prev) => prev.filter((r) => r.id !== newReaction.id));
@@ -563,7 +598,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
           <Radio className="w-6 h-6 sm:w-7 sm:h-7" />
         </div>
         <h2 className="text-lg sm:text-xl font-bold text-white mb-1">Connecting to Junction...</h2>
-        <p className="text-xs text-slate-500 dark:text-slate-400">Allocating encrypted 7-Seat audio stream</p>
+        <p className="text-xs text-slate-500 dark:text-slate-400">Allocating encrypted secure audio stream</p>
       </div>
     );
   }
@@ -612,7 +647,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
     );
   }
 
-  const SEAT_SLOTS = Array.from({ length: 7 });
+  const SEAT_SLOTS = Array.from({ length: junction?.maxParticipants || 7 });
 
   return (
     <div className="relative min-h-[calc(100vh-3.5rem)] sm:min-h-[calc(100vh-4rem)] flex flex-col justify-between pb-24 overflow-hidden bg-background">
@@ -626,6 +661,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
           video={false}
           style={{ display: 'none' }}
         >
+          <LiveKitDataSync onMessage={onRoomMessage} publishRef={liveKitPublishRef} />
           {participants
             .filter((p) => p.identity !== guest.name)
             .map((p) => (
@@ -709,7 +745,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
 
             <div className="flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-full sm:rounded-xl bg-black/40 backdrop-blur-md border border-white/10 text-[11px] sm:text-xs font-semibold text-white shadow-sm">
               <Users size={12} className="opacity-80 shrink-0" />
-              <span>{participants.length}/7</span>
+              <span>{participants.length}/{junction?.maxParticipants || 7}</span>
             </div>
 
             <button
