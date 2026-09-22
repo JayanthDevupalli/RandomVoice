@@ -214,7 +214,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
           throw new Error(data.error || "Junction not found");
         }
 
-        if (!isMounted) return;
+        if (!isMounted) return false;
         setJunction(data.junction);
 
         // Join the junction via API
@@ -259,14 +259,15 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
             timestamp: Date.now(),
           },
         ]);
+        
+        return true;
       } catch (err: any) {
         if (isMounted) setError(err.message);
+        return false;
       } finally {
         if (isMounted) setIsLoading(false);
       }
     }
-
-    loadAndJoinJunction();
 
     // Auto-sync polling every 3.5s for junction updates
     let abortController: AbortController | null = null;
@@ -325,7 +326,11 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
       }
     };
 
-    pollJunction();
+    loadAndJoinJunction().then((success) => {
+      if (success && isMounted) {
+        pollTimeoutId = setTimeout(pollJunction, 3500);
+      }
+    });
 
     const handleBeforeUnload = () => {
       fetch(`/api/junctions/${junctionId}`, {
