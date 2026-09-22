@@ -63,13 +63,11 @@ const EMOJI_REACTIONS = [
 ];
 
 function ParticipantAudio({ identity, volume, isDeafened }: { identity: string; volume: number; isDeafened: boolean }) {
-  const tracks = useTracks([Track.Source.Microphone]).filter(
-    (t) => t.participant.identity === identity
-  );
+  const tracks = useTracks([Track.Source.Microphone]);
+  const track = tracks.find((t) => t.participant.identity === identity)?.publication?.track;
   const audioRef = useRef<HTMLAudioElement>(null);
 
   useEffect(() => {
-    const track = tracks[0]?.publication?.track;
     const el = audioRef.current;
     if (el && track) {
       track.attach(el);
@@ -79,7 +77,7 @@ function ParticipantAudio({ identity, volume, isDeafened }: { identity: string; 
         track.detach(el);
       }
     };
-  }, [tracks]);
+  }, [track]);
 
   useEffect(() => {
     if (audioRef.current) {
@@ -92,10 +90,12 @@ function ParticipantAudio({ identity, volume, isDeafened }: { identity: string; 
 
 function LiveKitDataSync({
   onMessage,
-  publishRef
+  publishRef,
+  onSpeakingChange
 }: {
   onMessage: (data: any) => void;
   publishRef: React.MutableRefObject<((data: any) => void) | null>;
+  onSpeakingChange: (speakingIdentities: string[]) => void;
 }) {
   const room = useRoomContext();
   const { localParticipant } = useLocalParticipant();
@@ -112,13 +112,20 @@ function LiveKitDataSync({
         const strData = new TextDecoder().decode(payload);
         const parsed = JSON.parse(strData);
         onMessage(parsed);
-      } catch (err) {}
+      } catch (err) { }
     };
     room.on(RoomEvent.DataReceived, handleData);
+
+    const handleActiveSpeakers = (speakers: any[]) => {
+      onSpeakingChange(speakers.map(s => s.identity));
+    };
+    room.on(RoomEvent.ActiveSpeakersChanged, handleActiveSpeakers);
+
     return () => {
       room.off(RoomEvent.DataReceived, handleData);
+      room.off(RoomEvent.ActiveSpeakersChanged, handleActiveSpeakers);
     };
-  }, [room, onMessage]);
+  }, [room, onMessage, onSpeakingChange]);
 
   useEffect(() => {
     if (localParticipant) {
@@ -157,6 +164,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
   const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
   const [isAudioSettingsOpen, setIsAudioSettingsOpen] = useState(false);
   const [participantVolumes, setParticipantVolumes] = useState<Record<string, number>>({});
+  const [activeSpeakers, setActiveSpeakers] = useState<string[]>([]);
 
   // LiveKit state
   const [liveKitToken, setLiveKitToken] = useState<string | null>(null);
@@ -178,41 +186,18 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
   const liveKitPublishRef = useRef<((data: any) => void) | null>(null);
 
   // Web Audio Visualizer for local mic
-  const { isSpeaking: isLocalSpeaking } = useAudioVisualizer(
-    mediaStream,
-    !isMuted && !isDeafened && !isMutedByMod
-  );
-
   const isCurrentModerator = junction?.moderatorIdentity === guest.name;
 
-  // 1. Initialize High-Fidelity Microphone Stream (Zero Voice Loss WebRTC Audio Profile)
+  // We no longer manually request getUserMedia here because LiveKitRoom with audio={true}
+  // will capture the microphone automatically. Double capturing causes ducking and conflicts.
   useEffect(() => {
-    let stream: MediaStream | null = null;
-    async function initMic() {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-            channelCount: 1,
-            sampleRate: 48000,
-          },
-          video: false,
-        });
-        setMediaStream(stream);
-      } catch (err: any) {
-        console.warn("Microphone access required for junction voice transmission:", err);
-      }
-    }
-    initMic();
-
+    // MediaStream is disabled to prevent WebRTC half-duplex conflicts with LiveKit.
     return () => {
-      if (stream) {
-        stream.getTracks().forEach((t) => t.stop());
+      if (mediaStream) {
+        mediaStream.getTracks().forEach((t) => t.stop());
       }
     };
-  }, []);
+  }, [mediaStream]);
 
   // Handle Mute toggle on media stream tracks
   useEffect(() => {
@@ -265,7 +250,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
   kickedNoticeRef.current = kickedNotice;
   const isMutedByModRef = useRef(isMutedByMod);
   isMutedByModRef.current = isMutedByMod;
-  
+
   const isRealUnmount = useRef(false);
 
   // 3. Fetch Junction Details & Join Room
@@ -328,7 +313,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
             timestamp: Date.now(),
           },
         ]);
-        
+
         // Fetch LiveKit Token
         try {
           const role = data.junction.moderatorIdentity === guest.name ? "moderator" : "speaker";
@@ -347,7 +332,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
         } catch (e) {
           console.error("Failed to fetch LiveKit token", e);
         }
-        
+
         return true;
       } catch (err: any) {
         if (isMounted) setError(err.message);
@@ -426,7 +411,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "leave", identity: guest.name }),
         keepalive: true,
-      }).catch(() => {});
+      }).catch(() => { });
     };
 
     window.addEventListener("beforeunload", handleBeforeUnload);
@@ -437,7 +422,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
       if (abortController) abortController.abort();
       clearTimeout(pollTimeoutId);
       window.removeEventListener("beforeunload", handleBeforeUnload);
-      
+
       // Delay leave fetch slightly to bypass React Strict Mode's double unmount/mount cycle
       setTimeout(() => {
         if (isRealUnmount.current) {
@@ -446,23 +431,14 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ action: "leave", identity: guest.name }),
             keepalive: true,
-          }).catch(() => {});
+          }).catch(() => { });
         }
       }, 200);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [junctionId, guest.name, guest.avatar, guest.color, guest.id]);
 
-  // Sync local speaking state
-  useEffect(() => {
-    setParticipants((prev) =>
-      prev.map((p) =>
-        p.identity === guest.name
-          ? { ...p, isSpeaking: isLocalSpeaking, isMuted: isMuted || isMutedByMod }
-          : p
-      )
-    );
-  }, [isLocalSpeaking, isMuted, isMutedByMod, guest.name]);
+  // Sync local speaking state is no longer needed since LiveKit tracks speaking for all participants including local.
 
   // Handle Moderator Operations
   const handleModerateParticipant = async (
@@ -572,7 +548,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
     if (mediaStream) {
       mediaStream.getTracks().forEach((t) => t.stop());
     }
-    
+
     // Explicitly call leave before navigating away to ensure immediate DB removal
     try {
       await fetch(`/api/junctions/${junctionId}`, {
@@ -583,7 +559,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
     } catch (e) {
       console.error("Failed to leave junction", e);
     }
-    
+
     router.push("/junctions");
   };
 
@@ -661,7 +637,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
           video={false}
           style={{ display: 'none' }}
         >
-          <LiveKitDataSync onMessage={onRoomMessage} publishRef={liveKitPublishRef} />
+          <LiveKitDataSync onMessage={onRoomMessage} publishRef={liveKitPublishRef} onSpeakingChange={setActiveSpeakers} />
           {participants
             .filter((p) => p.identity !== guest.name)
             .map((p) => (
@@ -697,7 +673,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
               <div className="text-4xl sm:text-5xl drop-shadow-lg">
                 {emoji}
               </div>
-              <span 
+              <span
                 className="text-[10px] sm:text-xs font-bold text-white px-2.5 py-0.5 rounded-full mt-1 bg-black/60 backdrop-blur-md"
                 style={{ color: r.color }}
               >
@@ -713,7 +689,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0 flex flex-col items-start">
             {/* Yapclub Brand Logo / Back Button */}
-            <button 
+            <button
               onClick={() => router.push('/junctions')}
               className="flex items-center gap-1 mb-1 hover:opacity-80 transition-opacity cursor-pointer group"
             >
@@ -771,18 +747,17 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
             const isMenuOpen = activeModMenuParticipant === participant?.identity;
 
             if (participant) {
-              const speaking = isLocal ? isLocalSpeaking : participant.isSpeaking;
+              const speaking = activeSpeakers.includes(participant.identity);
               const muted = participant.isMuted || participant.isMutedByMod || (isLocal && (isMuted || isMutedByMod));
 
               return (
                 <div
                   key={participant.id || participant.identity || index}
                   style={!isParticipantMod ? { borderColor: `${participant.color}40`, backgroundColor: `${participant.color}08` } : {}}
-                  className={`relative min-h-[140px] sm:min-h-[215px] p-2.5 sm:p-4 rounded-[1.5rem] flex flex-col justify-between items-center text-center transition-all duration-300 ${
-                    isParticipantMod
+                  className={`relative min-h-[140px] sm:min-h-[215px] p-2.5 sm:p-4 rounded-[1.5rem] flex flex-col justify-between items-center text-center transition-all duration-300 ${isParticipantMod
                       ? "border border-amber-500/30 bg-[#12131A]/80 backdrop-blur-md"
                       : "border border-white/5 bg-[#12131A]/40 backdrop-blur-md"
-                  }`}
+                    }`}
                 >
                   {/* Top Card Header */}
                   <div className="w-full flex items-center justify-between">
@@ -1034,13 +1009,12 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
               setIsMuted(!isMuted);
             }}
             disabled={isMutedByMod}
-            className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 sm:py-2.5 rounded-xl font-bold text-xs transition-all shadow-sm cursor-pointer active:scale-95 ${
-              isMutedByMod
+            className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 sm:py-2.5 rounded-xl font-bold text-xs transition-all shadow-sm cursor-pointer active:scale-95 ${isMutedByMod
                 ? "bg-rose-950 text-rose-400 border border-rose-800 cursor-not-allowed"
                 : isMuted
-                ? "bg-rose-600 hover:bg-rose-500 text-white"
-                : "bg-emerald-600 hover:bg-emerald-500 text-white"
-            }`}
+                  ? "bg-rose-600 hover:bg-rose-500 text-white"
+                  : "bg-emerald-600 hover:bg-emerald-500 text-white"
+              }`}
             title={isMutedByMod ? "Muted by Moderator" : isMuted ? "Unmute Mic" : "Mute Mic"}
           >
             {isMuted || isMutedByMod ? <MicOff size={15} /> : <Mic size={15} />}
@@ -1052,11 +1026,10 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
           {/* Deafen / Listen */}
           <button
             onClick={() => setIsDeafened(!isDeafened)}
-            className={`p-2 sm:p-2.5 rounded-xl text-xs transition-colors cursor-pointer active:scale-95 ${
-              isDeafened
+            className={`p-2 sm:p-2.5 rounded-xl text-xs transition-colors cursor-pointer active:scale-95 ${isDeafened
                 ? "bg-rose-600 text-white border border-rose-500"
                 : "bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10"
-            }`}
+              }`}
             title={isDeafened ? "Undeafen Audio" : "Deafen Audio"}
           >
             {isDeafened ? <VolumeX size={15} /> : <Volume2 size={15} />}
@@ -1068,11 +1041,10 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
           <div className="relative">
             <button
               onClick={() => setIsReactionsOpen(!isReactionsOpen)}
-              className={`p-2 sm:p-2.5 rounded-xl text-xs transition-colors cursor-pointer active:scale-95 ${
-                isReactionsOpen
+              className={`p-2 sm:p-2.5 rounded-xl text-xs transition-colors cursor-pointer active:scale-95 ${isReactionsOpen
                   ? "bg-indigo-600 text-white border border-indigo-500"
                   : "bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10"
-              }`}
+                }`}
               title="Reactions"
             >
               <Smile size={15} />
@@ -1099,11 +1071,10 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
           {/* Chat Toggle Button */}
           <button
             onClick={() => setIsChatOpen(!isChatOpen)}
-            className={`relative p-2 sm:p-2.5 rounded-xl text-xs transition-colors cursor-pointer active:scale-95 ${
-              isChatOpen
+            className={`relative p-2 sm:p-2.5 rounded-xl text-xs transition-colors cursor-pointer active:scale-95 ${isChatOpen
                 ? "bg-indigo-600 text-white border border-indigo-500"
                 : "bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10"
-            }`}
+              }`}
             title="Room Chat"
           >
             <MessageSquare size={15} />
