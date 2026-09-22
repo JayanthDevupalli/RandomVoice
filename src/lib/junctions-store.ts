@@ -142,6 +142,7 @@ export async function createJunction(data: {
   description: string;
   category: Junction["category"];
   tags: string[];
+  maxParticipants?: number;
   creator: { name: string; avatar: string; color: string };
 }): Promise<Junction> {
   const creatorIdentity = data.creator.name;
@@ -157,7 +158,7 @@ export async function createJunction(data: {
     category: data.category,
     icon: "Mic",
     tags: data.tags.length > 0 ? data.tags : ["Custom", data.category],
-    max_participants: 7,
+    max_participants: data.maxParticipants || 7,
     current_count: 0,
     created_at: now,
     is_custom: true,

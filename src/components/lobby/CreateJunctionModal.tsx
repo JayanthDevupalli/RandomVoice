@@ -28,6 +28,7 @@ export function CreateJunctionModal({ isOpen, onClose, guest, onCreated }: Creat
   const [description, setDescription] = useState("");
   const [category, setCategory] = useState<Junction["category"]>("casual");
   const [tagsInput, setTagsInput] = useState("");
+  const [maxParticipants, setMaxParticipants] = useState<number>(8);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -61,6 +62,7 @@ export function CreateJunctionModal({ isOpen, onClose, guest, onCreated }: Creat
           description: description.trim() || `Welcome to ${name.trim()} voice room!`,
           category,
           tags: tags.length > 0 ? tags : ["Custom", category],
+          maxParticipants,
           creator: {
             name: guest.name,
             avatar: guest.avatar || "zap",
@@ -97,13 +99,13 @@ export function CreateJunctionModal({ isOpen, onClose, guest, onCreated }: Creat
           <X size={18} />
         </button>
 
-        <div className="flex items-center gap-2 mb-5">
-          <div className="p-2 rounded-xl bg-indigo-600 text-white shadow-md shadow-indigo-600/20">
+        <div className="flex items-center gap-3 mb-5 pr-8">
+          <div className="p-2 rounded-xl bg-indigo-600 text-white shadow-md shadow-indigo-600/20 shrink-0">
             <Plus size={20} />
           </div>
           <div>
-            <h2 className="text-xl font-bold text-white tracking-tight">Create Custom Junction</h2>
-            <p className="text-xs text-slate-500 dark:text-slate-400">Launch an instant 7-seat voice room for your topic</p>
+            <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight leading-tight mb-0.5">Create Custom Junction</h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400 leading-snug">Launch an instant voice room for your topic</p>
           </div>
         </div>
 
@@ -183,9 +185,26 @@ export function CreateJunctionModal({ isOpen, onClose, guest, onCreated }: Creat
             />
           </div>
 
-          <div className="p-3 rounded-xl bg-indigo-950/40 border border-indigo-500/20 flex items-center justify-between text-xs text-indigo-200">
-            <span>Room Capacity Limit:</span>
-            <span className="font-bold text-indigo-300">7 Participants Max</span>
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1.5">
+              Max Participants
+            </label>
+            <div className="flex gap-2">
+              {[2, 4, 6, 8].map((size) => (
+                <button
+                  key={size}
+                  type="button"
+                  onClick={() => setMaxParticipants(size)}
+                  className={`flex-1 py-2.5 rounded-xl text-sm font-medium border transition-all ${
+                    maxParticipants === size
+                      ? "bg-indigo-600/20 border-indigo-500 text-white shadow-sm"
+                      : "bg-slate-100 dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:border-slate-300 dark:border-slate-700 hover:text-slate-800 dark:text-slate-200"
+                  }`}
+                >
+                  {size}
+                </button>
+              ))}
+            </div>
           </div>
 
           <div className="flex gap-3 pt-2">

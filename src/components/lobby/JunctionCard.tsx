@@ -42,7 +42,7 @@ export const JunctionCard = React.memo(
   const colorScheme = CATEGORY_COLORS[junction.category] || CATEGORY_COLORS.casual;
   const isFull = junction.currentCount >= junction.maxParticipants;
   const isLocked = junction.isLocked;
-  const seats = Array.from({ length: 7 });
+  const seats = Array.from({ length: junction.maxParticipants || 7 });
   const isCreator = guest?.name === junction.creatorId;
 
   const handleDelete = async (e: React.MouseEvent) => {
@@ -81,7 +81,7 @@ export const JunctionCard = React.memo(
             <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-white/5 border border-white/10 text-xs font-medium">
               <Users size={12} className={isFull ? "text-rose-400" : "text-emerald-400"} />
               <span className={isFull ? "text-rose-400 font-bold" : "text-slate-300 font-semibold"}>
-                {junction.currentCount}/7
+                {junction.currentCount}/{junction.maxParticipants || 7}
               </span>
             </div>
           </div>
@@ -103,9 +103,9 @@ export const JunctionCard = React.memo(
           )}
         </div>
 
-        {/* Compact 7-Seat Strip */}
+        {/* Dynamic Seat Strip */}
         <div className="mb-4">
-          <div className="flex items-center gap-1.5 justify-start">
+          <div className="flex flex-wrap items-center gap-1.5 justify-start">
             {seats.map((_, index) => {
               const participant = junction.participants[index];
               const isMod = participant?.identity === junction.moderatorIdentity;
@@ -158,7 +158,7 @@ export const JunctionCard = React.memo(
             className="w-full py-2.5 px-3 rounded-xl bg-white/5 border border-white/10 text-slate-500 font-medium text-xs flex items-center justify-center gap-1.5 cursor-not-allowed"
           >
             <Lock size={13} />
-            <span>Room Full (7/7)</span>
+            <span>Room Full ({junction.maxParticipants}/{junction.maxParticipants})</span>
           </button>
         ) : (
           <Link

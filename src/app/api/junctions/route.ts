@@ -24,7 +24,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { name, description, category, tags, creator } = body;
+    const { name, description, category, tags, creator, maxParticipants } = body;
 
     if (!name || !category || !creator) {
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
@@ -35,6 +35,7 @@ export async function POST(request: NextRequest) {
       description,
       category,
       tags: Array.isArray(tags) ? tags : [],
+      maxParticipants,
       creator,
     });
 
