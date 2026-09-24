@@ -395,6 +395,36 @@ export async function moderateParticipant(
 }
 
 
+export async function updateParticipantProfile(
+  junctionId: string,
+  identity: string,
+  updates: { name?: string; avatar?: string; color?: string }
+): Promise<{ success: boolean; error?: string; junction?: Junction }> {
+  const junction = await fetchJunctionWithParticipants(junctionId);
+
+  if (!junction) {
+    return { success: false, error: "Junction not found" };
+  }
+
+  const existing = junction.participants.find((p) => p.identity === identity);
+  if (!existing) {
+    return { success: false, error: "Participant not found" };
+  }
+
+  await supabase
+    .from("junction_participants")
+    .update({
+      name: updates.name || existing.name,
+      avatar: updates.avatar || existing.avatar,
+      color: updates.color || existing.color,
+    })
+    .eq("junction_id", junctionId)
+    .eq("identity", identity);
+
+  const updated = await fetchJunctionWithParticipants(junctionId);
+  return { success: true, junction: updated };
+}
+
 
 export async function deleteJunction(junctionId: string, creatorId?: string): Promise<boolean> {
   if (creatorId) {

@@ -8,8 +8,8 @@ import { AudioSettingsModal } from "./AudioSettingsModal";
 import { ModeratorControlModal } from "./ModeratorControlModal";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import confetti from "canvas-confetti";
-import { LiveKitRoom, useTracks, useLocalParticipant, useRoomContext } from "@livekit/components-react";
-import { Track, RoomEvent } from "livekit-client";
+import { LiveKitRoom, useTracks, useLocalParticipant, useRoomContext, useConnectionState } from "@livekit/components-react";
+import { Track, RoomEvent, ConnectionState } from "livekit-client";
 import {
   Mic,
   MicOff,
@@ -64,7 +64,7 @@ const EMOJI_REACTIONS = [
 
 function ParticipantAudio({ identity, volume, isDeafened }: { identity: string; volume: number; isDeafened: boolean }) {
   const tracks = useTracks([Track.Source.Microphone]);
-  const track = tracks.find((t) => t.participant.identity === identity)?.publication?.track;
+  const track = tracks.find((t) => t.participant?.identity === identity)?.publication?.track;
   const audioRef = useRef<HTMLAudioElement>(null);
 
   useEffect(() => {
@@ -159,6 +159,20 @@ function LiveKitDataSync({
   return null;
 }
 
+function RoomConnectionOverlay() {
+  const connectionState = useConnectionState();
+  if (connectionState === ConnectionState.Reconnecting || connectionState === ConnectionState.Connecting) {
+    return (
+      <div className="fixed inset-0 z-[100] bg-background/95 backdrop-blur-md flex flex-col items-center justify-center animate-fadeIn text-white pointer-events-auto">
+        <Activity size={32} className="animate-pulse text-indigo-400 mb-4" />
+        <h2 className="text-xl font-bold mb-2 tracking-tight">Reconnecting...</h2>
+        <p className="text-sm text-slate-400 font-light">Restoring your secure audio connection</p>
+      </div>
+    );
+  }
+  return null;
+}
+
 export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
   const router = useRouter();
 
@@ -214,38 +228,43 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
 
 
   const onRoomMessage = useCallback((data: any) => {
-    const { type, payload } = data;
+    try {
+      if (!data) return;
+      const { type, payload } = data;
 
-    if (type === "chat_message") {
-      setChatMessages((prev) => {
-        if (prev.some((m) => m.id === payload.id)) return prev;
-        return [...prev, payload];
-      });
-    } else if (type === "reaction") {
-      setReactions((prev) => [...prev, payload]);
-      setTimeout(() => {
-        setReactions((prev) => prev.filter((r) => r.id !== payload.id));
-      }, 2800);
-    } else if (type === "clear_chat") {
-      setChatMessages([]);
-    } else if (type === "moderation_event") {
-      const { targetIdentity, action } = payload;
-      if (targetIdentity === guest.name) {
-        if (action === "mute") {
-          setIsMutedByMod(true);
-          setIsMuted(true);
-        } else if (action === "unmute") {
-          setIsMutedByMod(false);
-        } else if (action === "kick" || action === "ban") {
-          setKickedNotice(
-            action === "ban"
-              ? "You have been banned from this junction by the moderator."
-              : "You were kicked from this junction by the moderator."
-          );
+      if (type === "chat_message" && payload) {
+        setChatMessages((prev) => {
+          if (prev.some((m) => m.id === payload.id)) return prev;
+          return [...prev, payload];
+        });
+      } else if (type === "reaction" && payload) {
+        setReactions((prev) => [...prev, payload]);
+        setTimeout(() => {
+          setReactions((prev) => prev.filter((r) => r.id !== payload.id));
+        }, 2800);
+      } else if (type === "clear_chat") {
+        setChatMessages([]);
+      } else if (type === "moderation_event" && payload) {
+        const { targetIdentity, action } = payload;
+        if (targetIdentity === guest.name) {
+          if (action === "mute") {
+            setIsMutedByMod(true);
+            setIsMuted(true);
+          } else if (action === "unmute") {
+            setIsMutedByMod(false);
+          } else if (action === "kick" || action === "ban") {
+            setKickedNotice(
+              action === "ban"
+                ? "You have been banned from this junction by the moderator."
+                : "You were kicked from this junction by the moderator."
+            );
+          }
         }
+      } else if (type === "room_ended") {
+        setKickedNotice("This junction was ended by the moderator.");
       }
-    } else if (type === "room_ended") {
-      setKickedNotice("This junction was ended by the moderator.");
+    } catch (err) {
+      console.error("Error processing room message", err);
     }
   }, [guest.name]);
 
@@ -639,8 +658,9 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
           connect={true}
           audio={!isMuted && !isMutedByMod}
           video={false}
-          style={{ display: 'none' }}
+          style={{ display: 'contents' }}
         >
+          <RoomConnectionOverlay />
           <LiveKitDataSync onMessage={onRoomMessage} publishRef={liveKitPublishRef} onSpeakingChange={setActiveSpeakers} isMuted={isMuted} isMutedByMod={isMutedByMod} isDeafened={isDeafened} />
           {participants
             .filter((p) => p.identity !== guest.name)

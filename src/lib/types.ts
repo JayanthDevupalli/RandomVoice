@@ -37,6 +37,7 @@ export interface GuestUser {
   name: string;
   avatar: string;
   color: string;
+  profileChangesLeft?: number;
 }
 
 export interface RoomChatMessage {

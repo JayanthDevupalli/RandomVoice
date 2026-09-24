@@ -5,6 +5,7 @@ import {
   removeParticipantFromJunction,
   moderateParticipant,
   deleteJunction,
+  updateParticipantProfile,
 } from "@/lib/junctions-store";
 
 export const revalidate = 5;
@@ -34,7 +35,7 @@ export async function POST(
 ) {
   try {
     const body = await request.json();
-    const { action, participant, identity, moderatorIdentity, targetIdentity, modAction, isLocked } = body;
+    const { action, participant, identity, moderatorIdentity, targetIdentity, modAction, isLocked, updates } = body;
 
     if (action === "join") {
       if (!participant) {
@@ -63,6 +64,17 @@ export async function POST(
       const result = await moderateParticipant(params.id, moderatorIdentity, targetIdentity, modAction);
       if (!result.success) {
         return NextResponse.json({ error: result.error }, { status: 403 });
+      }
+      return NextResponse.json({ junction: result.junction, success: true });
+    }
+
+    if (action === "update_participant") {
+      if (!identity || !updates) {
+        return NextResponse.json({ error: "Missing identity or updates" }, { status: 400 });
+      }
+      const result = await updateParticipantProfile(params.id, identity, updates);
+      if (!result.success) {
+        return NextResponse.json({ error: result.error }, { status: 400 });
       }
       return NextResponse.json({ junction: result.junction, success: true });
     }

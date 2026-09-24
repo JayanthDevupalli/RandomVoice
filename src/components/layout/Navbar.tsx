@@ -4,7 +4,9 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { GuestUser } from "@/lib/types";
 import { UserAvatar } from "../ui/UserAvatar";
-import { Radio, Users, LogOut } from "lucide-react";
+import { GuestProfileModal } from "../lobby/GuestProfileModal";
+import { Radio, Users, LogOut, Edit3 } from "lucide-react";
+import { useState } from "react";
 
 interface NavbarProps {
   guest: GuestUser | null;
@@ -13,8 +15,9 @@ interface NavbarProps {
   totalOnline?: number;
 }
 
-export function Navbar({ guest, onClearProfile, totalOnline = 24 }: NavbarProps) {
+export function Navbar({ guest, onUpdateGuest, onClearProfile, totalOnline = 24 }: NavbarProps) {
   const router = useRouter();
+  const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
 
   const handleClearProfile = () => {
     if (onClearProfile) {
@@ -24,8 +27,9 @@ export function Navbar({ guest, onClearProfile, totalOnline = 24 }: NavbarProps)
   };
 
   return (
-    <header className="sticky top-0 z-40 w-full border-b border-white/5 bg-background/50 backdrop-blur-xl">
-      <div className="max-w-7xl mx-auto px-3 sm:px-6 h-14 sm:h-16 flex items-center justify-between">
+    <>
+      <header className="sticky top-0 z-40 w-full border-b border-white/5 bg-background/50 backdrop-blur-xl">
+        <div className="max-w-7xl mx-auto px-3 sm:px-6 h-14 sm:h-16 flex items-center justify-between">
         {/* Brand Logo */}
         <Link href="/junctions" className="flex items-center gap-2.5 group opacity-90 hover:opacity-100 transition-opacity">
           <Radio className="w-4 h-4 sm:w-5 sm:h-5 text-indigo-400" strokeWidth={1.5} />
@@ -57,6 +61,15 @@ export function Navbar({ guest, onClearProfile, totalOnline = 24 }: NavbarProps)
                 </span>
               </div>
 
+              {/* Edit Profile Button */}
+              <button
+                onClick={() => setIsProfileModalOpen(true)}
+                className="flex items-center justify-center w-9 h-9 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 hover:text-indigo-300 hover:bg-indigo-500/20 transition-all cursor-pointer active:scale-95 shadow-sm shrink-0"
+                title="Edit Profile"
+              >
+                <Edit3 size={14} />
+              </button>
+
               {/* Reset Identity Button */}
               <button
                 onClick={handleClearProfile}
@@ -68,7 +81,19 @@ export function Navbar({ guest, onClearProfile, totalOnline = 24 }: NavbarProps)
             </div>
           )}
         </div>
-      </div>
-    </header>
+        </div>
+      </header>
+
+      {guest && (
+        <GuestProfileModal
+          isOpen={isProfileModalOpen}
+          onClose={() => setIsProfileModalOpen(false)}
+          guest={guest}
+          onUpdate={(updates) => {
+            if (onUpdateGuest) onUpdateGuest(updates);
+          }}
+        />
+      )}
+    </>
   );
 }
