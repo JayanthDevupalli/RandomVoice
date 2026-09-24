@@ -7,6 +7,8 @@ import {
   deleteJunction,
 } from "@/lib/junctions-store";
 
+export const revalidate = 5;
+
 export async function GET(
   request: NextRequest,
   { params }: { params: { id: string } }

@@ -84,7 +84,7 @@ export default function JunctionsPage() {
       
       await fetchJunctions(abortController.signal);
       setIsLoading(false);
-      timeoutId = setTimeout(poll, 4000);
+      timeoutId = setTimeout(poll, 15000);
     };
 
     poll();

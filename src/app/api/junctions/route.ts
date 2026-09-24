@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAllJunctions, createJunction } from "@/lib/junctions-store";
 
+export const revalidate = 10;
+
 export async function GET(request: NextRequest) {
   try {
 

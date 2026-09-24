@@ -91,11 +91,17 @@ function ParticipantAudio({ identity, volume, isDeafened }: { identity: string; 
 function LiveKitDataSync({
   onMessage,
   publishRef,
-  onSpeakingChange
+  onSpeakingChange,
+  isMuted,
+  isMutedByMod,
+  isDeafened
 }: {
   onMessage: (data: any) => void;
   publishRef: React.MutableRefObject<((data: any) => void) | null>;
   onSpeakingChange: (speakingIdentities: string[]) => void;
+  isMuted: boolean;
+  isMutedByMod: boolean;
+  isDeafened: boolean;
 }) {
   const room = useRoomContext();
   const { localParticipant } = useLocalParticipant();
@@ -143,6 +149,12 @@ function LiveKitDataSync({
       publishRef.current = null;
     };
   }, [localParticipant, publishRef]);
+
+  useEffect(() => {
+    if (localParticipant) {
+      localParticipant.setMicrophoneEnabled(!(isMuted || isMutedByMod || isDeafened)).catch(console.error);
+    }
+  }, [localParticipant, isMuted, isMutedByMod, isDeafened]);
 
   return null;
 }
@@ -199,15 +211,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
     };
   }, [mediaStream]);
 
-  // Handle Mute toggle on media stream tracks
-  useEffect(() => {
-    if (mediaStream) {
-      const active = !isMuted && !isDeafened && !isMutedByMod;
-      mediaStream.getAudioTracks().forEach((t) => {
-        t.enabled = active;
-      });
-    }
-  }, [isMuted, isDeafened, isMutedByMod, mediaStream]);
+
 
   const onRoomMessage = useCallback((data: any) => {
     const { type, payload } = data;
@@ -394,14 +398,14 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
         }
       } finally {
         if (isMounted) {
-          pollTimeoutId = setTimeout(pollJunction, 3500);
+          pollTimeoutId = setTimeout(pollJunction, 15000);
         }
       }
     };
 
     loadAndJoinJunction().then((success) => {
       if (success && isMounted) {
-        pollTimeoutId = setTimeout(pollJunction, 3500);
+        pollTimeoutId = setTimeout(pollJunction, 15000);
       }
     });
 
@@ -637,7 +641,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
           video={false}
           style={{ display: 'none' }}
         >
-          <LiveKitDataSync onMessage={onRoomMessage} publishRef={liveKitPublishRef} onSpeakingChange={setActiveSpeakers} />
+          <LiveKitDataSync onMessage={onRoomMessage} publishRef={liveKitPublishRef} onSpeakingChange={setActiveSpeakers} isMuted={isMuted} isMutedByMod={isMutedByMod} isDeafened={isDeafened} />
           {participants
             .filter((p) => p.identity !== guest.name)
             .map((p) => (
