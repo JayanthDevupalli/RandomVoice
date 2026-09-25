@@ -33,6 +33,7 @@ interface ParticipantRow {
   is_speaking: boolean;
   joined_at: number;
   connection_quality: string;
+  reported_by: string[];
 }
 
 function rowToJunction(row: JunctionRow, participants: ParticipantRow[]): Junction {
@@ -68,6 +69,7 @@ function rowToParticipant(row: ParticipantRow): JunctionParticipant {
     isSpeaking: row.is_speaking,
     joinedAt: row.joined_at,
     connectionQuality: row.connection_quality as JunctionParticipant["connectionQuality"],
+    reportedBy: row.reported_by || [],
   };
 }
 
@@ -144,6 +146,7 @@ export async function createJunction(data: {
   tags: string[];
   maxParticipants?: number;
   creator: { name: string; avatar: string; color: string };
+  isLocked?: boolean;
 }): Promise<Junction> {
   const creatorIdentity = data.creator.name;
   const junctionId = "junc_" + Date.now().toString(36) + "_" + Math.random().toString(36).substring(2, 6);
@@ -164,6 +167,7 @@ export async function createJunction(data: {
     is_custom: true,
     creator_id: creatorIdentity,
     moderator_identity: "",
+    is_locked: data.isLocked || false,
     banned_identities: [],
   });
 
@@ -191,6 +195,15 @@ export async function addParticipantToJunction(
     return { success: false, error: "You have been banned from this junction by the moderator." };
   }
 
+  // 0% Ghosting Guarantee: PREEMPTIVELY remove this identity from ALL OTHER junctions before joining this one.
+  // This ensures that even if the browser crashes or disconnects without sending a 'leave' beacon,
+  // the user's identity is strictly limited to 1 active seat across the entire platform.
+  await supabase
+    .from("junction_participants")
+    .delete()
+    .eq("identity", participant.identity)
+    .neq("junction_id", junctionId);
+
   const isAlreadyPresent = junction.participants.some((p) => p.identity === participant.identity);
 
   if (junction.currentCount >= junction.maxParticipants && !isAlreadyPresent) {
@@ -199,25 +212,29 @@ export async function addParticipantToJunction(
 
   const isCreator = participant.identity === junction.creatorId;
 
+  if (junction.isLocked && !isAlreadyPresent && !isCreator) {
+    return { success: false, error: "This room is locked by the moderator." };
+  }
+
   // Dynamic host assignment: first person to join an empty room becomes the moderator/host.
   // This applies whether moderator_identity is empty (new room) or the current moderator has left.
   const isRoomEmpty = junction.participants.length === 0;
-  const currentModPresent = junction.participants.some((p) => p.identity === junction.moderatorIdentity);
+  const currentModPresent = junction.participants.some((p) => p.role === "moderator");
   
   // A participant becomes a mod if they are the creator, OR if they were already the mod, OR if there's no mod present.
   let isMod = false;
   if (isCreator) {
     isMod = true;
-  } else if (participant.identity === junction.moderatorIdentity) {
+  } else if (isAlreadyPresent && junction.participants.find(p => p.identity === participant.identity)?.role === "moderator") {
     isMod = true;
   } else if (isRoomEmpty || !currentModPresent) {
     isMod = true;
   }
 
   if (!isAlreadyPresent) {
-    // Insert new participant
-    await supabase.from("junction_participants").insert({
-      id: participant.id,
+    // Insert new participant securely
+    const { error: insertError } = await supabase.from("junction_participants").insert({
+      id: "p_" + Date.now() + "_" + Math.random().toString(36).substr(2, 5), // Securely generate fresh session ID
       junction_id: junctionId,
       identity: participant.identity,
       name: participant.name,
@@ -230,27 +247,25 @@ export async function addParticipantToJunction(
       joined_at: Date.now(),
       connection_quality: participant.connectionQuality || "excellent",
     });
+
+    if (insertError) {
+      console.error("Failed to insert participant:", insertError);
+      return { success: false, error: "Database error: " + insertError.message };
+    }
+
     await syncCount(junctionId);
 
-    // If this participant became the host, update the junction's moderator_identity
+    // If this participant became the host, update the junction's moderator_identity for legacy/fallback
     if (isMod && junction.moderatorIdentity !== participant.identity) {
       await supabase
         .from("junctions")
         .update({ moderator_identity: participant.identity })
         .eq("id", junctionId);
-        
-      if (junction.moderatorIdentity) {
-        await supabase
-          .from("junction_participants")
-          .update({ role: "speaker" })
-          .eq("junction_id", junctionId)
-          .eq("identity", junction.moderatorIdentity);
-      }
     }
   } else {
     // Update existing participant (re-joining)
     const existing = junction.participants.find((p) => p.identity === participant.identity);
-    await supabase
+    const { error: updateError } = await supabase
       .from("junction_participants")
       .update({
         name: participant.name,
@@ -261,20 +276,16 @@ export async function addParticipantToJunction(
       .eq("junction_id", junctionId)
       .eq("identity", participant.identity);
 
-    // If re-joining and should become host, update moderator_identity and demote old host if necessary
+    if (updateError) {
+      console.error("Failed to update participant:", updateError);
+    }
+
+    // If re-joining and should become host, update moderator_identity
     if (isMod && junction.moderatorIdentity !== participant.identity) {
       await supabase
         .from("junctions")
         .update({ moderator_identity: participant.identity })
         .eq("id", junctionId);
-        
-      if (junction.moderatorIdentity) {
-        await supabase
-          .from("junction_participants")
-          .update({ role: "speaker" })
-          .eq("junction_id", junctionId)
-          .eq("identity", junction.moderatorIdentity);
-      }
     }
   }
 
@@ -292,11 +303,12 @@ export async function removeParticipantFromJunction(junctionId: string, identity
 
   await syncCount(junctionId);
 
-  // Check if moderator left — if so, promote oldest remaining
+  // Check if any moderators are left — if none, promote oldest remaining
   const junction = await fetchJunctionWithParticipants(junctionId);
   if (!junction) return;
 
-  if (junction.moderatorIdentity === identity && junction.participants.length > 0) {
+  const modsLeft = junction.participants.filter(p => p.role === "moderator");
+  if (modsLeft.length === 0 && junction.participants.length > 0) {
     const newMod = junction.participants[0];
     await supabase
       .from("junction_participants")
@@ -315,7 +327,7 @@ export async function moderateParticipant(
   junctionId: string,
   moderatorIdentity: string,
   targetIdentity: string,
-  action: "mute" | "unmute" | "kick" | "ban" | "transfer_mod"
+  action: "mute" | "unmute" | "kick" | "ban" | "promote_mod" | "demote_mod"
 ): Promise<{ success: boolean; error?: string; junction?: Junction }> {
   const junction = await fetchJunctionWithParticipants(junctionId);
 
@@ -323,8 +335,9 @@ export async function moderateParticipant(
     return { success: false, error: "Junction not found" };
   }
 
-  if (junction.moderatorIdentity !== moderatorIdentity) {
-    return { success: false, error: "Unauthorized: Only the Moderator can perform moderation actions" };
+  const modParticipant = junction.participants.find(p => p.identity === moderatorIdentity);
+  if (!modParticipant || modParticipant.role !== "moderator") {
+    return { success: false, error: "Unauthorized: Only Moderators can perform moderation actions" };
   }
 
   if (action === "mute") {
@@ -364,30 +377,35 @@ export async function moderateParticipant(
       .eq("junction_id", junctionId)
       .eq("identity", targetIdentity);
     await syncCount(junctionId);
-  } else if (action === "transfer_mod") {
+  } else if (action === "promote_mod") {
     const target = junction.participants.find((p) => p.identity === targetIdentity);
     if (!target) {
       return { success: false, error: "Target participant not in junction" };
     }
 
-    // Demote current moderator
-    await supabase
-      .from("junction_participants")
-      .update({ role: "speaker" })
-      .eq("junction_id", junctionId)
-      .eq("identity", moderatorIdentity);
-
-    // Promote new moderator
+    // Promote new co-moderator
     await supabase
       .from("junction_participants")
       .update({ role: "moderator" })
       .eq("junction_id", junctionId)
       .eq("identity", targetIdentity);
+      
+  } else if (action === "demote_mod") {
+    const target = junction.participants.find((p) => p.identity === targetIdentity);
+    if (!target) {
+      return { success: false, error: "Target participant not in junction" };
+    }
+
+    // Cannot demote yourself (must leave or have another mod do it to ensure 1 mod exists)
+    if (targetIdentity === moderatorIdentity) {
+      return { success: false, error: "Cannot demote yourself" };
+    }
 
     await supabase
-      .from("junctions")
-      .update({ moderator_identity: targetIdentity })
-      .eq("id", junctionId);
+      .from("junction_participants")
+      .update({ role: "speaker" })
+      .eq("junction_id", junctionId)
+      .eq("identity", targetIdentity);
   }
 
   const updated = await fetchJunctionWithParticipants(junctionId);
@@ -425,6 +443,79 @@ export async function updateParticipantProfile(
   return { success: true, junction: updated };
 }
 
+export async function updateJunctionDetails(
+  junctionId: string,
+  moderatorIdentity: string,
+  updates: { name?: string; maxParticipants?: number }
+): Promise<{ success: boolean; error?: string; junction?: Junction }> {
+  const { data: jRow, error: jError } = await supabase
+    .from("junctions")
+    .select("moderator_identity")
+    .eq("id", junctionId)
+    .single();
+
+  if (jError || !jRow) return { success: false, error: "Junction not found" };
+
+  const modParticipant = await supabase
+    .from("junction_participants")
+    .select("role")
+    .eq("junction_id", junctionId)
+    .eq("identity", moderatorIdentity)
+    .single();
+
+  if (!modParticipant.data || modParticipant.data.role !== "moderator") {
+    return { success: false, error: "Only moderators can edit junction details" };
+  }
+
+  const updateData: any = {};
+  if (updates.name !== undefined) updateData.name = updates.name;
+  if (updates.maxParticipants !== undefined) updateData.max_participants = updates.maxParticipants;
+
+  if (Object.keys(updateData).length === 0) return { success: true };
+
+  const { error: updateError } = await supabase
+    .from("junctions")
+    .update(updateData)
+    .eq("id", junctionId);
+
+  if (updateError) {
+    console.error("Failed to update junction details:", updateError);
+    return { success: false, error: "Database update failed" };
+  }
+
+  const updatedJunction = await fetchJunctionWithParticipants(junctionId);
+  return { success: true, junction: updatedJunction };
+}
+
+
+export async function toggleRoomLock(
+  junctionId: string,
+  moderatorIdentity: string,
+  isLocked: boolean
+): Promise<{ success: boolean; error?: string; junction?: Junction }> {
+  const junction = await fetchJunctionWithParticipants(junctionId);
+
+  if (!junction) {
+    return { success: false, error: "Junction not found" };
+  }
+
+  const modParticipant = junction.participants.find(p => p.identity === moderatorIdentity);
+  if (!modParticipant || modParticipant.role !== "moderator") {
+    return { success: false, error: "Unauthorized: Only Moderators can lock/unlock the room" };
+  }
+
+  if (!junction.isCustom) {
+    return { success: false, error: "Cannot lock a public station" };
+  }
+
+  await supabase
+    .from("junctions")
+    .update({ is_locked: isLocked })
+    .eq("id", junctionId);
+
+  const updated = await fetchJunctionWithParticipants(junctionId);
+  return { success: true, junction: updated };
+}
 
 export async function deleteJunction(junctionId: string, creatorId?: string): Promise<boolean> {
   if (creatorId) {
@@ -440,5 +531,70 @@ export async function deleteJunction(junctionId: string, creatorId?: string): Pr
     .eq("id", junctionId);
 
   return !error;
+}
+
+export async function reportParticipant(
+  junctionId: string,
+  reporterIdentity: string,
+  targetIdentity: string
+): Promise<{ success: boolean; error?: string; junction?: Junction; banned?: boolean }> {
+  const junction = await fetchJunctionWithParticipants(junctionId);
+  if (!junction) {
+    return { success: false, error: "Junction not found" };
+  }
+
+  const target = junction.participants.find((p) => p.identity === targetIdentity);
+  if (!target) {
+    return { success: false, error: "Target participant not in junction" };
+  }
+
+  if (target.identity === reporterIdentity) {
+    return { success: false, error: "Cannot report yourself" };
+  }
+
+  const currentReports = target.reportedBy || [];
+  if (currentReports.includes(reporterIdentity)) {
+    return { success: false, error: "You have already reported this user" };
+  }
+
+  const newReports = [...currentReports, reporterIdentity];
+
+  // Require majority of the room to ban (min 2 reports for small rooms)
+  // 3-4 people: 2 reports
+  // 5-6 people: 3 reports
+  // 7 people: 4 reports
+  const requiredReports = Math.max(2, Math.ceil(junction.participants.length / 2));
+
+  if (newReports.length >= requiredReports) {
+    // Execute ban directly without requiring a specific moderator auth
+    const currentBanned = junction.bannedIdentities || [];
+    if (!currentBanned.includes(targetIdentity)) {
+      currentBanned.push(targetIdentity);
+    }
+    await supabase
+      .from("junctions")
+      .update({ banned_identities: currentBanned })
+      .eq("id", junctionId);
+
+    await supabase
+      .from("junction_participants")
+      .delete()
+      .eq("junction_id", junctionId)
+      .eq("identity", targetIdentity);
+      
+    await syncCount(junctionId);
+
+    const updated = await fetchJunctionWithParticipants(junctionId);
+    return { success: true, junction: updated, banned: true };
+  } else {
+    await supabase
+      .from("junction_participants")
+      .update({ reported_by: newReports })
+      .eq("junction_id", junctionId)
+      .eq("identity", targetIdentity);
+      
+    const updated = await fetchJunctionWithParticipants(junctionId);
+    return { success: true, junction: updated, banned: false };
+  }
 }
 

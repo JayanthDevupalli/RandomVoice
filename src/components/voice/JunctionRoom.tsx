@@ -204,6 +204,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatMessages, setChatMessages] = useState<RoomChatMessage[]>([]);
   const [inputMessage, setInputMessage] = useState("");
+  const [privateRecipient, setPrivateRecipient] = useState<string>("all");
   const [reactions, setReactions] = useState<VectorReaction[]>([]);
   const [isReactionsOpen, setIsReactionsOpen] = useState(false);
   const [isCopied, setIsCopied] = useState(false);
@@ -212,7 +213,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
   const liveKitPublishRef = useRef<((data: any) => void) | null>(null);
 
   // Web Audio Visualizer for local mic
-  const isCurrentModerator = junction?.moderatorIdentity === guest.name;
+  const isCurrentModerator = junction?.participants.some(p => p.identity === guest.name && p.role === "moderator") || false;
 
   // We no longer manually request getUserMedia here because LiveKitRoom with audio={true}
   // will capture the microphone automatically. Double capturing causes ducking and conflicts.
@@ -233,6 +234,9 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
       const { type, payload } = data;
 
       if (type === "chat_message" && payload) {
+        if (payload.targetIdentity && payload.targetIdentity !== guest.name && payload.senderName !== guest.name) {
+          return;
+        }
         setChatMessages((prev) => {
           if (prev.some((m) => m.id === payload.id)) return prev;
           return [...prev, payload];
@@ -306,7 +310,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
               name: guest.name,
               avatar: guest.avatar || "zap",
               color: guest.color || "#6366F1",
-              role: data.junction.moderatorIdentity === guest.name ? "moderator" : "speaker",
+              role: "speaker", // Backend will override if user should be moderator
               isMuted: false,
               isMutedByMod: false,
               isSpeaking: false,
@@ -339,7 +343,9 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
 
         // Fetch LiveKit Token
         try {
-          const role = data.junction.moderatorIdentity === guest.name ? "moderator" : "speaker";
+          // Find actual role assigned by the server
+          const myParticipant = joinData.junction?.participants.find((p: any) => p.identity === guest.name);
+          const role = myParticipant?.role || "speaker";
           const lkRes = await fetch(
             `/api/token?room=${junctionId}&username=${encodeURIComponent(
               guest.name
@@ -466,7 +472,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
   // Handle Moderator Operations
   const handleModerateParticipant = async (
     targetIdentity: string,
-    modAction: "mute" | "unmute" | "kick" | "ban" | "transfer_mod"
+    modAction: "mute" | "unmute" | "kick" | "ban" | "promote_mod" | "demote_mod"
   ) => {
     if (!isCurrentModerator) return;
 
@@ -500,11 +506,82 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
     setActiveModMenuParticipant(null);
   };
 
+  const handleReportParticipant = async (targetIdentity: string) => {
+    setActiveModMenuParticipant(null);
+    try {
+      const res = await fetch(`/api/junctions/${junctionId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "report",
+          identity: guest.name,
+          targetIdentity,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        console.error(data.error || "Failed to report user");
+        alert(data.error || "Failed to report user");
+      } else {
+        alert("User has been reported.");
+        if (data.banned) {
+          liveKitPublishRef.current?.({
+            type: "moderation_event",
+            payload: { targetIdentity, action: "ban" },
+          });
+        }
+      }
+    } catch (err) {
+      console.error("Report error:", err);
+    }
+  };
 
 
   const handleClearChat = () => {
     setChatMessages([]);
     liveKitPublishRef.current?.({ type: "clear_chat" });
+  };
+
+  const handleUpdateJunctionDetails = async (updates: { name?: string; maxParticipants?: number }) => {
+    try {
+      const res = await fetch(`/api/junctions/${junctionId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "update_details",
+          moderatorIdentity: guest.name,
+          updates,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      setJunction(data.junction);
+      if (liveKitPublishRef.current) {
+        liveKitPublishRef.current({ type: "JUNCTION_UPDATE", updates });
+      }
+    } catch (err: any) {
+      throw new Error(err.message);
+    }
+  };
+
+  const handleToggleRoomLock = async (isLocked: boolean) => {
+    if (!isCurrentModerator) return;
+    const res = await fetch(`/api/junctions/${junctionId}/lock`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        moderatorIdentity: guest.name,
+        isLocked,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || "Failed to toggle room lock");
+    }
+    if (data.junction) {
+      setJunction(data.junction);
+    }
+    // Optionally we can broadcast a lock event if we want a global toast, but it's not strictly necessary.
   };
 
   const handleEndJunction = async () => {
@@ -535,6 +612,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
       text: inputMessage.trim(),
       timestamp: Date.now(),
       isModerator: isCurrentModerator,
+      targetIdentity: privateRecipient !== "all" ? privateRecipient : undefined,
     };
 
     setChatMessages((prev) => [...prev, newMsg]);
@@ -649,7 +727,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
   const SEAT_SLOTS = Array.from({ length: junction?.maxParticipants || 7 });
 
   return (
-    <div className="relative min-h-[calc(100vh-3.5rem)] sm:min-h-[calc(100vh-4rem)] flex flex-col justify-between pb-24 overflow-hidden bg-background">
+    <div className="relative h-[calc(100vh-3.5rem)] sm:h-[calc(100vh-4rem)] flex flex-col lg:flex-row overflow-hidden bg-background">
       {/* LiveKit Hidden Audio Manager */}
       {liveKitToken && liveKitUrl && (
         <LiveKitRoom
@@ -708,10 +786,12 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
         })}
       </div>
 
-      {/* Top Room Banner - Minimalist */}
+      {/* Main Left Content Area */}
+      <div className={`flex-1 flex flex-col pb-24 lg:pb-0 overflow-y-auto overflow-x-hidden transition-all duration-300`}>
+        {/* Top Room Banner - Minimalist */}
       <div className="w-full max-w-7xl mx-auto px-4 sm:px-6 pt-4 sm:pt-6">
-        <div className="flex items-center justify-between gap-3">
-          <div className="min-w-0 flex flex-col items-start">
+        <div className="flex items-start sm:items-center justify-between gap-2 sm:gap-4">
+          <div className="min-w-0 flex flex-col items-start pr-2">
             {/* Yapclub Brand Logo / Back Button */}
             <button
               onClick={() => router.push('/junctions')}
@@ -722,20 +802,20 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
                 yap<span className="text-indigo-500 group-hover:text-indigo-400">club</span>
               </span>
             </button>
-            <h1 className="text-base sm:text-lg font-bold text-white truncate drop-shadow-md leading-tight">
+            <h1 className="text-base sm:text-lg font-bold text-white truncate w-full drop-shadow-md leading-tight">
               {junction?.name || "Junction Room"}
             </h1>
-            <p className="text-[11px] sm:text-xs text-slate-400 truncate mt-0.5 drop-shadow-sm">
+            <p className="text-[10px] sm:text-[11px] text-slate-400 truncate w-full mt-0.5 drop-shadow-sm">
               {junction?.description || "Voice Hangout"}
             </p>
           </div>
 
-          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+          <div className="flex flex-wrap sm:flex-nowrap items-center justify-end gap-1.5 sm:gap-2 shrink-0 pt-1 sm:pt-0 max-w-[140px] sm:max-w-none">
             {/* Moderator Deck Trigger */}
             {isCurrentModerator && (
               <button
                 onClick={() => setIsModDeckOpen(true)}
-                className="flex items-center justify-center p-2 sm:px-3 sm:py-1.5 rounded-full sm:rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-400 text-xs font-bold transition-all cursor-pointer shadow-sm active:scale-95 border border-amber-500/30"
+                className="flex items-center justify-center p-2 sm:px-3 sm:py-1.5 rounded-full sm:rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-400 text-xs font-bold transition-all cursor-pointer shadow-sm active:scale-95 border border-amber-500/30 shrink-0"
                 title="Mod Deck"
               >
                 <Shield size={14} className="sm:w-3.5 sm:h-3.5 shrink-0" />
@@ -743,14 +823,14 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
               </button>
             )}
 
-            <div className="flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-full sm:rounded-xl bg-black/40 backdrop-blur-md border border-white/10 text-[11px] sm:text-xs font-semibold text-white shadow-sm">
+            <div className="flex items-center justify-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-full sm:rounded-xl bg-black/40 backdrop-blur-md border border-white/10 text-[10px] sm:text-xs font-semibold text-white shadow-sm shrink-0">
               <Users size={12} className="opacity-80 shrink-0" />
               <span>{participants.length}/{junction?.maxParticipants || 7}</span>
             </div>
 
             <button
               onClick={handleCopyLink}
-              className="flex items-center justify-center p-2 sm:px-3 sm:py-1.5 rounded-full sm:rounded-xl bg-black/40 backdrop-blur-md border border-white/10 hover:bg-white/10 text-white transition-colors cursor-pointer shadow-sm"
+              className="flex items-center justify-center p-2 sm:px-3 sm:py-1.5 rounded-full sm:rounded-xl bg-black/40 backdrop-blur-md border border-white/10 hover:bg-white/10 text-white transition-colors cursor-pointer shadow-sm shrink-0"
               title="Copy Room Link"
             >
               <Share2 size={13} className="sm:w-3.5 sm:h-3.5 shrink-0" />
@@ -760,13 +840,23 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
         </div>
       </div>
 
-      {/* Main 7-Seat Stage Grid */}
-      <div className="w-full max-w-5xl mx-auto px-3 sm:px-6 my-auto py-3 sm:py-6">
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2.5 sm:gap-4 justify-center">
+      {/* Dynamic Seat Stage Grid */}
+      <div className={`w-full mx-auto px-3 sm:px-6 my-auto py-3 sm:py-6 ${
+        SEAT_SLOTS.length <= 2 ? "max-w-3xl" : 
+        SEAT_SLOTS.length <= 4 ? "max-w-4xl" : 
+        SEAT_SLOTS.length <= 6 ? "max-w-5xl" : 
+        "max-w-6xl"
+      }`}>
+        <div className={`grid gap-3 sm:gap-5 justify-center mx-auto ${
+          SEAT_SLOTS.length <= 2 ? "grid-cols-1 sm:grid-cols-2" : 
+          SEAT_SLOTS.length <= 4 ? "grid-cols-2 sm:grid-cols-2 lg:grid-cols-2" : 
+          SEAT_SLOTS.length <= 6 ? "grid-cols-2 sm:grid-cols-3" : 
+          "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4"
+        }`}>
           {SEAT_SLOTS.map((_, index) => {
             const participant = participants[index];
             const isLocal = participant?.identity === guest.name;
-            const isParticipantMod = participant?.identity === junction?.moderatorIdentity;
+            const isParticipantMod = participant?.role === "moderator";
             const volume = participant ? participantVolumes[participant.identity] ?? 100 : 100;
             const isMenuOpen = activeModMenuParticipant === participant?.identity;
 
@@ -778,71 +868,97 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
                 <div
                   key={participant.id || participant.identity || index}
                   style={!isParticipantMod ? { borderColor: `${participant.color}40`, backgroundColor: `${participant.color}08` } : {}}
-                  className={`relative min-h-[140px] sm:min-h-[215px] p-2.5 sm:p-4 rounded-[1.5rem] flex flex-col justify-between items-center text-center transition-all duration-300 ${isParticipantMod
+                  className={`relative p-3 sm:p-5 rounded-[1.5rem] flex flex-col justify-between items-center text-center transition-all duration-300 ${
+                    SEAT_SLOTS.length <= 2 ? "min-h-[180px] sm:min-h-[300px]" :
+                    SEAT_SLOTS.length <= 4 ? "min-h-[160px] sm:min-h-[260px]" :
+                    "min-h-[140px] sm:min-h-[215px]"
+                  } ${
+                    isParticipantMod
                       ? "border border-amber-500/30 bg-[#12131A]/80 backdrop-blur-md"
                       : "border border-white/5 bg-[#12131A]/40 backdrop-blur-md"
-                    }`}
+                  }`}
                 >
                   {/* Top Card Header */}
-                  <div className="w-full flex items-center justify-between">
-                    <span className="px-2 py-0.5 rounded-md bg-white/5 border border-white/10 text-[10px] font-mono font-semibold text-slate-400">
+                  <div className="w-full flex items-start sm:items-center justify-between gap-1">
+                    <span className="px-1.5 sm:px-2 py-0.5 rounded-md bg-white/5 border border-white/10 text-[9px] sm:text-[10px] font-mono font-semibold text-slate-400 shrink-0">
                       SEAT #{index + 1}
                     </span>
 
-                    <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-1 shrink-0 flex-wrap justify-end">
                       {isParticipantMod && (
-                        <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-amber-500/20 text-amber-300 text-[9px] font-bold border border-amber-500/30">
-                          <Crown size={9} />
-                          MOD
+                        <span className="flex items-center justify-center p-0.5 sm:p-1 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 shadow-sm shrink-0" title="Moderator">
+                          <Crown size={10} className="fill-amber-400 sm:w-3 sm:h-3" />
                         </span>
                       )}
                       {isLocal && (
-                        <span className="px-1.5 py-0.5 rounded-md bg-indigo-600/25 text-indigo-300 text-[9px] font-bold border border-indigo-500/40">
+                        <span className="px-1 sm:px-1.5 py-0.5 rounded-md bg-indigo-600/25 text-indigo-300 text-[8px] sm:text-[9px] font-bold border border-indigo-500/40 shrink-0">
                           YOU
                         </span>
                       )}
 
-                      {/* Quick Mod Action Trigger for Current Moderator */}
-                      {isCurrentModerator && !isLocal && (
+                      {/* Action Trigger for Participants */}
+                      {!isLocal && (
                         <div className="relative">
                           <button
-                            onClick={() =>
-                              setActiveModMenuParticipant(isMenuOpen ? null : participant.identity)
-                            }
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setActiveModMenuParticipant(isMenuOpen ? null : participant.identity);
+                            }}
                             className="p-1 rounded-md text-slate-500 dark:text-slate-400 hover:text-white hover:bg-slate-200 dark:bg-slate-800 transition-colors cursor-pointer"
-                            title="Moderator Actions"
+                            title="Participant Actions"
                           >
                             <MoreVertical size={13} />
                           </button>
 
-                          {/* Quick Mod Dropdown */}
+                          {/* Action Dropdown */}
                           {isMenuOpen && (
                             <div className="absolute top-6 right-0 w-36 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 shadow-2xl p-1 z-30 flex flex-col gap-0.5 text-left animate-fadeIn">
+                              {isCurrentModerator && (
+                                <>
+                                  <button
+                                    onClick={() =>
+                                      handleModerateParticipant(
+                                        participant.identity,
+                                        participant.isMutedByMod ? "unmute" : "mute"
+                                      )
+                                    }
+                                    className="px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-slate-800 dark:text-slate-200 hover:bg-slate-200 dark:bg-slate-800 flex items-center gap-1.5 transition-colors cursor-pointer"
+                                  >
+                                    {participant.isMutedByMod ? <Mic size={12} /> : <MicOff size={12} className="text-rose-400" />}
+                                    <span>{participant.isMutedByMod ? "Unmute" : "Force Mute"}</span>
+                                  </button>
+                                  <button
+                                    onClick={() => handleModerateParticipant(participant.identity, "kick")}
+                                    className="px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-rose-400 hover:bg-rose-950/60 flex items-center gap-1.5 transition-colors cursor-pointer"
+                                  >
+                                    <PhoneOff size={12} />
+                                    <span>Kick User</span>
+                                  </button>
+                                  {participant.role === "moderator" ? (
+                                    <button
+                                      onClick={() => handleModerateParticipant(participant.identity, "demote_mod")}
+                                      className="px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-rose-400 hover:bg-rose-950/60 flex items-center gap-1.5 transition-colors cursor-pointer"
+                                    >
+                                      <Shield size={12} />
+                                      <span>Remove Mod</span>
+                                    </button>
+                                  ) : (
+                                    <button
+                                      onClick={() => handleModerateParticipant(participant.identity, "promote_mod")}
+                                      className="px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-amber-400 hover:bg-amber-950/60 flex items-center gap-1.5 transition-colors cursor-pointer"
+                                    >
+                                      <Crown size={12} />
+                                      <span>Make Co-Mod</span>
+                                    </button>
+                                  )}
+                                </>
+                              )}
                               <button
-                                onClick={() =>
-                                  handleModerateParticipant(
-                                    participant.identity,
-                                    participant.isMutedByMod ? "unmute" : "mute"
-                                  )
-                                }
-                                className="px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-slate-800 dark:text-slate-200 hover:bg-slate-200 dark:bg-slate-800 flex items-center gap-1.5 transition-colors cursor-pointer"
+                                onClick={() => handleReportParticipant(participant.identity)}
+                                className="px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-rose-500 hover:bg-rose-950/60 flex items-center gap-1.5 transition-colors cursor-pointer"
                               >
-                                {participant.isMutedByMod ? <Mic size={12} /> : <MicOff size={12} className="text-rose-400" />}
-                                <span>{participant.isMutedByMod ? "Unmute" : "Force Mute"}</span>
-                              </button>
-                              <button
-                                onClick={() => handleModerateParticipant(participant.identity, "kick")}
-                                className="px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-rose-400 hover:bg-rose-950/60 flex items-center gap-1.5 transition-colors cursor-pointer"
-                              >
-                                <PhoneOff size={12} />
-                                <span>Kick User</span>
-                              </button>
-                              <button
-                                onClick={() => handleModerateParticipant(participant.identity, "transfer_mod")}
-                                className="px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-amber-400 hover:bg-amber-950/60 flex items-center gap-1.5 transition-colors cursor-pointer"
-                              >
-                                <Crown size={12} />
-                                <span>Pass Mod</span>
+                                <AlertCircle size={12} />
+                                <span>Report User</span>
                               </button>
                             </div>
                           )}
@@ -927,7 +1043,11 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
               <div
                 key={`vacant-${index}`}
                 onClick={handleCopyLink}
-                className="relative min-h-[140px] sm:min-h-[215px] p-2.5 sm:p-4 rounded-[1.5rem] border border-dashed border-white/20 hover:border-indigo-500/50 bg-white/5 hover:bg-white/10 backdrop-blur-md flex flex-col justify-between items-center text-center group cursor-pointer transition-all active:scale-95"
+                className={`relative p-3 sm:p-5 rounded-[1.5rem] border border-dashed border-white/20 hover:border-indigo-500/50 bg-white/5 hover:bg-white/10 backdrop-blur-md flex flex-col justify-between items-center text-center group cursor-pointer transition-all active:scale-95 ${
+                  SEAT_SLOTS.length <= 2 ? "min-h-[180px] sm:min-h-[300px]" :
+                  SEAT_SLOTS.length <= 4 ? "min-h-[160px] sm:min-h-[260px]" :
+                  "min-h-[140px] sm:min-h-[215px]"
+                }`}
               >
                 {/* Top Header */}
                 <div className="w-full flex items-center justify-between">
@@ -957,71 +1077,118 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
             );
           })}
         </div>
+        </div>
       </div>
 
-      {/* Slide-out In-Room Whisper Chat Drawer */}
-      {isChatOpen && (
-        <div className="fixed inset-x-0 bottom-20 top-14 sm:inset-x-auto sm:right-0 sm:top-16 sm:bottom-24 sm:w-96 z-40 bg-[#12131A]/90 backdrop-blur-3xl border-t sm:border-t-0 sm:border-l border-white/5 flex flex-col shadow-2xl animate-fadeIn">
-          <div className="p-3 sm:p-4 border-b border-white/5 flex items-center justify-between">
+      {/* Slide-out In-Room Whisper Chat Drawer / Right Sidebar */}
+      <div 
+        className={`
+          fixed inset-x-0 bottom-20 top-14 sm:inset-x-auto sm:right-0 sm:top-16 sm:bottom-24 z-40 bg-[#0B0C10]/95 backdrop-blur-3xl border-t sm:border-t-0 sm:border-l border-white/5 flex flex-col shadow-2xl transition-all duration-300
+          ${isChatOpen ? "translate-y-0 translate-x-0 opacity-100" : "translate-y-[150%] sm:translate-y-0 sm:translate-x-full opacity-0 pointer-events-none"}
+          lg:relative lg:inset-auto lg:z-10 lg:w-[380px] xl:w-[420px] lg:bg-white/[0.02] lg:border-l lg:border-white/5 lg:shadow-none lg:transform-none lg:transition-none lg:opacity-100 lg:pointer-events-auto
+          ${!isChatOpen && 'lg:hidden'}
+        `}
+      >
+        <div className="p-3 sm:p-4 border-b border-white/5 flex flex-col gap-3 shrink-0">
+          <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <MessageSquare size={16} className="text-indigo-400" />
-              <span className="font-bold text-sm text-white">In-Room Whisper Chat</span>
+              <div className="w-8 h-8 rounded-full bg-indigo-500/20 flex items-center justify-center text-indigo-400">
+                <MessageSquare size={16} />
+              </div>
+              <span className="font-bold text-sm text-white tracking-tight">Whisper Chat</span>
             </div>
             <button
               onClick={() => setIsChatOpen(false)}
-              className="p-1.5 rounded-lg text-slate-500 dark:text-slate-400 hover:text-white hover:bg-slate-200 dark:bg-slate-800 cursor-pointer"
+              className="p-2 rounded-full text-slate-500 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
             >
               <X size={16} />
             </button>
           </div>
-
-          {/* Chat Messages Log */}
-          <div className="flex-1 p-3 sm:p-4 overflow-y-auto space-y-2.5">
-            {chatMessages.map((msg) => (
-              <div key={msg.id} className="flex items-start gap-2">
-                <UserAvatar avatar={msg.senderAvatar} color={msg.senderColor} size="sm" />
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-semibold text-slate-800 dark:text-slate-200">{msg.senderName}</span>
-                    {msg.isModerator && (
-                      <span className="px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 text-[8px] font-bold border border-amber-500/30">
-                        MOD
-                      </span>
-                    )}
-                    <span className="text-[9px] text-slate-500">
-                      {new Date(msg.timestamp).toLocaleTimeString([], {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
-                    </span>
-                  </div>
-                  <p className="text-xs text-slate-300 bg-white/5 p-2 rounded-lg mt-0.5 break-words border border-white/10">
-                    {msg.text}
-                  </p>
-                </div>
-              </div>
-            ))}
+          
+          {/* Private Message Recipient Selector */}
+          <div className="flex items-center gap-2 bg-black/20 rounded-xl p-1 border border-white/5 shadow-inner">
+            <span className="text-[10px] font-bold text-slate-500 pl-2 uppercase tracking-wider">To:</span>
+            <select
+              value={privateRecipient}
+              onChange={(e) => setPrivateRecipient(e.target.value)}
+              className="flex-1 bg-transparent text-[11px] text-slate-200 font-semibold focus:outline-none py-1.5 px-1 cursor-pointer appearance-none [&>option]:bg-slate-900"
+            >
+              <option value="all">Everyone in Room</option>
+              {participants
+                .filter(p => p.identity !== guest.name)
+                .map(p => (
+                  <option key={p.identity} value={p.identity}>{p.name} (Whisper)</option>
+                ))
+              }
+            </select>
           </div>
+        </div>
 
-          {/* Chat Input */}
-          <form onSubmit={handleSendMessage} className="p-2.5 sm:p-3 border-t border-white/5 flex gap-2 bg-[#0B0C10]/80">
+        {/* Chat Messages Log */}
+        <div className="flex-1 p-3 sm:p-4 overflow-y-auto space-y-3 scroll-smooth">
+          {chatMessages.length === 0 ? (
+             <div className="flex flex-col items-center justify-center h-full text-slate-500 gap-2 opacity-60">
+               <MessageSquare size={32} />
+               <span className="text-xs font-medium">Say hello to the room!</span>
+             </div>
+          ) : chatMessages.map((msg) => {
+            const isMe = msg.senderName === guest.name;
+            const isPrivate = msg.targetIdentity !== undefined;
+
+            return (
+              <div key={msg.id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
+                {!isMe && (
+                  <div className="flex items-center gap-1.5 mb-1 pl-1">
+                    <span className="text-[10px] font-semibold text-slate-400">{msg.senderName}</span>
+                    {msg.isModerator && (
+                      <Crown size={10} className="text-amber-400" />
+                    )}
+                  </div>
+                )}
+                
+                <div className={`
+                  relative max-w-[85%] px-4 py-2.5 text-[13px] sm:text-sm shadow-md backdrop-blur-md leading-relaxed tracking-wide
+                  ${isMe 
+                    ? (isPrivate ? 'rounded-[1.5rem] rounded-br-[4px] text-white bg-gradient-to-br from-fuchsia-600 to-purple-600 shadow-purple-500/20' : 'rounded-[1.5rem] rounded-br-[4px] text-white bg-gradient-to-br from-blue-500 to-indigo-600 shadow-blue-500/20')
+                    : (isPrivate ? 'rounded-[1.5rem] rounded-bl-[4px] border border-white/5 bg-[#2A1635]/90 text-purple-100 border-purple-500/30' : 'rounded-[1.5rem] rounded-bl-[4px] border border-white/5 bg-[#25262B]/90 text-slate-100')
+                  }
+                `}>
+                  {isPrivate && (
+                     <div className={`text-[9px] font-black uppercase tracking-widest mb-1 flex items-center gap-1 opacity-80 ${isMe ? 'text-purple-200' : 'text-purple-300'}`}>
+                       <Shield size={10} /> Whisper
+                     </div>
+                  )}
+                  {msg.text}
+                </div>
+                <span className="text-[9px] text-slate-600 mt-1 px-1">
+                  {new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Chat Input */}
+        <form onSubmit={handleSendMessage} className="p-3 sm:p-4 border-t border-white/5 bg-[#0B0C10]/40 shrink-0">
+          <div className="relative flex items-center bg-white/5 border border-white/10 rounded-full p-1 focus-within:border-blue-500/50 focus-within:bg-white/10 transition-all shadow-inner">
             <input
               type="text"
               value={inputMessage}
               onChange={(e) => setInputMessage(e.target.value)}
-              placeholder="Send quick text..."
+              placeholder={privateRecipient !== "all" ? "Send a secret whisper..." : "iMessage room..."}
               maxLength={200}
-              className="flex-1 px-3 py-2 rounded-xl bg-white/5 border border-white/10 text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 text-xs"
+              className="flex-1 bg-transparent px-4 py-2 text-xs sm:text-sm text-white placeholder-slate-500 focus:outline-none"
             />
             <button
               type="submit"
-              className="p-2 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer"
+              disabled={!inputMessage.trim()}
+              className="w-8 h-8 rounded-full flex items-center justify-center bg-blue-500 text-white disabled:opacity-0 disabled:scale-75 hover:bg-blue-400 transition-all duration-300 cursor-pointer shadow-lg shadow-blue-500/20"
             >
-              <Send size={14} />
+              <Send size={14} className={inputMessage.trim() ? "translate-x-0.5 -translate-y-0.5 transition-transform" : ""} />
             </button>
-          </form>
-        </div>
-      )}
+          </div>
+        </form>
+      </div>
 
       {/* Floating Bottom Audio Dock Controls */}
       <div className="fixed bottom-3 sm:bottom-4 inset-x-0 z-50 flex justify-center px-3 pointer-events-none">
@@ -1145,9 +1312,10 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
           junction={junction}
           currentModerator={guest.name}
           onModerateParticipant={handleModerateParticipant}
-
           onClearChat={handleClearChat}
           onEndJunction={handleEndJunction}
+          onToggleRoomLock={handleToggleRoomLock}
+          onUpdateJunctionDetails={handleUpdateJunctionDetails}
         />
       )}
     </div>

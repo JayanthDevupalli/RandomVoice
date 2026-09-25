@@ -20,8 +20,19 @@ import {
   Coffee,
   Music,
   Languages,
-  Mic
+  Mic,
+  MapPin,
+  Compass
 } from "lucide-react";
+
+const PUBLIC_FILTERS = [
+  { id: "all", label: "All Regions", icon: Radio },
+  { id: "South", label: "South", icon: MapPin },
+  { id: "North", label: "North", icon: MapPin },
+  { id: "East", label: "East", icon: MapPin },
+  { id: "West", label: "West", icon: MapPin },
+  { id: "Central", label: "Central", icon: Compass },
+];
 
 const CATEGORY_FILTERS = [
   { id: "all", label: "All Junctions", icon: Radio },
@@ -50,6 +61,7 @@ export default function JunctionsPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState<"public" | "private">("public");
 
   // If not onboarded, redirect to /
   useEffect(() => {
@@ -107,14 +119,23 @@ export default function JunctionsPage() {
     setJunctions((prev) => prev.filter((j) => j.id !== id));
   };
 
-  const filteredJunctions = junctions.filter((j) => {
-    const matchesCategory = selectedCategory === "all" || j.category === selectedCategory;
-    const matchesSearch =
-      j.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      j.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      j.tags.some((t) => t.toLowerCase().includes(searchQuery.toLowerCase()));
-    return matchesCategory && matchesSearch;
-  });
+  const filteredJunctions = junctions
+    .filter((j) => {
+      const matchesCategory =
+        activeTab === "private"
+          ? selectedCategory === "all" || j.category === selectedCategory
+          : selectedCategory === "all" || j.tags.includes(selectedCategory); // public filters match region tag
+          
+      const matchesSearch =
+        j.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        j.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        j.tags.some((t) => t.toLowerCase().includes(searchQuery.toLowerCase()));
+      return matchesCategory && matchesSearch;
+    })
+    .sort((a, b) => b.currentCount - a.currentCount);
+
+  const publicStations = filteredJunctions.filter((j) => !j.isCustom);
+  const userRooms = filteredJunctions.filter((j) => j.isCustom && !j.isLocked);
 
   if (!isLoaded || !guest) {
     return (
@@ -128,26 +149,80 @@ export default function JunctionsPage() {
   }
 
   return (
-    <PullToRefresh onRefresh={handleManualRefresh}>
+    <>
+      <PullToRefresh onRefresh={handleManualRefresh}>
       <div className="min-h-screen flex flex-col text-slate-200">
         <Navbar guest={guest} onUpdateGuest={updateGuest} onClearProfile={clearProfile} totalOnline={totalOnline} />
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 py-3 sm:py-6">
         {/* Sleek Top Header & Action Row */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 sm:mb-6">
-          <div className="flex items-center gap-2 justify-between w-full sm:w-auto">
-            <h1 className="text-xl sm:text-2xl font-light text-white tracking-tight">
-              Live <span className="font-medium bg-clip-text text-transparent bg-gradient-to-r from-indigo-300 to-purple-300">Rooms</span>
-            </h1>
-            <span className="text-[11px] px-2.5 py-1 rounded-full bg-white/5 text-slate-300 font-medium border border-white/10 backdrop-blur-md">
-              {filteredJunctions.length} <span className="hidden sm:inline">Active</span>
-            </span>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3 sm:mb-5">
+          <div className="flex items-center justify-between w-full sm:w-auto">
+            <div className="flex items-center gap-2">
+              <h1 className="text-xl sm:text-2xl font-light text-white tracking-tight">
+                Live <span className="font-medium bg-clip-text text-transparent bg-gradient-to-r from-indigo-300 to-purple-300">Rooms</span>
+              </h1>
+              <span className="text-[11px] px-2.5 py-1 rounded-full bg-white/5 text-slate-300 font-medium border border-white/10 backdrop-blur-md">
+                {filteredJunctions.length} <span className="hidden sm:inline">Active</span>
+              </span>
+            </div>
+
+            {/* Mobile Tab Switcher */}
+            <div className="flex sm:hidden bg-white/5 border border-white/10 rounded-xl p-1 ml-2">
+              <button
+                onClick={() => {
+                  setActiveTab("public");
+                  setSelectedCategory("all");
+                }}
+                className={`px-3 py-1 rounded-lg text-[11px] font-medium transition-all ${
+                  activeTab === "public" ? "bg-white/10 text-white shadow-sm" : "text-slate-400"
+                }`}
+              >
+                Public
+              </button>
+              <button
+                onClick={() => {
+                  setActiveTab("private");
+                  setSelectedCategory("all");
+                }}
+                className={`px-3 py-1 rounded-lg text-[11px] font-medium transition-all ${
+                  activeTab === "private" ? "bg-white/10 text-white shadow-sm" : "text-slate-400"
+                }`}
+              >
+                Private
+              </button>
+            </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:flex sm:flex-row sm:items-center gap-2 w-full sm:w-auto">
+          <div className="hidden sm:flex sm:flex-row sm:items-center gap-2 w-full sm:w-auto">
+            <div className="flex bg-white/5 border border-white/10 rounded-xl p-1 mr-0 sm:mr-4">
+              <button
+                onClick={() => {
+                  setActiveTab("public");
+                  setSelectedCategory("all");
+                }}
+                className={`flex-1 sm:flex-none px-4 py-1.5 rounded-lg text-[13px] font-medium transition-all ${
+                  activeTab === "public" ? "bg-white/10 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                Public
+              </button>
+              <button
+                onClick={() => {
+                  setActiveTab("private");
+                  setSelectedCategory("all");
+                }}
+                className={`flex-1 sm:flex-none px-4 py-1.5 rounded-lg text-[13px] font-medium transition-all ${
+                  activeTab === "private" ? "bg-white/10 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                Private
+              </button>
+            </div>
+            
             <button
               onClick={() => setIsCreateModalOpen(true)}
-              className="w-full px-3 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-[13px] shadow-md shadow-indigo-600/20 transition-all flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 whitespace-nowrap"
+              className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-[13px] shadow-md shadow-indigo-600/20 transition-all flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 whitespace-nowrap"
             >
               <Plus size={16} />
               <span>Create Room</span>
@@ -171,7 +246,7 @@ export default function JunctionsPage() {
 
           {/* Quick Category Chips */}
           <div className="flex items-center gap-1.5 overflow-x-auto pb-2 sm:pb-0 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
-            {CATEGORY_FILTERS.map((cat) => {
+            {(activeTab === "public" ? PUBLIC_FILTERS : CATEGORY_FILTERS).map((cat) => {
               const Icon = cat.icon;
               const isSelected = selectedCategory === cat.id;
               return (
@@ -192,50 +267,59 @@ export default function JunctionsPage() {
           </div>
         </div>
 
-        {/* Junction Cards Grid or Clean Minimalist Empty State */}
+        {/* Active Tab Content */}
         {isLoading ? (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4 mb-8">
             {[1, 2, 3].map((i) => (
               <div key={i} className="h-40 sm:h-48 rounded-[1.5rem] bg-[#12131A]/40 border border-white/5 animate-pulse p-4" />
             ))}
           </div>
-        ) : junctions.length === 0 ? (
-          /* Clean Minimalist Empty State */
-          <div className="p-8 sm:p-12 rounded-[2rem] bg-[#12131A]/60 backdrop-blur-xl border border-white/5 text-center max-w-md mx-auto my-10 shadow-2xl">
-            <div className="w-14 h-14 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center mx-auto mb-4 text-indigo-400">
-              <Radio className="w-6 h-6" />
-            </div>
-            <h3 className="text-lg sm:text-xl font-medium text-white mb-2">No Active Rooms</h3>
-            <p className="text-sm text-slate-400 mb-6 font-light">
-              Start a 7-seat voice room for gaming, tech, or late night chill.
-            </p>
-            <button
-              onClick={() => setIsCreateModalOpen(true)}
-              className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow-md shadow-indigo-600/20 transition-all flex items-center justify-center gap-1.5 mx-auto cursor-pointer active:scale-95"
-            >
-              <Plus size={15} />
-              <span>Create First Junction</span>
-            </button>
-          </div>
-        ) : filteredJunctions.length > 0 ? (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
-            {filteredJunctions.map((junction) => (
-              <JunctionCard key={junction.id} junction={junction} onDelete={handleJunctionDeleted} />
-            ))}
+        ) : activeTab === "public" ? (
+          <div>
+            {publicStations.length > 0 ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
+                {publicStations.map((junction) => (
+                  <JunctionCard key={junction.id} junction={junction} onDelete={handleJunctionDeleted} />
+                ))}
+              </div>
+            ) : (
+              <div className="p-8 sm:p-12 rounded-[2rem] bg-[#12131A]/60 backdrop-blur-xl border border-white/5 text-center max-w-md mx-auto shadow-2xl">
+                <div className="w-14 h-14 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center mx-auto mb-4 text-indigo-400">
+                  <Radio className="w-6 h-6" />
+                </div>
+                <h3 className="text-lg sm:text-xl font-medium text-white mb-2">No Public Stations</h3>
+                <p className="text-sm text-slate-400 font-light">
+                  Public stations will appear here.
+                </p>
+              </div>
+            )}
           </div>
         ) : (
-          <div className="p-8 sm:p-10 rounded-[2rem] bg-[#12131A]/60 backdrop-blur-xl border border-white/5 text-center max-w-md mx-auto my-10">
-            <Search size={20} className="text-slate-500 mx-auto mb-3" />
-            <h3 className="text-base sm:text-lg font-medium text-white mb-1">No matching rooms</h3>
-            <p className="text-sm font-light text-slate-400 mb-5">
-              No results for &quot;{searchQuery}&quot;.
-            </p>
-            <button
-              onClick={() => setIsCreateModalOpen(true)}
-              className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition-colors cursor-pointer"
-            >
-              Create New
-            </button>
+          <div>
+            {userRooms.length > 0 ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
+                {userRooms.map((junction) => (
+                  <JunctionCard key={junction.id} junction={junction} onDelete={handleJunctionDeleted} />
+                ))}
+              </div>
+            ) : (
+              <div className="p-8 sm:p-12 rounded-[2rem] bg-[#12131A]/60 backdrop-blur-xl border border-white/5 text-center max-w-md mx-auto shadow-2xl">
+                <div className="w-14 h-14 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center mx-auto mb-4 text-indigo-400">
+                  <Radio className="w-6 h-6" />
+                </div>
+                <h3 className="text-lg sm:text-xl font-medium text-white mb-2">No Private Rooms</h3>
+                <p className="text-sm text-slate-400 mb-6 font-light">
+                  Start a custom voice room.
+                </p>
+                <button
+                  onClick={() => setIsCreateModalOpen(true)}
+                  className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow-md shadow-indigo-600/20 transition-all flex items-center justify-center gap-1.5 mx-auto cursor-pointer active:scale-95"
+                >
+                  <Plus size={15} />
+                  <span>Create Room</span>
+                </button>
+              </div>
+            )}
           </div>
         )}
       </main>
@@ -245,14 +329,26 @@ export default function JunctionsPage() {
         <p>YapClub • Proudly Made in India 🇮🇳 • Pure Voice, Zero Lag</p>
       </footer>
 
-      {/* Create Junction Modal */}
-      <CreateJunctionModal
-        isOpen={isCreateModalOpen}
-        onClose={() => setIsCreateModalOpen(false)}
-        guest={guest}
-        onCreated={handleJunctionCreated}
-      />
       </div>
     </PullToRefresh>
+
+    {/* Mobile FAB for Create Room */}
+    {activeTab === "private" && (
+      <button
+        onClick={() => setIsCreateModalOpen(true)}
+        className="sm:hidden fixed bottom-6 right-5 z-40 w-14 h-14 rounded-full bg-indigo-600 text-white flex items-center justify-center shadow-lg shadow-indigo-600/30 active:scale-95 transition-transform"
+      >
+        <Plus size={24} />
+      </button>
+    )}
+
+    {/* Create Junction Modal */}
+    <CreateJunctionModal
+      isOpen={isCreateModalOpen}
+      onClose={() => setIsCreateModalOpen(false)}
+      guest={guest}
+      onCreated={handleJunctionCreated}
+    />
+    </>
   );
 }

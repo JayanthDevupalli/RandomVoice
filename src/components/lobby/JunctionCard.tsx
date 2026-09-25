@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { Junction } from "@/lib/types";
 import { UserAvatar } from "../ui/UserAvatar";
-import { Users, Gamepad2, Cpu, Coffee, Music, Sparkles, Languages, Dices, Mic, ArrowRight, Lock, Trash2, Loader2 } from "lucide-react";
+import { Users, Gamepad2, Cpu, Coffee, Music, Sparkles, Languages, Dices, Mic, ArrowRight, Lock, Trash2, Loader2, MapPin } from "lucide-react";
 import Link from "next/link";
 import { useGuestUser } from "@/hooks/useGuestUser";
 
@@ -39,8 +39,11 @@ export const JunctionCard = React.memo(
     const { guest } = useGuestUser();
     const [isDeleting, setIsDeleting] = useState(false);
 
-  const IconComponent = CATEGORY_ICONS[junction.category] || Mic;
+  const IconComponent = !junction.isCustom ? MapPin : (CATEGORY_ICONS[junction.category] || Mic);
   const colorScheme = CATEGORY_COLORS[junction.category] || CATEGORY_COLORS.casual;
+  const displayLabel = !junction.isCustom 
+    ? (["North", "South", "East", "West", "Central"].find(r => junction.tags?.includes(r)) || "Public")
+    : junction.category;
   const isFull = junction.currentCount >= junction.maxParticipants;
   const isLocked = junction.isLocked;
   const seats = Array.from({ length: junction.maxParticipants || 7 });
@@ -71,7 +74,7 @@ export const JunctionCard = React.memo(
         <div className="flex items-center justify-between gap-2 mb-3">
           <div className={`flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-semibold uppercase tracking-wider border ${colorScheme.bg} ${colorScheme.text} ${colorScheme.border}`}>
             <IconComponent size={12} />
-            <span>{junction.category}</span>
+            <span>{displayLabel}</span>
           </div>
 
           <div className="flex items-center gap-1.5">
@@ -111,7 +114,7 @@ export const JunctionCard = React.memo(
           <div className="flex flex-wrap items-center gap-1.5 justify-start">
             {seats.map((_, index) => {
               const participant = junction.participants[index];
-              const isMod = participant?.identity === junction.moderatorIdentity;
+              const isMod = participant?.role === "moderator";
               if (participant) {
                 return (
                   <div

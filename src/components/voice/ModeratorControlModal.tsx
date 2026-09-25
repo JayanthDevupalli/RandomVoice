@@ -25,9 +25,11 @@ interface ModeratorControlModalProps {
   onClose: () => void;
   junction: Junction;
   currentModerator: string;
-  onModerateParticipant: (targetIdentity: string, action: "mute" | "unmute" | "kick" | "ban" | "transfer_mod") => Promise<void>;
+  onModerateParticipant: (targetIdentity: string, action: "mute" | "unmute" | "kick" | "ban" | "promote_mod" | "demote_mod") => Promise<void>;
   onClearChat: () => void;
   onEndJunction: () => Promise<void>;
+  onToggleRoomLock: (isLocked: boolean) => Promise<void>;
+  onUpdateJunctionDetails?: (updates: { name?: string; maxParticipants?: number }) => Promise<void>;
 }
 
 export function ModeratorControlModal({
@@ -38,11 +40,18 @@ export function ModeratorControlModal({
   onModerateParticipant,
   onClearChat,
   onEndJunction,
+  onToggleRoomLock,
+  onUpdateJunctionDetails,
 }: ModeratorControlModalProps) {
   const [activeTab, setActiveTab] = useState<"participants" | "room">("participants");
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [confirmEnd, setConfirmEnd] = useState(false);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
+  
+  // Edit Details State
+  const [editName, setEditName] = useState(junction.name);
+  const [editCapacity, setEditCapacity] = useState(junction.maxParticipants);
+  const [isEditing, setIsEditing] = useState(false);
 
   if (!isOpen) return null;
 
@@ -53,7 +62,7 @@ export function ModeratorControlModal({
 
   const handleParticipantAction = async (
     targetIdentity: string,
-    action: "mute" | "unmute" | "kick" | "ban" | "transfer_mod",
+    action: "mute" | "unmute" | "kick" | "ban" | "promote_mod" | "demote_mod",
     label: string
   ) => {
     try {
@@ -75,6 +84,32 @@ export function ModeratorControlModal({
       await onEndJunction();
     } catch (err: any) {
       showNotice(err.message || "Failed to end junction");
+      setActionLoading(null);
+    }
+  };
+
+  const handleToggleLock = async () => {
+    try {
+      setActionLoading("lock");
+      await onToggleRoomLock(!junction.isLocked);
+      showNotice(junction.isLocked ? "Room Unlocked" : "Room Locked");
+    } catch (err: any) {
+      showNotice(err.message || "Failed to toggle room lock");
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleSaveDetails = async () => {
+    if (!onUpdateJunctionDetails) return;
+    try {
+      setActionLoading("update_details");
+      await onUpdateJunctionDetails({ name: editName, maxParticipants: editCapacity });
+      showNotice("Room details updated");
+      setIsEditing(false);
+    } catch (err: any) {
+      showNotice(err.message || "Failed to update details");
+    } finally {
       setActionLoading(null);
     }
   };
@@ -146,7 +181,7 @@ export function ModeratorControlModal({
         {activeTab === "participants" && (
           <div className="flex-1 overflow-y-auto space-y-2.5 pr-1 no-scrollbar">
             {junction.participants.map((p, idx) => {
-              const isMod = p.identity === junction.moderatorIdentity;
+              const isMod = p.role === "moderator";
               const isSelf = p.identity === currentModerator;
 
               return (
@@ -162,9 +197,8 @@ export function ModeratorControlModal({
                           {p.name}
                         </span>
                         {isMod && (
-                          <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-bold text-[9px] border border-amber-500/30">
-                            <Crown size={10} />
-                            MOD
+                          <span className="flex items-center justify-center p-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 shadow-sm" title="Moderator">
+                            <Crown size={12} className="fill-amber-400" />
                           </span>
                         )}
                         {isSelf && (
@@ -233,18 +267,32 @@ export function ModeratorControlModal({
                         <span className="text-[10px] font-bold">Ban</span>
                       </button>
 
-                      {/* Transfer Mod */}
-                      <button
-                        onClick={() =>
-                          handleParticipantAction(p.identity, "transfer_mod", "Moderator Transferred")
-                        }
-                        disabled={actionLoading !== null}
-                        className="p-1.5 px-2 rounded-lg bg-amber-500/20 hover:bg-amber-500/40 text-amber-300 border border-amber-500/30 text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer"
-                        title="Transfer Moderator Role"
-                      >
-                        <Crown size={13} />
-                        <span className="text-[10px] font-bold">Make Mod</span>
-                      </button>
+                      {/* Co-Mod / Demote Mod */}
+                      {isMod ? (
+                        <button
+                          onClick={() =>
+                            handleParticipantAction(p.identity, "demote_mod", "Moderator Removed")
+                          }
+                          disabled={actionLoading !== null}
+                          className="p-1.5 px-2 rounded-lg bg-rose-500/20 hover:bg-rose-500/40 text-rose-300 border border-rose-500/30 text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer"
+                          title="Remove Moderator Role"
+                        >
+                          <Shield size={13} />
+                          <span className="text-[10px] font-bold">Remove Mod</span>
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() =>
+                            handleParticipantAction(p.identity, "promote_mod", "Moderator Added")
+                          }
+                          disabled={actionLoading !== null}
+                          className="p-1.5 px-2 rounded-lg bg-amber-500/20 hover:bg-amber-500/40 text-amber-300 border border-amber-500/30 text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer"
+                          title="Promote to Moderator"
+                        >
+                          <Crown size={13} />
+                          <span className="text-[10px] font-bold">Make Mod</span>
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>
@@ -280,6 +328,123 @@ export function ModeratorControlModal({
                 Clear
               </button>
             </div>
+
+            {/* Room Lock Toggle (For Private Rooms Only) */}
+            {junction.isCustom && (
+              <div className="p-4 rounded-2xl bg-slate-100 dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className={`p-2.5 rounded-xl ${junction.isLocked ? "bg-amber-500/20 text-amber-500" : "bg-emerald-500/20 text-emerald-500"}`}>
+                    <Shield size={18} />
+                  </div>
+                  <div>
+                    <div className="text-xs sm:text-sm font-bold text-white">
+                      {junction.isLocked ? "Room is Locked" : "Room is Open"}
+                    </div>
+                    <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                      {junction.isLocked ? "No new participants can join this room." : "Anyone with the link can join."}
+                    </div>
+                  </div>
+                </div>
+
+                <button
+                  onClick={handleToggleLock}
+                  disabled={actionLoading !== null}
+                  className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-colors cursor-pointer ${
+                    junction.isLocked 
+                      ? "bg-slate-200 dark:bg-slate-800 hover:bg-slate-700 text-slate-800 dark:text-slate-200"
+                      : "bg-amber-500/20 hover:bg-amber-500/40 text-amber-500 border border-amber-500/30"
+                  }`}
+                >
+                  {junction.isLocked ? "Unlock Room" : "Lock Room"}
+                </button>
+              </div>
+            )}
+
+            {/* Edit Junction Details (Creator Only) */}
+            {currentModerator === junction.creatorId && (
+              <div className="p-3.5 sm:p-4 rounded-2xl bg-slate-100 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="text-xs font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                    <Settings size={14} className="text-indigo-400" />
+                    <span>Room Details</span>
+                  </div>
+                  {!isEditing ? (
+                    <button
+                      onClick={() => setIsEditing(true)}
+                      className="text-[11px] font-semibold text-indigo-400 hover:text-indigo-300"
+                    >
+                      Edit
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => {
+                        setIsEditing(false);
+                        setEditName(junction.name);
+                        setEditCapacity(junction.maxParticipants);
+                      }}
+                      className="text-[11px] font-semibold text-slate-500 hover:text-slate-400"
+                    >
+                      Cancel
+                    </button>
+                  )}
+                </div>
+
+                {!isEditing ? (
+                  <div className="space-y-2">
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold mb-0.5">Name</div>
+                      <div className="text-sm text-white font-medium">{junction.name}</div>
+                    </div>
+                    {junction.isCustom && (
+                      <div>
+                        <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold mb-0.5">Capacity</div>
+                        <div className="text-sm text-white font-medium">{junction.maxParticipants} Seats</div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <div>
+                      <label className="text-[10px] uppercase tracking-wider text-slate-500 font-bold mb-1 block">Name</label>
+                      <input 
+                        type="text" 
+                        value={editName}
+                        onChange={(e) => setEditName(e.target.value)}
+                        className="w-full bg-black/20 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
+                        maxLength={45}
+                      />
+                    </div>
+                    {junction.isCustom && (
+                      <div>
+                        <label className="text-[10px] uppercase tracking-wider text-slate-500 font-bold mb-1 block">Capacity</label>
+                        <div className="flex gap-2">
+                          {[2, 4, 6, 8].map((size) => (
+                            <button
+                              key={size}
+                              onClick={() => setEditCapacity(size)}
+                              className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                                editCapacity === size 
+                                  ? "bg-indigo-600/30 text-indigo-300 border border-indigo-500/30" 
+                                  : "bg-black/20 text-slate-400 border border-white/5 hover:bg-white/5"
+                              }`}
+                            >
+                              {size}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <button
+                      onClick={handleSaveDetails}
+                      disabled={actionLoading === "update_details"}
+                      className="w-full mt-2 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-colors disabled:opacity-50"
+                    >
+                      {actionLoading === "update_details" ? "Saving..." : "Save Changes"}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Banned Users Summary */}
             {junction.bannedIdentities && junction.bannedIdentities.length > 0 && (

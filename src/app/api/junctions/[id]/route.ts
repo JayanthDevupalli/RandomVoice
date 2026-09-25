@@ -6,6 +6,8 @@ import {
   moderateParticipant,
   deleteJunction,
   updateParticipantProfile,
+  reportParticipant,
+  updateJunctionDetails,
 } from "@/lib/junctions-store";
 
 export const revalidate = 5;
@@ -79,6 +81,27 @@ export async function POST(
       return NextResponse.json({ junction: result.junction, success: true });
     }
 
+    if (action === "update_details") {
+      if (!moderatorIdentity || !updates) {
+        return NextResponse.json({ error: "Missing required parameters" }, { status: 400 });
+      }
+      const result = await updateJunctionDetails(params.id, moderatorIdentity, updates);
+      if (!result.success) {
+        return NextResponse.json({ error: result.error }, { status: 403 });
+      }
+      return NextResponse.json({ junction: result.junction, success: true });
+    }
+
+    if (action === "report") {
+      if (!identity || !targetIdentity) {
+        return NextResponse.json({ error: "Missing required parameters for reporting" }, { status: 400 });
+      }
+      const result = await reportParticipant(params.id, identity, targetIdentity);
+      if (!result.success) {
+        return NextResponse.json({ error: result.error }, { status: 400 });
+      }
+      return NextResponse.json({ junction: result.junction, banned: result.banned, success: true });
+    }
 
     return NextResponse.json({ error: "Invalid action" }, { status: 400 });
   } catch (error: any) {

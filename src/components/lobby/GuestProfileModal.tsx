@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { GuestUser } from "@/lib/types";
 import { COLOR_PALETTES, generateRandomNickname } from "@/lib/guest-utils";
 import { AVAILABLE_AVATARS, UserAvatar } from "@/components/ui/UserAvatar";
@@ -17,8 +18,13 @@ export function GuestProfileModal({ isOpen, onClose, guest, onUpdate }: GuestPro
   const [name, setName] = useState(guest?.name || "");
   const [selectedAvatar, setSelectedAvatar] = useState(guest?.avatar || "zap");
   const [selectedColor, setSelectedColor] = useState(guest?.color || "#6366F1");
+  const [mounted, setMounted] = useState(false);
 
-  if (!isOpen || !guest) return null;
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  if (!isOpen || !guest || !mounted) return null;
 
   const changesLeft = guest.profileChangesLeft ?? 3;
   const canEdit = changesLeft > 0;
@@ -42,8 +48,8 @@ export function GuestProfileModal({ isOpen, onClose, guest, onUpdate }: GuestPro
     onClose();
   };
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fadeIn">
+  return createPortal(
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fadeIn">
       <div className="relative w-full max-w-md p-5 sm:p-6 rounded-2xl bg-card border border-slate-300 dark:border-slate-700/80 shadow-2xl text-slate-900 dark:text-slate-100 max-h-[90vh] overflow-y-auto">
         <button
           onClick={onClose}
@@ -172,6 +178,7 @@ export function GuestProfileModal({ isOpen, onClose, guest, onUpdate }: GuestPro
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

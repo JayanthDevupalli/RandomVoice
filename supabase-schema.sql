@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS junction_participants (
   is_speaking BOOLEAN DEFAULT false,
   joined_at BIGINT NOT NULL,
   connection_quality TEXT DEFAULT 'excellent',
+  reported_by TEXT[] DEFAULT '{}',
   UNIQUE(junction_id, identity)
 );
 

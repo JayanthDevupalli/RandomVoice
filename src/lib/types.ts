@@ -30,6 +30,7 @@ export interface JunctionParticipant {
   isSpeaking?: boolean;
   joinedAt: number;
   connectionQuality?: 'excellent' | 'good' | 'poor';
+  reportedBy?: string[];
 }
 
 export interface GuestUser {
@@ -49,6 +50,7 @@ export interface RoomChatMessage {
   text: string;
   timestamp: number;
   isModerator?: boolean;
+  targetIdentity?: string; // For private whispering
 }
 
 export interface SoundReaction {
@@ -64,6 +66,7 @@ export type ModerationActionType =
   | 'unmute_participant' 
   | 'kick_participant' 
   | 'ban_participant' 
-  | 'transfer_moderator' 
+  | 'promote_mod' 
+  | 'demote_mod' 
   | 'end_junction';
 
