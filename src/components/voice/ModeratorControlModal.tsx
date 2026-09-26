@@ -24,6 +24,7 @@ interface ModeratorControlModalProps {
   isOpen: boolean;
   onClose: () => void;
   junction: Junction;
+  participants?: JunctionParticipant[];
   currentModerator: string;
   onModerateParticipant: (targetIdentity: string, action: "mute" | "unmute" | "kick" | "ban" | "promote_mod" | "demote_mod") => Promise<void>;
   onClearChat: () => void;
@@ -36,6 +37,7 @@ export function ModeratorControlModal({
   isOpen,
   onClose,
   junction,
+  participants,
   currentModerator,
   onModerateParticipant,
   onClearChat,
@@ -54,6 +56,8 @@ export function ModeratorControlModal({
   const [isEditing, setIsEditing] = useState(false);
 
   if (!isOpen) return null;
+
+  const participantList = (participants && participants.length > 0) ? participants : junction.participants;
 
   const showNotice = (msg: string) => {
     setStatusNotice(msg);
@@ -162,7 +166,7 @@ export function ModeratorControlModal({
             }`}
           >
             <Users size={14} />
-            <span>Participants ({junction.participants.length}/7)</span>
+            <span>Participants ({participantList.length}/7)</span>
           </button>
           <button
             onClick={() => setActiveTab("room")}
@@ -180,7 +184,7 @@ export function ModeratorControlModal({
         {/* Tab 1: Participants List & Controls */}
         {activeTab === "participants" && (
           <div className="flex-1 overflow-y-auto space-y-2.5 pr-1 no-scrollbar">
-            {junction.participants.map((p, idx) => {
+            {participantList.map((p, idx) => {
               const isMod = p.role === "moderator";
               const isSelf = p.identity === currentModerator;
 

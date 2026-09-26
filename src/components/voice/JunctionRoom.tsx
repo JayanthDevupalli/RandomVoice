@@ -82,7 +82,8 @@ function ParticipantAudio({ identity, volume, isDeafened }: { identity: string; 
 
   useEffect(() => {
     if (audioRef.current) {
-      audioRef.current.volume = isDeafened ? 0 : volume / 100;
+      const safeVolume = Math.min(1, Math.max(0, (volume ?? 100) / 100));
+      audioRef.current.volume = isDeafened ? 0 : safeVolume;
     }
   }, [volume, isDeafened]);
 
@@ -254,12 +255,28 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
         setChatMessages([]);
       } else if (type === "moderation_event" && payload) {
         const { targetIdentity, action } = payload;
+
+        // Immediately reflect in room participants state for all users
+        setParticipants((prev) =>
+          prev.map((p) => {
+            if (p.identity === targetIdentity) {
+              if (action === "mute") {
+                return { ...p, isMuted: true, isMutedByMod: true };
+              } else if (action === "unmute") {
+                return { ...p, isMuted: false, isMutedByMod: false };
+              }
+            }
+            return p;
+          })
+        );
+
         if (targetIdentity === guest.name) {
           if (action === "mute") {
             setIsMutedByMod(true);
             setIsMuted(true);
           } else if (action === "unmute") {
             setIsMutedByMod(false);
+            setIsMuted(false);
           } else if (action === "kick" || action === "ban") {
             setKickedNotice(
               action === "ban"
@@ -268,6 +285,13 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
             );
           }
         }
+      } else if (type === "participant_mute_change" && payload) {
+        const { identity: targetId, isMuted: targetMute } = payload;
+        setParticipants((prev) =>
+          prev.map((p) =>
+            p.identity === targetId ? { ...p, isMuted: targetMute } : p
+          )
+        );
       } else if (type === "room_ended") {
         setKickedNotice("This junction was ended by the moderator.");
       }
@@ -281,6 +305,8 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
   kickedNoticeRef.current = kickedNotice;
   const isMutedByModRef = useRef(isMutedByMod);
   isMutedByModRef.current = isMutedByMod;
+  const isMutedRef = useRef(isMuted);
+  isMutedRef.current = isMuted;
 
   const isRealUnmount = useRef(false);
 
@@ -398,8 +424,19 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
             return pollData.junction;
           });
           setParticipants((prev) => {
-            if (JSON.stringify(prev) === JSON.stringify(pollData.junction.participants)) return prev;
-            return pollData.junction.participants || [];
+            const serverParticipants = pollData.junction.participants || [];
+            const updated = serverParticipants.map((sp: JunctionParticipant) => {
+              if (sp.identity === guest.name) {
+                return {
+                  ...sp,
+                  isMuted: isMutedRef.current,
+                  isMutedByMod: isMutedByModRef.current,
+                };
+              }
+              return sp;
+            });
+            if (JSON.stringify(prev) === JSON.stringify(updated)) return prev;
+            return updated;
           });
 
           // Check if user was removed/kicked
@@ -419,6 +456,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
             setIsMuted(true);
           } else if (myParticipant && !myParticipant.isMutedByMod && isMutedByModRef.current) {
             setIsMutedByMod(false);
+            setIsMuted(false);
           }
         }
       } catch (err: any) {
@@ -479,6 +517,20 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
     modAction: "mute" | "unmute" | "kick" | "ban" | "promote_mod" | "demote_mod"
   ) => {
     if (!isCurrentModerator) return;
+
+    // Optimistically update participants state
+    setParticipants((prev) =>
+      prev.map((p) => {
+        if (p.identity === targetIdentity) {
+          if (modAction === "mute") {
+            return { ...p, isMuted: true, isMutedByMod: true };
+          } else if (modAction === "unmute") {
+            return { ...p, isMuted: false, isMutedByMod: false };
+          }
+        }
+        return p;
+      })
+    );
 
     const res = await fetch(`/api/junctions/${junctionId}`, {
       method: "POST",
@@ -669,7 +721,38 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
   };
 
   const handleVolumeChange = (identity: string, vol: number) => {
-    setParticipantVolumes((prev) => ({ ...prev, [identity]: vol }));
+    const clamped = Math.min(100, Math.max(0, vol));
+    setParticipantVolumes((prev) => ({ ...prev, [identity]: clamped }));
+  };
+
+  const handleToggleMic = () => {
+    if (isMutedByMod) return;
+    const nextMuted = !isMuted;
+    setIsMuted(nextMuted);
+
+    // Optimistically update local participant in participants array
+    setParticipants((prev) =>
+      prev.map((p) =>
+        p.identity === guest.name ? { ...p, isMuted: nextMuted } : p
+      )
+    );
+
+    // Broadcast mute change immediately over LiveKit data channel
+    liveKitPublishRef.current?.({
+      type: "participant_mute_change",
+      payload: { identity: guest.name, isMuted: nextMuted },
+    });
+
+    // Persist to database in background
+    fetch(`/api/junctions/${junctionId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "update_participant",
+        identity: guest.name,
+        updates: { isMuted: nextMuted },
+      }),
+    }).catch((err) => console.error("Failed to sync mute state to DB", err));
   };
 
   if (isLoading) {
@@ -866,7 +949,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
 
             if (participant) {
               const speaking = activeSpeakers.includes(participant.identity);
-              const muted = participant.isMuted || participant.isMutedByMod || (isLocal && (isMuted || isMutedByMod));
+              const muted = isLocal ? (isMuted || isMutedByMod) : (participant.isMuted || participant.isMutedByMod);
 
               return (
                 <div
@@ -1027,8 +1110,8 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
                         <input
                           type="range"
                           min="0"
-                          max="150"
-                          value={volume}
+                          max="100"
+                          value={Math.min(100, Math.max(0, volume))}
                           onChange={(e) =>
                             handleVolumeChange(participant.identity, Number(e.target.value))
                           }
@@ -1036,7 +1119,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
                           title={`Volume for ${participant.name}`}
                         />
                         <span className="text-[9px] text-slate-500 dark:text-slate-400 font-mono w-5 text-right">
-                          {volume}%
+                          {Math.min(100, Math.max(0, volume))}%
                         </span>
                       </div>
                     )}
@@ -1202,10 +1285,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
         <div className="pointer-events-auto p-2 rounded-2xl bg-[#12131A]/80 backdrop-blur-2xl border border-white/10 shadow-2xl flex items-center gap-1.5 sm:gap-2.5">
           {/* Mute / Unmute Mic */}
           <button
-            onClick={() => {
-              if (isMutedByMod) return;
-              setIsMuted(!isMuted);
-            }}
+            onClick={handleToggleMic}
             disabled={isMutedByMod}
             className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 sm:py-2.5 rounded-xl font-bold text-xs transition-all shadow-sm cursor-pointer active:scale-95 ${isMutedByMod
                 ? "bg-rose-950 text-rose-400 border border-rose-800 cursor-not-allowed"
@@ -1317,6 +1397,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
           isOpen={isModDeckOpen}
           onClose={() => setIsModDeckOpen(false)}
           junction={junction}
+          participants={participants}
           currentModerator={guest.name}
           onModerateParticipant={handleModerateParticipant}
           onClearChat={handleClearChat}

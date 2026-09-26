@@ -349,7 +349,7 @@ export async function moderateParticipant(
   } else if (action === "unmute") {
     await supabase
       .from("junction_participants")
-      .update({ is_muted_by_mod: false })
+      .update({ is_muted_by_mod: false, is_muted: false })
       .eq("junction_id", junctionId)
       .eq("identity", targetIdentity);
   } else if (action === "kick") {
@@ -416,7 +416,7 @@ export async function moderateParticipant(
 export async function updateParticipantProfile(
   junctionId: string,
   identity: string,
-  updates: { name?: string; avatar?: string; color?: string }
+  updates: { name?: string; avatar?: string; color?: string; isMuted?: boolean }
 ): Promise<{ success: boolean; error?: string; junction?: Junction }> {
   const junction = await fetchJunctionWithParticipants(junctionId);
 
@@ -429,15 +429,19 @@ export async function updateParticipantProfile(
     return { success: false, error: "Participant not found" };
   }
 
-  await supabase
-    .from("junction_participants")
-    .update({
-      name: updates.name || existing.name,
-      avatar: updates.avatar || existing.avatar,
-      color: updates.color || existing.color,
-    })
-    .eq("junction_id", junctionId)
-    .eq("identity", identity);
+  const updatePayload: Record<string, any> = {};
+  if (updates.name !== undefined) updatePayload.name = updates.name;
+  if (updates.avatar !== undefined) updatePayload.avatar = updates.avatar;
+  if (updates.color !== undefined) updatePayload.color = updates.color;
+  if (updates.isMuted !== undefined) updatePayload.is_muted = updates.isMuted;
+
+  if (Object.keys(updatePayload).length > 0) {
+    await supabase
+      .from("junction_participants")
+      .update(updatePayload)
+      .eq("junction_id", junctionId)
+      .eq("identity", identity);
+  }
 
   const updated = await fetchJunctionWithParticipants(junctionId);
   return { success: true, junction: updated };
