@@ -152,7 +152,7 @@ export default function JunctionsPage() {
     <>
       <PullToRefresh onRefresh={handleManualRefresh}>
       <div className="min-h-screen flex flex-col text-slate-200">
-        <Navbar guest={guest} onUpdateGuest={updateGuest} onClearProfile={clearProfile} totalOnline={totalOnline} />
+        <Navbar totalOnline={totalOnline} />
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 py-3 sm:py-6">
         {/* Sleek Top Header & Action Row */}

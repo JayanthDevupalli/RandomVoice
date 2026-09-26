@@ -7,6 +7,7 @@ import { useAudioVisualizer } from "@/hooks/useAudioVisualizer";
 import { AudioSettingsModal } from "./AudioSettingsModal";
 import { ModeratorControlModal } from "./ModeratorControlModal";
 import { UserAvatar } from "@/components/ui/UserAvatar";
+import { ProfilePreviewModal } from "@/components/profile/ProfilePreviewModal";
 import confetti from "canvas-confetti";
 import { LiveKitRoom, useTracks, useLocalParticipant, useRoomContext, useConnectionState } from "@livekit/components-react";
 import { Track, RoomEvent, ConnectionState } from "livekit-client";
@@ -211,6 +212,9 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
 
   // LiveKit Data Publish Ref
   const liveKitPublishRef = useRef<((data: any) => void) | null>(null);
+
+  // Profile Preview Modal State
+  const [previewParticipant, setPreviewParticipant] = useState<JunctionParticipant | null>(null);
 
   // Web Audio Visualizer for local mic
   const isCurrentModerator = junction?.participants.some(p => p.identity === guest.name && p.role === "moderator") || false;
@@ -968,7 +972,10 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
                   </div>
 
                   {/* Center Vector Avatar */}
-                  <div className="relative my-2">
+                  <div 
+                    className="relative my-2 cursor-pointer transition-transform hover:scale-105 active:scale-95"
+                    onClick={() => setPreviewParticipant(participant)}
+                  >
                     <UserAvatar
                       avatar={participant.avatar}
                       color={participant.color}
@@ -1318,6 +1325,13 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
           onUpdateJunctionDetails={handleUpdateJunctionDetails}
         />
       )}
+
+      {/* Profile Preview Popover */}
+      <ProfilePreviewModal 
+        isOpen={previewParticipant !== null}
+        onClose={() => setPreviewParticipant(null)}
+        participant={previewParticipant}
+      />
     </div>
   );
 }

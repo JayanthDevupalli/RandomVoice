@@ -73,9 +73,6 @@ export function UserAvatar({
   isSpeaking = false,
   className = "",
 }: UserAvatarProps) {
-  const normalizedKey = avatar?.toLowerCase().replace(/[^a-z0-9]/g, "") || "zap";
-  const IconComponent = AVATAR_ICON_MAP[normalizedKey] || AVATAR_ICON_MAP[avatar] || User;
-
   const sizeClasses = {
     sm: "w-7 h-7 rounded-lg text-xs",
     md: "w-10 h-10 rounded-xl text-sm",
@@ -89,6 +86,29 @@ export function UserAvatar({
     lg: 28,
     xl: 38,
   };
+
+  // If the avatar is an uploaded image URL, render it directly
+  if (avatar?.startsWith("http")) {
+    return (
+      <div
+        className={`relative flex items-center justify-center transition-all duration-200 shadow-md overflow-hidden ${
+          sizeClasses[size]
+        } ${isSpeaking ? "speaking-ring ring-emerald-400" : "border border-slate-300 dark:border-slate-700/60"} ${className}`}
+        style={{
+          borderColor: isSpeaking ? "#10B981" : `${color}60`,
+          boxShadow: isSpeaking
+            ? `0 0 20px #10B981, inset 0 0 10px #10B981`
+            : `0 4px 12px ${color}15`,
+        }}
+      >
+        <img src={avatar} alt="User Avatar" className="w-full h-full object-cover" />
+      </div>
+    );
+  }
+
+  // Otherwise, it's a vector icon guest profile
+  const normalizedKey = avatar?.toLowerCase().replace(/[^a-z0-9]/g, "") || "zap";
+  const IconComponent = AVATAR_ICON_MAP[normalizedKey] || AVATAR_ICON_MAP[avatar] || User;
 
   return (
     <div
