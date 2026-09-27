@@ -16,7 +16,10 @@ import {
   Loader2,
   Sparkles,
   LogIn,
-  AlertCircle
+  AlertCircle,
+  KeyRound,
+  ArrowLeft,
+  CheckCircle2,
 } from "lucide-react";
 import { AVAILABLE_AVATARS } from "../ui/UserAvatar";
 import { useGuestUser } from "@/hooks/useGuestUser";
@@ -24,6 +27,8 @@ import { COLOR_PALETTES, generateRandomNickname } from "@/lib/guest-utils";
 import { supabase } from "@/lib/supabase";
 import confetti from "canvas-confetti";
 import { useLiveStats } from "@/hooks/useLiveStats";
+import { generateRecoveryCode } from "@/lib/recovery-utils";
+import { RecoveryCodeModal } from "@/components/auth/RecoveryCodeModal";
 
 interface LandingWelcomeProps {
   initialMode?: "guest" | "login";
@@ -44,6 +49,15 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
   const [showPassword, setShowPassword] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+
+  // Recovery State
+  const [isRecovering, setIsRecovering] = useState(false);
+  const [recoveryCodeInput, setRecoveryCodeInput] = useState("");
+  const [recoveryNewPassword, setRecoveryNewPassword] = useState("");
+  const [recoveryConfirmPassword, setRecoveryConfirmPassword] = useState("");
+  const [recoverySuccess, setRecoverySuccess] = useState<string | null>(null);
+  const [newlyCreatedRecoveryCode, setNewlyCreatedRecoveryCode] = useState<string | null>(null);
+  const [savedUserForRecoveryModal, setSavedUserForRecoveryModal] = useState<string>("");
 
   // Guest State
   const [gender, setGender] = useState<'any' | 'male' | 'female'>('any');
@@ -145,13 +159,30 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
         if (signUpError) throw signUpError;
 
         if (data.user) {
-          const { error: profileError } = await supabase
+          const generatedCode = generateRecoveryCode();
+
+          let { error: profileError } = await supabase
             .from("profiles")
             .insert({
               id: data.user.id,
               username: cleanUsername,
               avatar: selectedAvatar || "zap",
+              recovery_code: generatedCode,
+              social_links: { recovery_code: generatedCode },
             });
+
+          // Fallback if column recovery_code has not been migrated yet
+          if (profileError && profileError.message.includes("recovery_code")) {
+            const fallback = await supabase
+              .from("profiles")
+              .insert({
+                id: data.user.id,
+                username: cleanUsername,
+                avatar: selectedAvatar || "zap",
+                social_links: { recovery_code: generatedCode },
+              });
+            profileError = fallback.error;
+          }
 
           if (profileError) {
             if (profileError.code === "23505") {
@@ -159,15 +190,20 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
             }
             throw profileError;
           }
-        }
 
-        confetti({
-          particleCount: 60,
-          spread: 90,
-          origin: { y: 0.6 },
-          colors: ['#ffffff', '#818cf8', '#ec4899'],
-          disableForReducedMotion: true
-        });
+          confetti({
+            particleCount: 60,
+            spread: 90,
+            origin: { y: 0.6 },
+            colors: ['#ffffff', '#818cf8', '#ec4899'],
+            disableForReducedMotion: true
+          });
+
+          // Store code to trigger the recovery code modal before finalizing onboarding
+          setSavedUserForRecoveryModal(cleanUsername);
+          setNewlyCreatedRecoveryCode(generatedCode);
+          return;
+        }
 
         completeOnboarding({
           name: cleanUsername,
@@ -190,6 +226,97 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
       }
 
       setAuthError(errorMessage);
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  // Account Recovery Handler
+  const handleAccountRecovery = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!loginUsername.trim() || !recoveryCodeInput.trim() || !recoveryNewPassword) {
+      setAuthError("Please fill in all recovery fields.");
+      return;
+    }
+    if (recoveryNewPassword.length < 6) {
+      setAuthError("New password must be at least 6 characters.");
+      return;
+    }
+    if (recoveryNewPassword !== recoveryConfirmPassword) {
+      setAuthError("Passwords do not match.");
+      return;
+    }
+
+    setAuthLoading(true);
+    setAuthError(null);
+    setRecoverySuccess(null);
+
+    const cleanUsername = loginUsername.trim();
+    const fakeEmail = `${cleanUsername.toLowerCase()}@users.yapclub.com`;
+
+    try {
+      const res = await fetch("/api/account/recover", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: cleanUsername,
+          recoveryCode: recoveryCodeInput.trim(),
+          newPassword: recoveryNewPassword,
+        }),
+      });
+
+      const result = await res.json();
+      if (!res.ok || result.error) {
+        throw new Error(result.error || "Failed to recover account.");
+      }
+
+      setRecoverySuccess("Password reset successfully! Logging you in...");
+
+      // Automatically sign in with new password
+      const { data, error: signInErr } = await supabase.auth.signInWithPassword({
+        email: fakeEmail,
+        password: recoveryNewPassword,
+      });
+
+      if (signInErr) {
+        setTimeout(() => {
+          setIsRecovering(false);
+          setAuthError(null);
+        }, 1500);
+      } else {
+        let userAvatar = "zap";
+        if (data.user) {
+          const { data: profile } = await supabase
+            .from("profiles")
+            .select("*")
+            .eq("id", data.user.id)
+            .single();
+          if (profile?.avatar) {
+            userAvatar = profile.avatar;
+          }
+        }
+
+        confetti({
+          particleCount: 50,
+          spread: 80,
+          origin: { y: 0.6 },
+          colors: ['#ffffff', '#818cf8', '#a78bfa'],
+          disableForReducedMotion: true
+        });
+
+        completeOnboarding({
+          name: cleanUsername,
+          avatar: userAvatar,
+          color: "#6366F1",
+        });
+
+        setTimeout(() => {
+          window.location.href = "/junctions";
+        }, 600);
+      }
+    } catch (err: any) {
+      console.error("Recovery error:", err);
+      setAuthError(err.message || "Failed to recover account.");
     } finally {
       setAuthLoading(false);
     }
@@ -501,162 +628,352 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
               )}
 
               {/* ========================================================= */}
-              {/* TAB 2: MEMBER LOGIN & REGISTRATION                        */}
+              {/* TAB 2: MEMBER LOGIN & REGISTRATION / RECOVERY             */}
               {/* ========================================================= */}
               {authMode === "login" && (
-                <form onSubmit={handleMemberAuth} className="space-y-4 sm:space-y-5 animate-fadeIn">
-                  {/* Top Header & Sub-Toggle */}
-                  <div className="flex items-center justify-between pb-3 border-b border-white/5">
-                    <div>
-                      <h2 className="text-base sm:text-lg font-bold text-white">
-                        {isSignup ? "Create Member Account" : "Member Login"}
-                      </h2>
-                      <p className="text-xs text-slate-400 font-light mt-0.5">
-                        {isSignup 
-                          ? "Unlock persistent profiles, followers, and DMs." 
-                          : "Log in to access your direct messages and profile."}
-                      </p>
-                    </div>
-
-                    <div className="flex items-center bg-white/5 rounded-xl p-0.5 border border-white/10 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => { setIsSignup(false); setAuthError(null); }}
-                        className={`px-2.5 py-1 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
-                          !isSignup ? "bg-white text-black shadow-sm" : "text-slate-400 hover:text-white"
-                        }`}
-                      >
-                        Log In
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => { setIsSignup(true); setAuthError(null); }}
-                        className={`px-2.5 py-1 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
-                          isSignup ? "bg-white text-black shadow-sm" : "text-slate-400 hover:text-white"
-                        }`}
-                      >
-                        Sign Up
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Auth Error Banner */}
-                  {authError && (
-                    <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs sm:text-sm flex items-start gap-2 animate-fadeIn">
-                      <AlertCircle size={16} className="text-rose-400 shrink-0 mt-0.5" />
-                      <span>{authError}</span>
-                    </div>
-                  )}
-
-                  {/* Username Field */}
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-slate-300">Username</label>
-                    <div className="relative">
-                      <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
-                        <User size={16} />
+                isRecovering ? (
+                  <form onSubmit={handleAccountRecovery} className="space-y-4 sm:space-y-5 animate-fadeIn">
+                    {/* Top Header */}
+                    <div className="flex items-center justify-between pb-3 border-b border-white/5">
+                      <div>
+                        <h2 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+                          <KeyRound size={18} className="text-amber-400" />
+                          Account Recovery
+                        </h2>
+                        <p className="text-xs text-slate-400 font-light mt-0.5">
+                          Reset your password using your secret recovery code.
+                        </p>
                       </div>
-                      <input
-                        type="text"
-                        required
-                        maxLength={20}
-                        autoComplete="username"
-                        value={loginUsername}
-                        onChange={(e) => setLoginUsername(e.target.value.replace(/[^a-zA-Z0-9_]/g, ''))}
-                        className="w-full pl-10 pr-4 py-2.5 sm:py-3 bg-black/30 border border-white/10 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-base font-normal transition-all"
-                        placeholder="e.g. CyberViper"
-                      />
-                    </div>
-                    <p className="text-[10px] text-slate-500">Only letters, numbers, and underscores.</p>
-                  </div>
 
-                  {/* Password Field */}
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-slate-300">Password</label>
-                    <div className="relative">
-                      <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
-                        <Lock size={16} />
-                      </div>
-                      <input
-                        type={showPassword ? "text" : "password"}
-                        required
-                        minLength={6}
-                        autoComplete={isSignup ? "new-password" : "current-password"}
-                        value={loginPassword}
-                        onChange={(e) => setLoginPassword(e.target.value)}
-                        className="w-full pl-10 pr-10 py-2.5 sm:py-3 bg-black/30 border border-white/10 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-base font-normal transition-all"
-                        placeholder="••••••••"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowPassword(!showPassword)}
-                        className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-500 hover:text-slate-300 cursor-pointer"
-                        tabIndex={-1}
-                      >
-                        {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
-                      </button>
-                    </div>
-                    <p className="text-[10px] text-slate-500">Minimum 6 characters.</p>
-                  </div>
-
-                  {/* Perks for Sign Up */}
-                  {isSignup && (
-                    <div className="p-3 rounded-xl bg-white/[0.03] border border-white/5 space-y-1 text-[11px] text-slate-400">
-                      <div className="flex items-center gap-1.5 text-indigo-300 font-medium">
-                        <Check size={12} className="text-indigo-400" />
-                        <span>Direct Messaging & Secret Whispers</span>
-                      </div>
-                      <div className="flex items-center gap-1.5 text-slate-300">
-                        <Check size={12} className="text-emerald-400" />
-                        <span>Custom user profiles, bios, and follower network</span>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Submit Button */}
-                  <button
-                    type="submit"
-                    disabled={authLoading || !loginUsername.trim() || loginPassword.length < 6}
-                    className="w-full py-3.5 sm:py-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm transition-all flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed shadow-lg shadow-indigo-600/30 cursor-pointer active:scale-[0.99] mt-2"
-                  >
-                    {authLoading ? (
-                      <Loader2 size={16} className="animate-spin" />
-                    ) : (
-                      <LogIn size={16} />
-                    )}
-                    <span>{isSignup ? "Create Free Account" : "Log In to YapClub"}</span>
-                  </button>
-
-                  {/* Switch between Sign Up / Log In & Guest */}
-                  <div className="pt-2 text-center space-y-2 border-t border-white/5">
-                    <p className="text-xs text-slate-400">
-                      {isSignup ? "Already have an account?" : "Don't have an account yet?"}{" "}
                       <button
                         type="button"
                         onClick={() => {
-                          setIsSignup(!isSignup);
+                          setIsRecovering(false);
+                          setAuthError(null);
+                          setRecoverySuccess(null);
+                        }}
+                        className="inline-flex items-center gap-1 text-xs text-slate-400 hover:text-white transition-colors cursor-pointer"
+                      >
+                        <ArrowLeft size={14} />
+                        <span>Back</span>
+                      </button>
+                    </div>
+
+                    {/* Auth Error Banner */}
+                    {authError && (
+                      <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs sm:text-sm flex items-start gap-2 animate-fadeIn">
+                        <AlertCircle size={16} className="text-rose-400 shrink-0 mt-0.5" />
+                        <span>{authError}</span>
+                      </div>
+                    )}
+
+                    {/* Success Banner */}
+                    {recoverySuccess && (
+                      <div className="p-3 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs sm:text-sm flex items-start gap-2 animate-fadeIn">
+                        <CheckCircle2 size={16} className="text-emerald-400 shrink-0 mt-0.5" />
+                        <span>{recoverySuccess}</span>
+                      </div>
+                    )}
+
+                    {/* Username Field */}
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-slate-300">Username</label>
+                      <div className="relative">
+                        <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
+                          <User size={16} />
+                        </div>
+                        <input
+                          type="text"
+                          required
+                          maxLength={20}
+                          value={loginUsername}
+                          onChange={(e) => setLoginUsername(e.target.value.replace(/[^a-zA-Z0-9_]/g, ''))}
+                          className="w-full pl-10 pr-4 py-2.5 sm:py-3 bg-black/30 border border-white/10 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-base font-normal transition-all"
+                          placeholder="Your username"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Recovery Code Field */}
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-slate-300">Secret Recovery Code</label>
+                      <div className="relative">
+                        <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
+                          <KeyRound size={16} className="text-amber-400" />
+                        </div>
+                        <input
+                          type="text"
+                          required
+                          value={recoveryCodeInput}
+                          onChange={(e) => setRecoveryCodeInput(e.target.value.toUpperCase())}
+                          className="w-full pl-10 pr-4 py-2.5 sm:py-3 bg-black/30 border border-amber-500/30 rounded-xl text-amber-300 font-mono placeholder-slate-500 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 text-base font-normal transition-all uppercase"
+                          placeholder="YAP-XXXX-XXXX-XXXX"
+                        />
+                      </div>
+                      <p className="text-[10px] text-slate-500">The recovery code given when your account was created.</p>
+                    </div>
+
+                    {/* New Password Field */}
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-slate-300">New Password</label>
+                      <div className="relative">
+                        <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
+                          <Lock size={16} />
+                        </div>
+                        <input
+                          type={showPassword ? "text" : "password"}
+                          required
+                          minLength={6}
+                          value={recoveryNewPassword}
+                          onChange={(e) => setRecoveryNewPassword(e.target.value)}
+                          className="w-full pl-10 pr-10 py-2.5 sm:py-3 bg-black/30 border border-white/10 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-base font-normal transition-all"
+                          placeholder="Minimum 6 characters"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowPassword(!showPassword)}
+                          className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-500 hover:text-slate-300 cursor-pointer"
+                          tabIndex={-1}
+                        >
+                          {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Confirm New Password Field */}
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-slate-300">Confirm New Password</label>
+                      <div className="relative">
+                        <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
+                          <Lock size={16} />
+                        </div>
+                        <input
+                          type={showPassword ? "text" : "password"}
+                          required
+                          minLength={6}
+                          value={recoveryConfirmPassword}
+                          onChange={(e) => setRecoveryConfirmPassword(e.target.value)}
+                          className="w-full pl-10 pr-4 py-2.5 sm:py-3 bg-black/30 border border-white/10 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-base font-normal transition-all"
+                          placeholder="Re-type new password"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Submit Button */}
+                    <button
+                      type="submit"
+                      disabled={authLoading || !loginUsername.trim() || !recoveryCodeInput.trim() || recoveryNewPassword.length < 6}
+                      className="w-full py-3.5 sm:py-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm transition-all flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed shadow-lg shadow-indigo-600/30 cursor-pointer active:scale-[0.99] mt-2"
+                    >
+                      {authLoading ? (
+                        <Loader2 size={16} className="animate-spin" />
+                      ) : (
+                        <KeyRound size={16} />
+                      )}
+                      <span>Reset Password & Enter</span>
+                    </button>
+
+                    <div className="pt-2 text-center">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsRecovering(false);
                           setAuthError(null);
                         }}
-                        className="text-indigo-400 hover:text-indigo-300 font-semibold underline underline-offset-2 cursor-pointer"
+                        className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors cursor-pointer"
                       >
-                        {isSignup ? "Log In" : "Sign Up"}
+                        ← Back to Member Login
                       </button>
-                    </p>
+                    </div>
+                  </form>
+                ) : (
+                  <form onSubmit={handleMemberAuth} className="space-y-4 sm:space-y-5 animate-fadeIn">
+                    {/* Top Header & Sub-Toggle */}
+                    <div className="flex items-center justify-between pb-3 border-b border-white/5">
+                      <div>
+                        <h2 className="text-base sm:text-lg font-bold text-white">
+                          {isSignup ? "Create Member Account" : "Member Login"}
+                        </h2>
+                        <p className="text-xs text-slate-400 font-light mt-0.5">
+                          {isSignup 
+                            ? "Unlock persistent profiles, followers, and DMs." 
+                            : "Log in to access your direct messages and profile."}
+                        </p>
+                      </div>
 
+                      <div className="flex items-center bg-white/5 rounded-xl p-0.5 border border-white/10 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => { setIsSignup(false); setAuthError(null); }}
+                          className={`px-2.5 py-1 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
+                            !isSignup ? "bg-white text-black shadow-sm" : "text-slate-400 hover:text-white"
+                          }`}
+                        >
+                          Log In
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setIsSignup(true); setAuthError(null); }}
+                          className={`px-2.5 py-1 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
+                            isSignup ? "bg-white text-black shadow-sm" : "text-slate-400 hover:text-white"
+                          }`}
+                        >
+                          Sign Up
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Auth Error Banner */}
+                    {authError && (
+                      <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs sm:text-sm flex items-start gap-2 animate-fadeIn">
+                        <AlertCircle size={16} className="text-rose-400 shrink-0 mt-0.5" />
+                        <span>{authError}</span>
+                      </div>
+                    )}
+
+                    {/* Username Field */}
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-slate-300">Username</label>
+                      <div className="relative">
+                        <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
+                          <User size={16} />
+                        </div>
+                        <input
+                          type="text"
+                          required
+                          maxLength={20}
+                          autoComplete="username"
+                          value={loginUsername}
+                          onChange={(e) => setLoginUsername(e.target.value.replace(/[^a-zA-Z0-9_]/g, ''))}
+                          className="w-full pl-10 pr-4 py-2.5 sm:py-3 bg-black/30 border border-white/10 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-base font-normal transition-all"
+                          placeholder="e.g. CyberViper"
+                        />
+                      </div>
+                      <p className="text-[10px] text-slate-500">Only letters, numbers, and underscores.</p>
+                    </div>
+
+                    {/* Password Field */}
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs font-medium text-slate-300">Password</label>
+                        {!isSignup && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setIsRecovering(true);
+                              setAuthError(null);
+                              setRecoverySuccess(null);
+                            }}
+                            className="text-xs text-indigo-400 hover:text-indigo-300 font-medium transition-colors cursor-pointer"
+                          >
+                            Forgot password?
+                          </button>
+                        )}
+                      </div>
+                      <div className="relative">
+                        <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
+                          <Lock size={16} />
+                        </div>
+                        <input
+                          type={showPassword ? "text" : "password"}
+                          required
+                          minLength={6}
+                          autoComplete={isSignup ? "new-password" : "current-password"}
+                          value={loginPassword}
+                          onChange={(e) => setLoginPassword(e.target.value)}
+                          className="w-full pl-10 pr-10 py-2.5 sm:py-3 bg-black/30 border border-white/10 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-base font-normal transition-all"
+                          placeholder="••••••••"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowPassword(!showPassword)}
+                          className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-500 hover:text-slate-300 cursor-pointer"
+                          tabIndex={-1}
+                        >
+                          {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                        </button>
+                      </div>
+                      <p className="text-[10px] text-slate-500">Minimum 6 characters.</p>
+                    </div>
+
+                    {/* Perks for Sign Up */}
+                    {isSignup && (
+                      <div className="p-3 rounded-xl bg-white/[0.03] border border-white/5 space-y-1 text-[11px] text-slate-400">
+                        <div className="flex items-center gap-1.5 text-indigo-300 font-medium">
+                          <Check size={12} className="text-indigo-400" />
+                          <span>Direct Messaging & Secret Whispers</span>
+                        </div>
+                        <div className="flex items-center gap-1.5 text-slate-300">
+                          <Check size={12} className="text-emerald-400" />
+                          <span>Custom user profiles, bios, and follower network</span>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Submit Button */}
                     <button
-                      type="button"
-                      onClick={() => { setAuthMode("guest"); setAuthError(null); }}
-                      className="text-xs text-slate-500 hover:text-slate-300 transition-colors cursor-pointer"
+                      type="submit"
+                      disabled={authLoading || !loginUsername.trim() || loginPassword.length < 6}
+                      className="w-full py-3.5 sm:py-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm transition-all flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed shadow-lg shadow-indigo-600/30 cursor-pointer active:scale-[0.99] mt-2"
                     >
-                      ← Or enter as an Instant Guest without an account
+                      {authLoading ? (
+                        <Loader2 size={16} className="animate-spin" />
+                      ) : (
+                        <LogIn size={16} />
+                      )}
+                      <span>{isSignup ? "Create Free Account" : "Log In to YapClub"}</span>
                     </button>
-                  </div>
-                </form>
+
+                    {/* Switch between Sign Up / Log In & Guest */}
+                    <div className="pt-2 text-center space-y-2 border-t border-white/5">
+                      <p className="text-xs text-slate-400">
+                        {isSignup ? "Already have an account?" : "Don't have an account yet?"}{" "}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsSignup(!isSignup);
+                            setAuthError(null);
+                          }}
+                          className="text-indigo-400 hover:text-indigo-300 font-semibold underline underline-offset-2 cursor-pointer"
+                        >
+                          {isSignup ? "Log In" : "Sign Up"}
+                        </button>
+                      </p>
+
+                      <button
+                        type="button"
+                        onClick={() => { setAuthMode("guest"); setAuthError(null); }}
+                        className="text-xs text-slate-500 hover:text-slate-300 transition-colors cursor-pointer"
+                      >
+                        ← Or enter as an Instant Guest without an account
+                      </button>
+                    </div>
+                  </form>
+                )
               )}
 
             </div>
           </div>
         </div>
       </main>
+
+      {/* Post-Signup Recovery Code Modal */}
+      {newlyCreatedRecoveryCode && (
+        <RecoveryCodeModal
+          isOpen={true}
+          recoveryCode={newlyCreatedRecoveryCode}
+          username={savedUserForRecoveryModal}
+          onClose={() => {
+            setNewlyCreatedRecoveryCode(null);
+            completeOnboarding({
+              name: savedUserForRecoveryModal,
+              avatar: selectedAvatar || "zap",
+              color: "#6366F1",
+            });
+            window.location.href = "/junctions";
+          }}
+        />
+      )}
 
       {/* Footer */}
       <footer className="w-full py-4 sm:py-6 text-center text-[10px] sm:text-xs font-light text-slate-600 relative z-10">

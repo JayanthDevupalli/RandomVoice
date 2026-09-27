@@ -10,6 +10,8 @@ import { LogOut, Edit3, Camera, Check, X, ShieldAlert, Loader2, ArrowLeft, Trash
 import { ConnectionsModal } from "@/components/profile/ConnectionsModal";
 import { DeleteAccountModal } from "@/components/profile/DeleteAccountModal";
 import { useGuestUser } from "@/hooks/useGuestUser";
+import { ImageCropModal } from "@/components/profile/ImageCropModal";
+import { AccountSecurityCard } from "@/components/profile/AccountSecurityCard";
 
 export default function ProfilePage({ params }: { params: { id: string } }) {
   const router = useRouter();
@@ -29,9 +31,11 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
   const [bio, setBio] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   
-  // File upload state
+  // File upload & crop state
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [cropModalOpen, setCropModalOpen] = useState(false);
+  const [tempImageSrc, setTempImageSrc] = useState<string | null>(null);
 
   // Determine if the current user is viewing their own profile
   const isOwner = isRegistered && (params.id === "me" || params.id === currentUser?.id);
@@ -164,41 +168,68 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
     setIsSaving(false);
   };
 
-  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Called when user selects a file from disk
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0 || !isOwner || !profile) return;
     
     const file = e.target.files[0];
-    if (file.size > 2 * 1024 * 1024) {
-      alert("Image must be smaller than 2MB");
+    if (!file.type.startsWith("image/")) {
+      alert("Please select a valid image file");
+      return;
+    }
+    if (file.size > 8 * 1024 * 1024) {
+      alert("Image must be smaller than 8MB");
       return;
     }
 
+    // Open image in cropping modal
+    const objectUrl = URL.createObjectURL(file);
+    setTempImageSrc(objectUrl);
+    setCropModalOpen(true);
+
+    // Reset input so re-selecting same file triggers event
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
+
+  // Called when user confirms crop in ImageCropModal
+  const handleApplyCroppedImage = async (croppedBlob: Blob) => {
+    if (!isOwner || !profile) return;
     setIsUploading(true);
-    const fileExt = file.name.split('.').pop();
-    const fileName = `${profile.id}-${Math.random()}.${fileExt}`;
+
+    const fileName = `${profile.id}-${Date.now()}.jpg`;
     const filePath = `public/${fileName}`;
 
     try {
       const { error: uploadError } = await supabase.storage
         .from("avatars")
-        .upload(filePath, file);
+        .upload(filePath, croppedBlob, {
+          contentType: "image/jpeg",
+          upsert: true,
+        });
 
       if (uploadError) throw uploadError;
 
       const { data } = supabase.storage.from("avatars").getPublicUrl(filePath);
       
-      await supabase
+      const { error: updateError } = await supabase
         .from("profiles")
         .update({ avatar: data.publicUrl })
         .eq("id", profile.id);
 
+      if (updateError) throw updateError;
+
       setProfile({ ...profile, avatar: data.publicUrl });
-      
-      // Force refresh to update the navbar avatar
-      window.location.reload();
+      setCropModalOpen(false);
+
+      if (tempImageSrc) {
+        URL.revokeObjectURL(tempImageSrc);
+        setTempImageSrc(null);
+      }
     } catch (err) {
       console.error("Upload failed", err);
-      alert("Failed to upload image. Make sure the storage bucket exists.");
+      alert("Failed to upload cropped image. Make sure the storage bucket exists.");
     } finally {
       setIsUploading(false);
     }
@@ -229,28 +260,28 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
     <div className="min-h-screen bg-background flex flex-col text-slate-200">
       <Navbar />
 
-      <main className="flex-1 max-w-2xl w-full mx-auto px-4 py-6 sm:py-10">
+      <main className="flex-1 max-w-xl sm:max-w-2xl w-full mx-auto px-3.5 sm:px-6 py-4 sm:py-8 space-y-3.5 sm:space-y-5">
         {/* Back Button */}
         <button
           onClick={() => router.push("/junctions")}
-          className="inline-flex items-center gap-2 text-sm text-slate-400 hover:text-white transition-colors mb-4 group"
+          className="inline-flex items-center gap-2 text-xs sm:text-sm text-slate-400 hover:text-white transition-colors group mb-0.5"
         >
-          <div className="w-8 h-8 rounded-full bg-white/5 border border-white/10 flex items-center justify-center group-hover:bg-white/10 group-hover:border-white/20 active:scale-95 transition-all">
-            <ArrowLeft size={16} />
+          <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-white/5 border border-white/10 flex items-center justify-center group-hover:bg-white/10 group-hover:border-white/20 active:scale-95 transition-all">
+            <ArrowLeft size={14} />
           </div>
           <span>Back to Voice Rooms</span>
         </button>
 
         {/* Profile Card */}
-        <div className="bg-[#12131A]/80 border border-white/5 rounded-[2rem] p-6 sm:p-10 shadow-2xl backdrop-blur-xl relative overflow-hidden">
+        <div className="bg-[#12131A]/90 border border-white/10 rounded-2xl sm:rounded-3xl p-5 sm:p-8 shadow-2xl backdrop-blur-xl relative overflow-hidden">
           {/* Background Glow */}
-          <div className="absolute -top-20 -right-20 w-64 h-64 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" />
+          <div className="absolute -top-20 -right-20 w-56 h-56 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" />
           
           <div className="relative flex flex-col items-center text-center">
             
             {/* Avatar Section */}
-            <div className="relative group mb-6">
-              <div className="w-28 h-28 sm:w-32 sm:h-32 rounded-full overflow-hidden border-4 border-[#12131A] shadow-xl bg-indigo-900/50 flex items-center justify-center">
+            <div className="relative group mb-3.5 sm:mb-5">
+              <div className="w-24 h-24 sm:w-28 sm:h-28 rounded-full overflow-hidden border-4 border-[#12131A] shadow-xl bg-indigo-900/50 flex items-center justify-center">
                 {profile.avatar.includes("http") ? (
                   <img src={profile.avatar} alt={profile.username} className="w-full h-full object-cover" />
                 ) : (
@@ -263,14 +294,14 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
                   <button 
                     onClick={() => fileInputRef.current?.click()}
                     disabled={isUploading}
-                    className="absolute bottom-0 right-0 w-10 h-10 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full flex items-center justify-center shadow-lg transition-transform active:scale-95 disabled:opacity-50"
+                    className="absolute bottom-0 right-0 w-8 h-8 sm:w-9 sm:h-9 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full flex items-center justify-center shadow-lg transition-transform active:scale-95 disabled:opacity-50"
                   >
-                    {isUploading ? <Loader2 size={18} className="animate-spin" /> : <Camera size={18} />}
+                    {isUploading ? <Loader2 size={15} className="animate-spin" /> : <Camera size={15} />}
                   </button>
                   <input 
                     type="file" 
                     ref={fileInputRef} 
-                    onChange={handleImageUpload} 
+                    onChange={handleFileSelect} 
                     accept="image/*" 
                     className="hidden" 
                   />
@@ -279,68 +310,68 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
             </div>
 
             {/* Username & Stats */}
-            <h1 className="text-2xl sm:text-3xl font-bold text-white mb-2">{profile.username}</h1>
+            <h1 className="text-xl sm:text-2xl font-bold text-white mb-1.5">{profile.username}</h1>
             
             {isOwner && (
-              <div className="flex items-center gap-6 text-sm mb-8">
+              <div className="flex items-center gap-6 text-sm mb-4 sm:mb-5">
                 <button 
                   onClick={() => setConnectionsModalMode("followers")}
                   className="flex flex-col items-center hover:scale-105 transition-transform group"
                 >
-                  <span className="font-bold text-white text-lg group-hover:text-indigo-400 transition-colors">{followersCount}</span>
-                  <span className="text-slate-500 font-medium group-hover:text-slate-300 transition-colors">Followers</span>
+                  <span className="font-bold text-white text-base sm:text-lg group-hover:text-indigo-400 transition-colors">{followersCount}</span>
+                  <span className="text-slate-400 text-xs font-medium group-hover:text-slate-300 transition-colors">Followers</span>
                 </button>
-                <div className="w-px h-8 bg-white/10" />
+                <div className="w-px h-7 bg-white/10" />
                 <button 
                   onClick={() => setConnectionsModalMode("following")}
                   className="flex flex-col items-center hover:scale-105 transition-transform group"
                 >
-                  <span className="font-bold text-white text-lg group-hover:text-indigo-400 transition-colors">{followingCount}</span>
-                  <span className="text-slate-500 font-medium group-hover:text-slate-300 transition-colors">Following</span>
+                  <span className="font-bold text-white text-base sm:text-lg group-hover:text-indigo-400 transition-colors">{followingCount}</span>
+                  <span className="text-slate-400 text-xs font-medium group-hover:text-slate-300 transition-colors">Following</span>
                 </button>
               </div>
             )}
 
             {/* Bio Section */}
-            <div className="w-full max-w-md mx-auto mb-8">
+            <div className="w-full max-w-md mx-auto mb-4 sm:mb-6">
               {isEditing ? (
-                <div className="flex flex-col gap-3">
+                <div className="flex flex-col gap-2.5">
                   <textarea
                     value={bio}
                     onChange={(e) => setBio(e.target.value)}
                     placeholder="Write a short bio..."
                     maxLength={150}
-                    className="w-full h-24 p-3 bg-black/20 border border-white/10 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 resize-none text-sm"
+                    className="w-full h-24 p-3 bg-black/20 border border-white/10 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 resize-none text-xs sm:text-sm"
                   />
                   <div className="flex justify-end gap-2">
                     <button 
                       onClick={() => { setIsEditing(false); setBio(profile.bio || ""); }}
-                      className="px-4 py-2 rounded-lg text-sm font-medium text-slate-300 hover:bg-white/5 transition-colors"
+                      className="px-3 py-1.5 rounded-lg text-xs font-medium text-slate-300 hover:bg-white/5 transition-colors"
                     >
                       Cancel
                     </button>
                     <button 
                       onClick={saveProfile}
                       disabled={isSaving}
-                      className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 text-sm font-medium transition-colors"
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 text-xs font-medium transition-colors"
                     >
-                      {isSaving ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />}
+                      {isSaving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
                       Save
                     </button>
                   </div>
                 </div>
               ) : (
-                <div className="relative group p-4 rounded-xl border border-transparent hover:border-white/5 hover:bg-white/[0.02] transition-colors">
-                  <p className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">
+                <div className="relative group p-3 rounded-xl border border-transparent hover:border-white/5 hover:bg-white/[0.02] transition-colors">
+                  <p className="text-slate-300 text-xs sm:text-sm leading-relaxed whitespace-pre-wrap">
                     {profile.bio || <span className="text-slate-500 italic">No bio yet.</span>}
                   </p>
                   
                   {isOwner && (
                     <button 
                       onClick={() => setIsEditing(true)}
-                      className="absolute top-2 right-2 p-1.5 rounded-lg bg-white/5 text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity hover:text-white"
+                      className="absolute top-1.5 right-1.5 p-1 rounded-lg bg-white/5 text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity hover:text-white"
                     >
-                      <Edit3 size={14} />
+                      <Edit3 size={13} />
                     </button>
                   )}
                 </div>
@@ -348,24 +379,24 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
             </div>
 
             {/* Actions */}
-            <div className="w-full flex flex-wrap items-center justify-center gap-3">
+            <div className="w-full">
               {isOwner ? (
-                <>
+                <div className="grid grid-cols-2 gap-2.5 w-full sm:max-w-xs sm:mx-auto">
                   <button
                     onClick={handleLogout}
-                    className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/5 text-slate-300 hover:text-white font-medium text-sm transition-all active:scale-95"
+                    className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-white/5 hover:bg-white/10 border border-white/5 text-slate-300 hover:text-white font-medium text-xs sm:text-sm transition-all active:scale-95"
                   >
-                    <LogOut size={16} />
+                    <LogOut size={15} />
                     <span>Log Out</span>
                   </button>
                   <button
                     onClick={() => setIsDeleteModalOpen(true)}
-                    className="flex items-center gap-2 px-5 py-2.5 rounded-xl border border-rose-500/20 text-rose-400 hover:bg-rose-500/10 hover:border-rose-500/30 font-medium text-sm transition-all active:scale-95 shadow-sm"
+                    className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl border border-rose-500/20 text-rose-400 hover:bg-rose-500/10 hover:border-rose-500/30 font-medium text-xs sm:text-sm transition-all active:scale-95 shadow-sm"
                   >
-                    <Trash2 size={16} />
-                    <span>Delete Account</span>
+                    <Trash2 size={15} />
+                    <span>Delete</span>
                   </button>
-                </>
+                </div>
               ) : (
                 <button
                   className="w-full max-w-[200px] flex items-center justify-center gap-2 px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm transition-colors shadow-lg shadow-indigo-600/20"
@@ -377,6 +408,18 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
 
           </div>
         </div>
+
+        {/* Account Recovery Code Section (Owner Only - Dedicated Card) */}
+        {isOwner && (
+          <AccountSecurityCard
+            userId={profile.id}
+            username={profile.username}
+            initialRecoveryCode={profile.recovery_code || profile.social_links?.recovery_code}
+            onCodeUpdated={(newCode) => {
+              setProfile({ ...profile, recovery_code: newCode });
+            }}
+          />
+        )}
       </main>
 
       {isOwner && connectionsModalMode && (
@@ -397,6 +440,21 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
           username={profile.username}
         />
       )}
+
+      {/* Image Crop Modal */}
+      <ImageCropModal
+        isOpen={cropModalOpen}
+        imageSrc={tempImageSrc}
+        onClose={() => {
+          setCropModalOpen(false);
+          if (tempImageSrc) {
+            URL.revokeObjectURL(tempImageSrc);
+            setTempImageSrc(null);
+          }
+        }}
+        onApplyCrop={handleApplyCroppedImage}
+        isSaving={isUploading}
+      />
     </div>
   );
 }
