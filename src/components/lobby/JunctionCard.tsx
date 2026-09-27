@@ -44,9 +44,11 @@ export const JunctionCard = React.memo(
   const displayLabel = !junction.isCustom 
     ? (["North", "South", "East", "West", "Central"].find(r => junction.tags?.includes(r)) || "Public")
     : junction.category;
-  const isFull = junction.currentCount >= junction.maxParticipants;
+  const participantCount = junction.participants?.length ?? junction.currentCount;
+  const maxCapacity = junction.maxParticipants || 7;
+  const isFull = participantCount >= maxCapacity;
   const isLocked = junction.isLocked;
-  const seats = Array.from({ length: junction.maxParticipants || 7 });
+  const seats = Array.from({ length: maxCapacity });
   const isCreator = guest?.name === junction.creatorId;
 
   const handleDelete = async (e: React.MouseEvent) => {
@@ -87,7 +89,7 @@ export const JunctionCard = React.memo(
             <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-white/5 border border-white/10 text-xs font-medium">
               <Users size={12} className={isFull ? "text-rose-400" : "text-emerald-400"} />
               <span className={isFull ? "text-rose-400 font-bold" : "text-slate-300 font-semibold"}>
-                {junction.currentCount}/{junction.maxParticipants || 7}
+                {participantCount}/{maxCapacity}
               </span>
             </div>
           </div>
@@ -164,7 +166,7 @@ export const JunctionCard = React.memo(
             className="w-full py-2.5 px-3 rounded-xl bg-white/5 border border-white/10 text-slate-500 font-medium text-xs flex items-center justify-center gap-1.5 cursor-not-allowed"
           >
             <Lock size={13} />
-            <span>Room Full ({junction.maxParticipants}/{junction.maxParticipants})</span>
+            <span>Room Full ({maxCapacity}/{maxCapacity})</span>
           </button>
         ) : (
           <Link

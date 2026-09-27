@@ -79,6 +79,10 @@ CREATE POLICY "Users can update own profile" ON profiles
 CREATE POLICY "Users can insert own profile" ON profiles
   FOR INSERT WITH CHECK (auth.uid() = id);
 
+-- Users can delete their own profile
+CREATE POLICY "Users can delete own profile" ON profiles
+  FOR DELETE USING (auth.uid() = id);
+
 -- CONNECTIONS
 -- Users can view connections if they are the requester or receiver
 CREATE POLICY "Users can view their own connections" ON connections
@@ -167,6 +171,17 @@ CREATE POLICY "messages_insert_policy" ON messages
       WHERE conversation_id = messages.conversation_id AND user_id = auth.uid()
     ) AND auth.uid() = sender_id
   );
+
+-- Users can update (edit) their own messages
+CREATE POLICY "messages_update_policy" ON messages
+  FOR UPDATE TO authenticated
+  USING (auth.uid() = sender_id)
+  WITH CHECK (auth.uid() = sender_id);
+
+-- Users can delete their own messages
+CREATE POLICY "messages_delete_policy" ON messages
+  FOR DELETE TO authenticated
+  USING (auth.uid() = sender_id);
 
 -- ============================================
 -- STORAGE BUCKET: Avatars

@@ -10,16 +10,20 @@ import { AuthModal } from "../auth/AuthModal";
 
 import { NotificationsDropdown } from "./NotificationsDropdown";
 import { useUnreadMessages } from "@/hooks/useUnreadMessages";
+import { useLiveStats } from "@/hooks/useLiveStats";
 
 interface NavbarProps {
   totalOnline?: number;
 }
 
-export function Navbar({ totalOnline = 24 }: NavbarProps) {
+export function Navbar({ totalOnline: propTotalOnline }: NavbarProps) {
   const router = useRouter();
   const { user, isRegistered, isLoaded } = useUser();
   const { unreadCount } = useUnreadMessages();
+  const { totalOnline: liveOnline } = useLiveStats();
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+
+  const displayOnline = typeof propTotalOnline === "number" ? propTotalOnline : liveOnline;
 
   return (
     <>
@@ -39,7 +43,7 @@ export function Navbar({ totalOnline = 24 }: NavbarProps) {
             <div className="flex items-center justify-center gap-1.5 px-3.5 h-9 rounded-full bg-white/5 border border-white/10 shadow-sm text-xs text-slate-300">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)] animate-pulse" />
               <Users size={12} className="text-emerald-400 hidden xs:inline" />
-              <span className="font-semibold text-white">{totalOnline}</span>
+              <span className="font-semibold text-white tracking-tight">{displayOnline}</span>
               <span className="text-slate-400 text-[11px] hidden sm:inline">live</span>
             </div>
 

@@ -54,13 +54,13 @@ export function useUnreadMessages() {
         return;
       }
 
-      const convIds = memberRows.map(r => r.conversation_id);
+      const convIds = memberRows.map((r) => r.conversation_id);
       myConvIdsRef.current = convIds;
 
       const lastReadMap = loadLastReadMap();
       lastReadMapRef.current = lastReadMap;
 
-      // 2. Fetch recent messages in these conversations not sent by me
+      // 2. Fetch recent messages in these conversations not sent by current user
       const { data: messages, error: msgErr } = await supabase
         .from("messages")
         .select("id, conversation_id, created_at, sender_id")
@@ -73,12 +73,30 @@ export function useUnreadMessages() {
       const counts: Record<string, number> = {};
       let total = 0;
 
+      // Check which conversation is actively open right now in this tab
+      const activeConvId =
+        typeof window !== "undefined"
+          ? sessionStorage.getItem("yapclub_active_conversation")
+          : null;
+
       for (const msg of messages) {
+        // If the user is currently viewing this exact conversation, it is active and read
+        if (activeConvId && msg.conversation_id === activeConvId) {
+          continue;
+        }
+
         const lastRead = lastReadMap[msg.conversation_id];
-        // If message was created after the user's last read timestamp for this conversation
-        if (!lastRead || new Date(msg.created_at) > new Date(lastRead)) {
+        if (!lastRead) {
           counts[msg.conversation_id] = (counts[msg.conversation_id] || 0) + 1;
           total++;
+        } else {
+          const msgTime = new Date(msg.created_at).getTime();
+          const readTime = new Date(lastRead).getTime();
+          // Message is unread only if created strictly after the last read timestamp
+          if (msgTime > readTime) {
+            counts[msg.conversation_id] = (counts[msg.conversation_id] || 0) + 1;
+            total++;
+          }
         }
       }
 
@@ -89,28 +107,43 @@ export function useUnreadMessages() {
     }
   }, [user?.id, isRegistered, loadLastReadMap]);
 
-  // Mark a conversation as read
-  const markAsRead = useCallback((conversationId: string) => {
-    if (!conversationId || !user?.id) return;
+  // Mark a conversation as read with clock-skew compensation
+  const markAsRead = useCallback(
+    (conversationId: string, latestMessageTimestamp?: string) => {
+      if (!conversationId || !user?.id) return;
 
-    const currentMap = loadLastReadMap();
-    currentMap[conversationId] = new Date().toISOString();
-    lastReadMapRef.current = currentMap;
-    saveLastReadMap(currentMap);
+      const currentMap = loadLastReadMap();
+      const nowMs = Date.now();
+      const latestMsgMs = latestMessageTimestamp
+        ? new Date(latestMessageTimestamp).getTime()
+        : 0;
 
-    // Update state optimistically
-    setUnreadByConversation(prev => {
-      const updated = { ...prev };
-      const countForConv = updated[conversationId] || 0;
-      delete updated[conversationId];
-      setUnreadCount(c => Math.max(0, c - countForConv));
-      return updated;
-    });
+      // Add a 5000ms safety buffer to ensure any clock drift between Supabase server and user device
+      // does not cause viewed messages to be marked as unread
+      const safeReadTimestamp = new Date(Math.max(nowMs, latestMsgMs) + 5000).toISOString();
+      currentMap[conversationId] = safeReadTimestamp;
+      lastReadMapRef.current = currentMap;
+      saveLastReadMap(currentMap);
 
-    if (typeof window !== "undefined") {
-      window.dispatchEvent(new CustomEvent("yapclub_messages_read", { detail: { conversationId } }));
-    }
-  }, [user?.id, loadLastReadMap, saveLastReadMap]);
+      // Update state optimistically
+      setUnreadByConversation((prev) => {
+        const updated = { ...prev };
+        const countForConv = updated[conversationId] || 0;
+        delete updated[conversationId];
+        setUnreadCount((c) => Math.max(0, c - countForConv));
+        return updated;
+      });
+
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("yapclub_messages_read", {
+            detail: { conversationId, readTimestamp: safeReadTimestamp },
+          })
+        );
+      }
+    },
+    [user?.id, loadLastReadMap, saveLastReadMap]
+  );
 
   useEffect(() => {
     if (!user?.id || !isRegistered) {
@@ -121,11 +154,48 @@ export function useUnreadMessages() {
 
     recalculateUnread();
 
-    // Listen for custom read events from other components/pages
-    const handleReadEvent = () => {
+    // Listen for custom read events from other components/pages/tabs
+    const handleReadEvent = (event: Event) => {
+      const customEvent = event as CustomEvent<{
+        conversationId?: string;
+        readTimestamp?: string;
+      }>;
+      const readConvId = customEvent.detail?.conversationId;
+      const readTimestamp = customEvent.detail?.readTimestamp;
+
+      if (readConvId) {
+        if (readTimestamp) {
+          const map = loadLastReadMap();
+          map[readConvId] = readTimestamp;
+          lastReadMapRef.current = map;
+          saveLastReadMap(map);
+        }
+
+        setUnreadByConversation((prev) => {
+          const updated = { ...prev };
+          const count = updated[readConvId] || 0;
+          delete updated[readConvId];
+          setUnreadCount((c) => Math.max(0, c - count));
+          return updated;
+        });
+      }
       recalculateUnread();
     };
     window.addEventListener("yapclub_messages_read", handleReadEvent);
+
+    // Cross-tab synchronization via storage event
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === getStorageKey()) {
+        recalculateUnread();
+      }
+    };
+    window.addEventListener("storage", handleStorage);
+
+    // Window focus sync (when tab gains focus, re-check unread status)
+    const handleFocus = () => {
+      recalculateUnread();
+    };
+    window.addEventListener("focus", handleFocus);
 
     // Subscribe to new incoming messages with a unique channel name to avoid collisions
     const channelId = `user_messages_${user.id}_${Math.random().toString(36).substring(2, 9)}`;
@@ -142,19 +212,19 @@ export function useUnreadMessages() {
           const newMsg = payload.new as any;
           if (!newMsg || newMsg.sender_id === user.id) return;
 
-          // Check if it belongs to one of user's conversations
+          // Check if the user is currently viewing this conversation in this tab
+          const activeConv = sessionStorage.getItem("yapclub_active_conversation");
+          if (activeConv === newMsg.conversation_id) {
+            markAsRead(newMsg.conversation_id, newMsg.created_at);
+            return;
+          }
+
           if (myConvIdsRef.current.includes(newMsg.conversation_id)) {
-            // If the user is currently viewing this conversation, auto-mark it as read
-            const activeConv = sessionStorage.getItem("yapclub_active_conversation");
-            if (activeConv === newMsg.conversation_id) {
-              markAsRead(newMsg.conversation_id);
-            } else {
-              setUnreadCount(prev => prev + 1);
-              setUnreadByConversation(prev => ({
-                ...prev,
-                [newMsg.conversation_id]: (prev[newMsg.conversation_id] || 0) + 1
-              }));
-            }
+            setUnreadCount((prev) => prev + 1);
+            setUnreadByConversation((prev) => ({
+              ...prev,
+              [newMsg.conversation_id]: (prev[newMsg.conversation_id] || 0) + 1,
+            }));
           } else {
             // Might be a newly created conversation, refresh unread status
             recalculateUnread();
@@ -165,9 +235,11 @@ export function useUnreadMessages() {
 
     return () => {
       window.removeEventListener("yapclub_messages_read", handleReadEvent);
+      window.removeEventListener("storage", handleStorage);
+      window.removeEventListener("focus", handleFocus);
       supabase.removeChannel(channel);
     };
-  }, [user?.id, isRegistered, recalculateUnread, markAsRead]);
+  }, [user?.id, isRegistered, recalculateUnread, markAsRead, loadLastReadMap, saveLastReadMap, getStorageKey]);
 
   return {
     unreadCount,

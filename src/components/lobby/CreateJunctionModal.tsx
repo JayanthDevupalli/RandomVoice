@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { GuestUser, Junction } from "@/lib/types";
-import { X, Plus, Sparkles, Gamepad2, Cpu, Coffee, Music, Languages, Dices, Loader2, Lock, Unlock } from "lucide-react";
+import { X, Plus, Sparkles, Gamepad2, Cpu, Coffee, Music, Languages, Dices, Loader2, Users } from "lucide-react";
 
 interface CreateJunctionModalProps {
   isOpen: boolean;
@@ -27,8 +27,7 @@ export function CreateJunctionModal({ isOpen, onClose, guest, onCreated }: Creat
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [category, setCategory] = useState<Junction["category"]>("casual");
-  const [isPrivate, setIsPrivate] = useState(false);
-  const [maxParticipants, setMaxParticipants] = useState<number>(8);
+  const [maxParticipants, setMaxParticipants] = useState<number>(7);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -57,8 +56,8 @@ export function CreateJunctionModal({ isOpen, onClose, guest, onCreated }: Creat
           description: description.trim() || `Welcome to ${name.trim()} voice room!`,
           category,
           tags: ["Custom", category],
-          maxParticipants: isPrivate ? maxParticipants : 7,
-          isLocked: isPrivate,
+          maxParticipants: maxParticipants || 7,
+          isLocked: false,
           creator: {
             name: guest.name,
             avatar: guest.avatar || "zap",
@@ -168,56 +167,35 @@ export function CreateJunctionModal({ isOpen, onClose, guest, onCreated }: Creat
             />
           </div>
 
-          <div className="flex items-center justify-between p-3.5 sm:p-4 rounded-xl bg-white/5 border border-white/10 mt-4 sm:mt-6">
-            <div className="flex-1 pr-4">
-              <label className="text-sm font-semibold text-white flex items-center gap-1.5 cursor-pointer" onClick={() => setIsPrivate(!isPrivate)}>
-                {isPrivate ? <Lock size={14} className="text-indigo-400 shrink-0" /> : <Unlock size={14} className="text-slate-400 shrink-0" />}
-                <span className="truncate">Private Room (Unlisted)</span>
+          {/* Max Capacity Selector */}
+          <div className="p-3.5 sm:p-4 rounded-xl bg-white/5 border border-white/10 mt-4 sm:mt-5">
+            <div className="flex items-center justify-between mb-2.5">
+              <label className="text-[10px] font-bold uppercase tracking-widest text-slate-400 flex items-center gap-1.5">
+                <Users size={12} className="text-indigo-400" />
+                <span>Max Room Capacity</span>
               </label>
-              <p className="text-[10px] sm:text-xs text-slate-400 mt-0.5 leading-snug">
-                Hidden from feed. Link required.
-              </p>
+              <span className="text-xs font-semibold text-indigo-300">
+                {maxParticipants} seats
+              </span>
             </div>
-            
-            {/* Sleek Toggle Switch */}
-            <button
-              type="button"
-              onClick={() => setIsPrivate(!isPrivate)}
-              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                isPrivate ? "bg-indigo-500" : "bg-white/10"
-              }`}
-            >
-              <span
-                className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                  isPrivate ? "translate-x-5" : "translate-x-0"
-                }`}
-              />
-            </button>
+            <div className="grid grid-cols-5 gap-2">
+              {[2, 4, 6, 7, 8].map((size) => (
+                <button
+                  key={size}
+                  type="button"
+                  onClick={() => setMaxParticipants(size)}
+                  className={`py-2.5 rounded-xl text-xs sm:text-sm font-semibold border transition-all duration-200 cursor-pointer flex flex-col items-center justify-center gap-0.5 ${
+                    maxParticipants === size
+                      ? "bg-indigo-600 text-white border-indigo-500 shadow-md shadow-indigo-600/30 ring-1 ring-white/20 scale-[1.02]"
+                      : "bg-white/5 border-white/10 text-slate-400 hover:border-white/20 hover:text-white hover:bg-white/10"
+                  }`}
+                >
+                  <span>{size}</span>
+                  <span className="text-[9px] font-normal opacity-70">seats</span>
+                </button>
+              ))}
+            </div>
           </div>
-
-          {isPrivate && (
-            <div className="animate-fadeIn mt-4 p-4 rounded-xl bg-indigo-900/10 border border-indigo-500/20">
-              <label className="block text-[10px] font-bold uppercase tracking-widest text-indigo-300 mb-2">
-                Room Capacity
-              </label>
-              <div className="flex gap-2">
-                {[2, 4, 6, 8].map((size) => (
-                  <button
-                    key={size}
-                    type="button"
-                    onClick={() => setMaxParticipants(size)}
-                    className={`flex-1 py-2.5 rounded-xl text-sm font-medium border transition-all duration-300 cursor-pointer ${
-                      maxParticipants === size
-                        ? "bg-indigo-600/30 border-indigo-500/50 text-indigo-100 shadow-[0_0_15px_rgba(79,70,229,0.15)]"
-                        : "bg-white/5 border-white/10 text-slate-400 hover:border-white/20 hover:text-slate-200 hover:bg-white/10"
-                    }`}
-                  >
-                    {size}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
 
           <div className="flex gap-3 pt-4">
             <button

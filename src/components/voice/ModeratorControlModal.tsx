@@ -166,7 +166,7 @@ export function ModeratorControlModal({
             }`}
           >
             <Users size={14} />
-            <span>Participants ({participantList.length}/7)</span>
+            <span>Participants ({participantList.length}/{junction.maxParticipants || 7})</span>
           </button>
           <button
             onClick={() => setActiveTab("room")}

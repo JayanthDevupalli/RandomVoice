@@ -9,6 +9,7 @@ import { JunctionCard } from "@/components/lobby/JunctionCard";
 import { CreateJunctionModal } from "@/components/lobby/CreateJunctionModal";
 import { PullToRefresh } from "@/components/ui/PullToRefresh";
 import { Junction } from "@/lib/types";
+import { supabase } from "@/lib/supabase";
 import {
   Plus,
   Sparkles,
@@ -56,7 +57,7 @@ export default function JunctionsPage() {
   } = useGuestUser();
 
   const [junctions, setJunctions] = useState<Junction[]>([]);
-  const [totalOnline, setTotalOnline] = useState<number>(1);
+  const [totalOnline, setTotalOnline] = useState<number>(0);
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
@@ -72,14 +73,16 @@ export default function JunctionsPage() {
 
   const fetchJunctions = async (signal?: AbortSignal) => {
     try {
-      const res = await fetch("/api/junctions", { signal });
+      const res = await fetch("/api/junctions", { signal, cache: "no-store" });
       const data = await res.json();
       if (data.junctions) {
         setJunctions((prev) => {
           if (JSON.stringify(prev) === JSON.stringify(data.junctions)) return prev;
           return data.junctions;
         });
-        setTotalOnline((prev) => data.totalOnline || prev);
+        if (typeof data.totalOnline === "number") {
+          setTotalOnline(data.totalOnline);
+        }
       }
     } catch (e: any) {
       if (e.name !== "AbortError") console.warn("Failed to fetch junctions:", e);
@@ -96,14 +99,41 @@ export default function JunctionsPage() {
       
       await fetchJunctions(abortController.signal);
       setIsLoading(false);
-      timeoutId = setTimeout(poll, 15000);
+      timeoutId = setTimeout(poll, 8000);
     };
 
     poll();
 
+    // Instant Realtime updates when users join/leave any room or rooms change
+    const channelId = `junctions_hub_${Math.random().toString(36).substring(2, 7)}`;
+    const channel = supabase
+      .channel(channelId)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "junction_participants" },
+        () => {
+          fetchJunctions();
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "junctions" },
+        () => {
+          fetchJunctions();
+        }
+      )
+      .subscribe();
+
+    const handleFocus = () => {
+      fetchJunctions();
+    };
+    window.addEventListener("focus", handleFocus);
+
     return () => {
       if (abortController) abortController.abort();
       clearTimeout(timeoutId);
+      window.removeEventListener("focus", handleFocus);
+      supabase.removeChannel(channel);
     };
   }, []);
 
@@ -132,10 +162,11 @@ export default function JunctionsPage() {
         j.tags.some((t) => t.toLowerCase().includes(searchQuery.toLowerCase()));
       return matchesCategory && matchesSearch;
     })
-    .sort((a, b) => b.currentCount - a.currentCount);
+    .sort((a, b) => (b.participants?.length ?? b.currentCount) - (a.participants?.length ?? a.currentCount));
 
   const publicStations = filteredJunctions.filter((j) => !j.isCustom);
   const userRooms = filteredJunctions.filter((j) => j.isCustom && !j.isLocked);
+  const currentTabRooms = activeTab === "public" ? publicStations : userRooms;
 
   if (!isLoaded || !guest) {
     return (
@@ -163,7 +194,7 @@ export default function JunctionsPage() {
                 Live <span className="font-medium bg-clip-text text-transparent bg-gradient-to-r from-indigo-300 to-purple-300">Rooms</span>
               </h1>
               <span className="text-[11px] px-2.5 py-1 rounded-full bg-white/5 text-slate-300 font-medium border border-white/10 backdrop-blur-md">
-                {filteredJunctions.length} <span className="hidden sm:inline">Active</span>
+                {currentTabRooms.length} <span className="hidden sm:inline">Rooms</span>
               </span>
             </div>
 
@@ -205,7 +236,7 @@ export default function JunctionsPage() {
                   activeTab === "public" ? "bg-white/10 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"
                 }`}
               >
-                Public
+                Public ({publicStations.length})
               </button>
               <button
                 onClick={() => {
@@ -216,7 +247,7 @@ export default function JunctionsPage() {
                   activeTab === "private" ? "bg-white/10 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"
                 }`}
               >
-                Private
+                Private ({userRooms.length})
               </button>
             </div>
             

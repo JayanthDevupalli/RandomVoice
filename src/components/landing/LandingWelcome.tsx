@@ -23,6 +23,7 @@ import { useGuestUser } from "@/hooks/useGuestUser";
 import { COLOR_PALETTES, generateRandomNickname } from "@/lib/guest-utils";
 import { supabase } from "@/lib/supabase";
 import confetti from "canvas-confetti";
+import { useLiveStats } from "@/hooks/useLiveStats";
 
 interface LandingWelcomeProps {
   initialMode?: "guest" | "login";
@@ -31,6 +32,7 @@ interface LandingWelcomeProps {
 export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
   const router = useRouter();
   const { guest, completeOnboarding, isLoaded } = useGuestUser();
+  const { totalOnline, activeRooms, totalRooms } = useLiveStats();
 
   // Mode: "guest" (Instant persona) or "login" (Member auth)
   const [authMode, setAuthMode] = useState<"guest" | "login">(initialMode);
@@ -217,9 +219,12 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
           </div>
 
           <div className="flex items-center gap-2 sm:gap-3 text-xs font-medium">
-            <span className="hidden xs:flex items-center gap-1.5 px-3 py-1.5 sm:px-4 sm:py-2 rounded-full bg-white/5 border border-white/10 backdrop-blur-md shadow-sm text-slate-400">
+            <span className="hidden xs:flex items-center gap-1.5 px-3 py-1.5 sm:px-4 sm:py-2 rounded-full bg-white/5 border border-white/10 backdrop-blur-md shadow-sm text-slate-300">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)] animate-pulse" />
-              Live Rooms
+              <span className="font-semibold text-white tracking-tight">{totalOnline}</span>
+              <span className="text-slate-400">Live</span>
+              <span className="text-white/20">•</span>
+              <span className="text-slate-400">{activeRooms > 0 ? `${activeRooms} active` : `${totalRooms || 26} rooms`}</span>
             </span>
 
             {/* Quick Header Toggle Button */}
@@ -254,8 +259,11 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
           {/* Left Column: Hero Text */}
           <div className="w-full lg:w-[45%] space-y-4 sm:space-y-6 text-center lg:text-left mt-2 sm:mt-0">
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-[11px] sm:text-xs font-medium">
-              <Sparkles size={12} className="text-indigo-400" />
-              <span>Realtime Social Audio Rooms</span>
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              </span>
+              <span>{totalOnline > 0 ? `${totalOnline} users chatting live now` : "Realtime Social Audio Rooms"}</span>
             </div>
 
             <h1 className="text-3xl sm:text-5xl lg:text-[4.2rem] xl:text-[4.8rem] font-light text-white tracking-tight leading-[1.12]">
@@ -652,7 +660,7 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
 
       {/* Footer */}
       <footer className="w-full py-4 sm:py-6 text-center text-[10px] sm:text-xs font-light text-slate-600 relative z-10">
-        <p>yapclub © 2024 • Anonymous & Member Social Audio</p>
+        <p>yapclub © {new Date().getFullYear()} • Anonymous & Member Social Audio</p>
       </footer>
     </div>
   );

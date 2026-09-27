@@ -4,11 +4,14 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { GuestUser, Junction, JunctionParticipant, RoomChatMessage } from "@/lib/types";
 import { useAudioVisualizer } from "@/hooks/useAudioVisualizer";
-import { AudioSettingsModal } from "./AudioSettingsModal";
+import { useUser } from "@/hooks/useUser";
+import { useUnreadMessages } from "@/hooks/useUnreadMessages";
 import { ModeratorControlModal } from "./ModeratorControlModal";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import { ProfilePreviewModal } from "@/components/profile/ProfilePreviewModal";
+import { InRoomMessenger } from "./InRoomMessenger";
 import confetti from "canvas-confetti";
+import { supabase } from "@/lib/supabase";
 import { LiveKitRoom, useTracks, useLocalParticipant, useRoomContext, useConnectionState } from "@livekit/components-react";
 import { Track, RoomEvent, ConnectionState } from "livekit-client";
 import {
@@ -17,8 +20,8 @@ import {
   Volume2,
   VolumeX,
   PhoneOff,
-  Sliders,
   MessageSquare,
+  MessageCircle,
   Smile,
   Users,
   Share2,
@@ -36,12 +39,37 @@ import {
   Shield,
   ThumbsUp,
   Activity,
-  MoreVertical
+  MoreVertical,
+  Reply,
+  Edit2,
+  Trash2,
+  ChevronDown,
+  Lock,
+  Check,
+  Compass,
+  LogIn,
+  RotateCw,
+  Search,
+  Bell,
+  BellOff,
+  Eye,
+  EyeOff
 } from "lucide-react";
 
 interface JunctionRoomProps {
   junctionId: string;
   guest: GuestUser;
+}
+
+interface InRoomPopupMessage {
+  id: string;
+  senderName: string;
+  avatar?: string;
+  color?: string;
+  text: string;
+  isWhisper: boolean;
+  targetIdentity?: string;
+  timestamp: number;
 }
 
 interface VectorReaction {
@@ -154,7 +182,14 @@ function LiveKitDataSync({
 
   useEffect(() => {
     if (localParticipant) {
-      localParticipant.setMicrophoneEnabled(!(isMuted || isMutedByMod || isDeafened)).catch(console.error);
+      localParticipant.setMicrophoneEnabled(
+        !(isMuted || isMutedByMod || isDeafened),
+        {
+          noiseSuppression: true,
+          echoCancellation: true,
+          autoGainControl: true,
+        }
+      ).catch(console.error);
     }
   }, [localParticipant, isMuted, isMutedByMod, isDeafened]);
 
@@ -185,12 +220,19 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
   const [error, setError] = useState<string | null>(null);
   const [kickedNotice, setKickedNotice] = useState<string | null>(null);
 
-  // Audio state
-  const [isMuted, setIsMuted] = useState(false);
+  // Audio state - initial join is ALWAYS MUTED by default
+  const [isMuted, setIsMuted] = useState(true);
   const [isDeafened, setIsDeafened] = useState(false);
-  const [isMutedByMod, setIsMutedByMod] = useState(false);
+  const [isMutedByMod, setIsMutedByMod] = useState(() => {
+    if (typeof window !== "undefined") {
+      return sessionStorage.getItem(`junction_mod_muted_${junctionId}`) === "true";
+    }
+    return false;
+  });
   const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
-  const [isAudioSettingsOpen, setIsAudioSettingsOpen] = useState(false);
+  const { user, isRegistered } = useUser();
+  const { unreadCount } = useUnreadMessages();
+  const [isDirectMessengerOpen, setIsDirectMessengerOpen] = useState(false);
   const [participantVolumes, setParticipantVolumes] = useState<Record<string, number>>({});
   const [activeSpeakers, setActiveSpeakers] = useState<string[]>([]);
 
@@ -204,12 +246,140 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
 
   // Chat & Reactions state
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const [rightPanelTab, setRightPanelTab] = useState<"chat" | "junctions">("chat");
   const [chatMessages, setChatMessages] = useState<RoomChatMessage[]>([]);
   const [inputMessage, setInputMessage] = useState("");
   const [privateRecipient, setPrivateRecipient] = useState<string>("all");
   const [reactions, setReactions] = useState<VectorReaction[]>([]);
   const [isReactionsOpen, setIsReactionsOpen] = useState(false);
   const [isCopied, setIsCopied] = useState(false);
+
+  // In-Room Whisper Chat: Show msgs / Not show msgs toggle state
+  const [showInRoomPopups, setShowInRoomPopups] = useState<boolean>(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("yapclub_show_inroom_popups");
+      if (saved !== null) return saved === "true";
+    }
+    return true; // Default to Show msgs enabled
+  });
+  const [inRoomPopups, setInRoomPopups] = useState<InRoomPopupMessage[]>([]);
+
+  // Refs for real-time LiveKit handlers to avoid stale closures
+  const isChatOpenRef = useRef(isChatOpen);
+  isChatOpenRef.current = isChatOpen;
+  const rightPanelTabRef = useRef(rightPanelTab);
+  rightPanelTabRef.current = rightPanelTab;
+  const showInRoomPopupsRef = useRef(showInRoomPopups);
+  showInRoomPopupsRef.current = showInRoomPopups;
+  const privateRecipientRef = useRef(privateRecipient);
+  privateRecipientRef.current = privateRecipient;
+
+  const toggleShowInRoomPopups = useCallback(() => {
+    setShowInRoomPopups((prev) => {
+      const next = !prev;
+      if (typeof window !== "undefined") {
+        localStorage.setItem("yapclub_show_inroom_popups", String(next));
+      }
+      if (!next) {
+        setInRoomPopups([]);
+      }
+      return next;
+    });
+  }, []);
+
+  // Other Live Junctions Explorer state
+  const [otherJunctions, setOtherJunctions] = useState<Junction[]>([]);
+  const [isLoadingJunctions, setIsLoadingJunctions] = useState(false);
+  const [junctionSearchQuery, setJunctionSearchQuery] = useState("");
+  const [isSwitchingRoomId, setIsSwitchingRoomId] = useState<string | null>(null);
+  const [switchingRoomName, setSwitchingRoomName] = useState<string | null>(null);
+
+  // Fetch Other Public Junctions
+  const fetchOtherJunctions = useCallback(async () => {
+    try {
+      setIsLoadingJunctions(true);
+      const res = await fetch("/api/junctions");
+      const data = await res.json();
+      if (data?.junctions) {
+        const others = (data.junctions as Junction[]).filter(
+          (j) => j.id !== junctionId && !j.isLocked
+        );
+        setOtherJunctions(others);
+      }
+    } catch (err) {
+      console.warn("Failed to fetch other junctions:", err);
+    } finally {
+      setIsLoadingJunctions(false);
+    }
+  }, [junctionId]);
+
+  useEffect(() => {
+    fetchOtherJunctions();
+    const interval = setInterval(fetchOtherJunctions, 15000);
+    return () => clearInterval(interval);
+  }, [fetchOtherJunctions]);
+
+  // Direct Junction Shifting
+  const handleShiftJunction = async (targetJunctionId: string, targetName: string) => {
+    if (targetJunctionId === junctionId || isSwitchingRoomId) return;
+
+    setIsSwitchingRoomId(targetJunctionId);
+    setSwitchingRoomName(targetName);
+
+    if (typeof window !== "undefined") {
+      sessionStorage.removeItem(`junction_mod_muted_${junctionId}`);
+      sessionStorage.removeItem(`junction_role_${junctionId}`);
+    }
+
+    if (mediaStream) {
+      mediaStream.getTracks().forEach((t) => t.stop());
+    }
+
+    try {
+      await fetch(`/api/junctions/${junctionId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "leave", identity: guest.name }),
+      });
+    } catch (e) {
+      console.error("Failed to leave current junction before shifting:", e);
+    }
+
+    router.push(`/junction/${targetJunctionId}`);
+  };
+
+  // Whisper Chat: Reply, Edit & Auto-Scroll state
+  const [replyingToMessage, setReplyingToMessage] = useState<RoomChatMessage | null>(null);
+  const [editingMessage, setEditingMessage] = useState<RoomChatMessage | null>(null);
+  const chatMessagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Custom Styled Recipient Dropdown state
+  const [isRecipientMenuOpen, setIsRecipientMenuOpen] = useState(false);
+  const recipientMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (recipientMenuRef.current && !recipientMenuRef.current.contains(e.target as Node)) {
+        setIsRecipientMenuOpen(false);
+      }
+    };
+    if (isRecipientMenuOpen) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [isRecipientMenuOpen]);
+
+  const scrollChatToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
+    chatMessagesEndRef.current?.scrollIntoView({ behavior });
+  }, []);
+
+  useEffect(() => {
+    if (isChatOpen) {
+      scrollChatToBottom("smooth");
+    }
+  }, [chatMessages.length, isChatOpen, scrollChatToBottom]);
 
   // LiveKit Data Publish Ref
   const liveKitPublishRef = useRef<((data: any) => void) | null>(null);
@@ -231,8 +401,6 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
     };
   }, [mediaStream]);
 
-
-
   const onRoomMessage = useCallback((data: any) => {
     try {
       if (!data) return;
@@ -246,6 +414,41 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
           if (prev.some((m) => m.id === payload.id)) return prev;
           return [...prev, payload];
         });
+
+        // Trigger pop-up message ONLY if:
+        // 1. Message is NOT from self
+        // 2. Chat drawer is completely closed
+        // 3. showInRoomPopups setting is enabled
+        const isSelf = payload.senderName === guest.name || payload.senderId === guest.id;
+        if (!isSelf && !isChatOpenRef.current && showInRoomPopupsRef.current) {
+          const isWhisper = Boolean(payload.targetIdentity && payload.targetIdentity === guest.name);
+          const newPopup: InRoomPopupMessage = {
+            id: payload.id || `popup_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            senderName: payload.senderName || "Room Participant",
+            avatar: payload.avatar,
+            color: payload.color,
+            text: payload.text || "",
+            isWhisper,
+            targetIdentity: payload.targetIdentity,
+            timestamp: Date.now(),
+          };
+
+          // Strictly ONE pop-up at a time - never stack or flood the screen
+          setInRoomPopups([newPopup]);
+
+          // Auto-dismiss in 4.5s so it gives comfortable time to read clearly
+          setTimeout(() => {
+            setInRoomPopups((prev) => prev.filter((p) => p.id !== newPopup.id));
+          }, 4500);
+        }
+      } else if (type === "chat_edit" && payload) {
+        const { id, text } = payload;
+        setChatMessages((prev) =>
+          prev.map((m) => (m.id === id ? { ...m, text, isEdited: true } : m))
+        );
+      } else if (type === "chat_delete" && payload) {
+        const { id } = payload;
+        setChatMessages((prev) => prev.filter((m) => m.id !== id));
       } else if (type === "reaction" && payload) {
         setReactions((prev) => [...prev, payload]);
         setTimeout(() => {
@@ -274,10 +477,28 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
           if (action === "mute") {
             setIsMutedByMod(true);
             setIsMuted(true);
+            if (typeof window !== "undefined") {
+              sessionStorage.setItem(`junction_mod_muted_${junctionId}`, "true");
+            }
           } else if (action === "unmute") {
             setIsMutedByMod(false);
             setIsMuted(false);
+            if (typeof window !== "undefined") {
+              sessionStorage.removeItem(`junction_mod_muted_${junctionId}`);
+            }
+          } else if (action === "promote_mod") {
+            if (typeof window !== "undefined") {
+              sessionStorage.setItem(`junction_role_${junctionId}`, "moderator");
+            }
+          } else if (action === "demote_mod") {
+            if (typeof window !== "undefined") {
+              sessionStorage.setItem(`junction_role_${junctionId}`, "speaker");
+            }
           } else if (action === "kick" || action === "ban") {
+            if (typeof window !== "undefined") {
+              sessionStorage.removeItem(`junction_mod_muted_${junctionId}`);
+              sessionStorage.removeItem(`junction_role_${junctionId}`);
+            }
             setKickedNotice(
               action === "ban"
                 ? "You have been banned from this junction by the moderator."
@@ -328,6 +549,10 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
         if (!isMounted) return false;
         setJunction(data.junction);
 
+        // Read stored session flags to survive page reloads
+        const storedModMuted = typeof window !== "undefined" && sessionStorage.getItem(`junction_mod_muted_${junctionId}`) === "true";
+        const storedRole = typeof window !== "undefined" ? sessionStorage.getItem(`junction_role_${junctionId}`) : null;
+
         // Join the junction via API
         const joinRes = await fetch(`/api/junctions/${junctionId}`, {
           method: "POST",
@@ -340,9 +565,9 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
               name: guest.name,
               avatar: guest.avatar || "zap",
               color: guest.color || "#6366F1",
-              role: "speaker", // Backend will override if user should be moderator
-              isMuted: false,
-              isMutedByMod: false,
+              role: storedRole || "speaker", // Backend preserves moderator if already host
+              isMuted: true, // Always start MUTED by default
+              isMutedByMod: storedModMuted,
               isSpeaking: false,
               connectionQuality: "excellent",
             },
@@ -353,23 +578,26 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
         if (joinRes.ok && joinData.junction) {
           setJunction(joinData.junction);
           setParticipants(joinData.junction.participants || []);
+
+          // Sync local state if participant is mod-muted or has specific role in DB or session
+          const myParticipant = joinData.junction.participants?.find((p: any) => p.identity === guest.name);
+          if (myParticipant?.isMutedByMod || storedModMuted) {
+            setIsMutedByMod(true);
+            setIsMuted(true);
+            if (typeof window !== "undefined") {
+              sessionStorage.setItem(`junction_mod_muted_${junctionId}`, "true");
+            }
+          }
+          if (myParticipant?.role && typeof window !== "undefined") {
+            sessionStorage.setItem(`junction_role_${junctionId}`, myParticipant.role);
+          }
         } else {
           if (joinData.error) {
             setError(joinData.error);
           }
         }
 
-        setChatMessages([
-          {
-            id: "system-1",
-            senderId: "system",
-            senderName: "Junction Bot",
-            senderAvatar: "bot",
-            senderColor: "#6366F1",
-            text: `Welcome ${guest.name} to the ${data.junction.maxParticipants}-seat voice junction! Room audio is 100% isolated & secure.`,
-            timestamp: Date.now(),
-          },
-        ]);
+        setChatMessages([]);
 
         // Fetch LiveKit Token
         try {
@@ -401,7 +629,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
       }
     }
 
-    // Auto-sync polling every 3.5s for junction updates
+    // Auto-sync polling and real-time updates for junction
     let abortController: AbortController | null = null;
     let pollTimeoutId: NodeJS.Timeout;
 
@@ -410,7 +638,11 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
       abortController = new AbortController();
 
       try {
-        const pollRes = await fetch(`/api/junctions/${junctionId}`, { signal: abortController.signal });
+        const pollRes = await fetch(`/api/junctions/${junctionId}`, {
+          signal: abortController.signal,
+          cache: "no-store",
+          headers: { "Cache-Control": "no-cache" },
+        });
         if (!pollRes.ok) {
           if (pollRes.status === 404 && isMounted) {
             setKickedNotice("This junction room has ended.");
@@ -454,9 +686,15 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
           if (myParticipant?.isMutedByMod && !isMutedByModRef.current) {
             setIsMutedByMod(true);
             setIsMuted(true);
+            if (typeof window !== "undefined") {
+              sessionStorage.setItem(`junction_mod_muted_${junctionId}`, "true");
+            }
           } else if (myParticipant && !myParticipant.isMutedByMod && isMutedByModRef.current) {
             setIsMutedByMod(false);
             setIsMuted(false);
+            if (typeof window !== "undefined") {
+              sessionStorage.removeItem(`junction_mod_muted_${junctionId}`);
+            }
           }
         }
       } catch (err: any) {
@@ -465,49 +703,74 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
         }
       } finally {
         if (isMounted) {
-          pollTimeoutId = setTimeout(pollJunction, 15000);
+          pollTimeoutId = setTimeout(pollJunction, 6000);
         }
       }
     };
 
+    // Realtime Postgres Changes Subscription for Instant Room State Updates
+    const roomChannelId = `room_realtime_${junctionId}_${Math.random().toString(36).substring(2, 7)}`;
+    const roomChannel = supabase
+      .channel(roomChannelId)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "junction_participants",
+          filter: `junction_id=eq.${junctionId}`,
+        },
+        () => {
+          pollJunction();
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "junctions",
+          filter: `id=eq.${junctionId}`,
+        },
+        () => {
+          pollJunction();
+        }
+      )
+      .subscribe();
+
     loadAndJoinJunction().then((success) => {
       if (success && isMounted) {
-        pollTimeoutId = setTimeout(pollJunction, 15000);
+        pollTimeoutId = setTimeout(pollJunction, 6000);
       }
     });
-
-    const handleBeforeUnload = () => {
-      fetch(`/api/junctions/${junctionId}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "leave", identity: guest.name }),
-        keepalive: true,
-      }).catch(() => { });
-    };
-
-    window.addEventListener("beforeunload", handleBeforeUnload);
 
     return () => {
       isMounted = false;
       isRealUnmount.current = true;
       if (abortController) abortController.abort();
       clearTimeout(pollTimeoutId);
-      window.removeEventListener("beforeunload", handleBeforeUnload);
-
-      // Delay leave fetch slightly to bypass React Strict Mode's double unmount/mount cycle
-      setTimeout(() => {
-        if (isRealUnmount.current) {
-          fetch(`/api/junctions/${junctionId}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: "leave", identity: guest.name }),
-            keepalive: true,
-          }).catch(() => { });
-        }
-      }, 200);
+      supabase.removeChannel(roomChannel);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [junctionId, guest.name, guest.avatar, guest.color, guest.id]);
+
+  // Clean disconnect on tab close, back button or page hide
+  useEffect(() => {
+    const handleUnload = () => {
+      try {
+        const payload = JSON.stringify({ action: "leave", identity: guest.name });
+        navigator.sendBeacon(`/api/junctions/${junctionId}`, new Blob([payload], { type: "application/json" }));
+      } catch (e) {}
+    };
+
+    window.addEventListener("pagehide", handleUnload);
+    window.addEventListener("beforeunload", handleUnload);
+
+    return () => {
+      window.removeEventListener("pagehide", handleUnload);
+      window.removeEventListener("beforeunload", handleUnload);
+    };
+  }, [junctionId, guest.name]);
 
   // Sync local speaking state is no longer needed since LiveKit tracks speaking for all participants including local.
 
@@ -654,10 +917,24 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
     router.push("/junctions");
   };
 
-  // Send Chat Message
+  // Send or Edit Chat Message
   const handleSendMessage = (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputMessage.trim()) return;
+
+    if (editingMessage) {
+      const updatedText = inputMessage.trim();
+      setChatMessages((prev) =>
+        prev.map((m) => (m.id === editingMessage.id ? { ...m, text: updatedText, isEdited: true } : m))
+      );
+      liveKitPublishRef.current?.({
+        type: "chat_edit",
+        payload: { id: editingMessage.id, text: updatedText },
+      });
+      setEditingMessage(null);
+      setInputMessage("");
+      return;
+    }
 
     const newMsg: RoomChatMessage = {
       id: "msg_" + Date.now() + "_" + Math.random().toString(36).substring(2, 6),
@@ -669,11 +946,33 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
       timestamp: Date.now(),
       isModerator: isCurrentModerator,
       targetIdentity: privateRecipient !== "all" ? privateRecipient : undefined,
+      replyTo: replyingToMessage ? {
+        id: replyingToMessage.id,
+        senderName: replyingToMessage.senderName,
+        text: replyingToMessage.text.slice(0, 100),
+      } : undefined,
     };
 
     setChatMessages((prev) => [...prev, newMsg]);
     liveKitPublishRef.current?.({ type: "chat_message", payload: newMsg });
     setInputMessage("");
+    setReplyingToMessage(null);
+  };
+
+  // Delete message (available to ALL participants for community safety/moderation)
+  const handleDeleteMessage = (msgId: string) => {
+    setChatMessages((prev) => prev.filter((m) => m.id !== msgId));
+    liveKitPublishRef.current?.({
+      type: "chat_delete",
+      payload: { id: msgId },
+    });
+    if (editingMessage?.id === msgId) {
+      setEditingMessage(null);
+      setInputMessage("");
+    }
+    if (replyingToMessage?.id === msgId) {
+      setReplyingToMessage(null);
+    }
   };
 
   // Send Floating Vector Icon Reaction
@@ -702,6 +1001,11 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
   };
 
   const handleLeave = async () => {
+    if (typeof window !== "undefined") {
+      sessionStorage.removeItem(`junction_mod_muted_${junctionId}`);
+      sessionStorage.removeItem(`junction_role_${junctionId}`);
+    }
+
     if (mediaStream) {
       mediaStream.getTracks().forEach((t) => t.stop());
     }
@@ -815,7 +1119,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
 
   return (
     <div className="relative h-[calc(100vh-3.5rem)] sm:h-[calc(100vh-4rem)] flex flex-col lg:flex-row overflow-hidden bg-background">
-      {/* LiveKit Hidden Audio Manager */}
+      {/* LiveKit Hidden Audio Manager with Auto Noise Suppression & Echo Cancellation */}
       {liveKitToken && liveKitUrl && (
         <LiveKitRoom
           token={liveKitToken}
@@ -823,6 +1127,13 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
           connect={true}
           audio={!isMuted && !isMutedByMod}
           video={false}
+          options={{
+            audioCaptureDefaults: {
+              noiseSuppression: true,
+              echoCancellation: true,
+              autoGainControl: true,
+            },
+          }}
           style={{ display: 'contents' }}
         >
           <RoomConnectionOverlay />
@@ -840,10 +1151,10 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
         </LiveKitRoom>
       )}
 
-      {/* Mod Mute Alert Banner */}
+      {/* Mod Mute Alert Banner - Floating Centered Toast Notification */}
       {isMutedByMod && (
-        <div className="bg-rose-900/90 text-rose-200 border-b border-rose-700/60 px-4 py-2 text-center text-xs font-semibold flex items-center justify-center gap-2 animate-fadeIn z-30">
-          <AlertCircle size={15} className="text-rose-300 shrink-0" />
+        <div className="fixed top-16 sm:top-20 inset-x-4 max-w-md mx-auto bg-rose-950/95 border border-rose-500/50 text-rose-200 px-4 py-2.5 rounded-2xl text-center text-xs font-semibold flex items-center justify-center gap-2 shadow-2xl backdrop-blur-xl z-50 animate-fadeIn pointer-events-auto">
+          <AlertCircle size={16} className="text-rose-400 shrink-0" />
           <span>You have been force-muted by the Junction Moderator.</span>
         </div>
       )}
@@ -1173,116 +1484,623 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
       {/* Slide-out In-Room Whisper Chat Drawer / Right Sidebar */}
       <div 
         className={`
-          fixed inset-x-0 bottom-20 top-14 sm:inset-x-auto sm:right-0 sm:top-16 sm:bottom-24 z-40 bg-[#0B0C10]/95 backdrop-blur-3xl border-t sm:border-t-0 sm:border-l border-white/5 flex flex-col shadow-2xl transition-all duration-300
+          fixed inset-x-0 bottom-20 top-14 sm:inset-x-auto sm:right-0 sm:top-16 sm:bottom-24 z-40 bg-[#0B0C12]/95 backdrop-blur-3xl border-t sm:border-t-0 sm:border-l border-white/[0.08] flex flex-col shadow-2xl transition-all duration-300
           ${isChatOpen ? "translate-y-0 translate-x-0 opacity-100" : "translate-y-[150%] sm:translate-y-0 sm:translate-x-full opacity-0 pointer-events-none"}
-          lg:relative lg:inset-auto lg:z-10 lg:w-[380px] xl:w-[420px] lg:bg-white/[0.02] lg:border-l lg:border-white/5 lg:shadow-none lg:transform-none lg:transition-none lg:opacity-100 lg:pointer-events-auto
+          lg:relative lg:inset-auto lg:z-10 lg:w-[410px] xl:w-[450px] lg:bg-[#0B0C12]/95 lg:border-l lg:border-white/[0.08] lg:shadow-2xl lg:transform-none lg:transition-none lg:opacity-100 lg:pointer-events-auto
           ${!isChatOpen && 'lg:hidden'}
         `}
       >
-        <div className="p-3 sm:p-4 border-b border-white/5 flex flex-col gap-3 shrink-0">
+        {/* Top Header & Tab Switcher */}
+        <div className="p-3 sm:p-4 border-b border-white/[0.08] bg-black/25 flex flex-col gap-2.5 shrink-0">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-full bg-indigo-500/20 flex items-center justify-center text-indigo-400">
-                <MessageSquare size={16} />
-              </div>
-              <span className="font-bold text-sm text-white tracking-tight">Whisper Chat</span>
+            {/* Tab Pill Buttons */}
+            <div className="flex items-center gap-1 p-1 bg-white/[0.05] border border-white/10 rounded-2xl">
+              <button
+                type="button"
+                onClick={() => setRightPanelTab("chat")}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+                  rightPanelTab === "chat"
+                    ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
+                    : "text-slate-400 hover:text-white hover:bg-white/5"
+                }`}
+              >
+                <MessageSquare size={13} />
+                <span>Chat</span>
+                {chatMessages.length > 0 && rightPanelTab !== "chat" && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setRightPanelTab("junctions");
+                  fetchOtherJunctions();
+                }}
+                className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+                  rightPanelTab === "junctions"
+                    ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
+                    : "text-slate-400 hover:text-white hover:bg-white/5"
+                }`}
+              >
+                <Compass size={13} />
+                <span><span className="hidden xs:inline">Other </span>Junctions</span>
+                {otherJunctions.some((j) => j.currentCount > 0) && (
+                  <span className="flex items-center gap-0.5 px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px] font-bold">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    {otherJunctions.filter((j) => j.currentCount > 0).length}
+                  </span>
+                )}
+              </button>
             </div>
-            <button
-              onClick={() => setIsChatOpen(false)}
-              className="p-2 rounded-full text-slate-500 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
-            >
-              <X size={16} />
-            </button>
+
+            <div className="flex items-center gap-1">
+              {rightPanelTab === "chat" && chatMessages.length > 1 && (
+                <button
+                  type="button"
+                  onClick={handleClearChat}
+                  className="px-2.5 py-1 rounded-xl text-[11px] font-medium text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
+                  title="Clear chat"
+                >
+                  Clear
+                </button>
+              )}
+              {rightPanelTab === "junctions" && (
+                <button
+                  type="button"
+                  onClick={fetchOtherJunctions}
+                  className="p-1.5 rounded-full text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+                  title="Refresh junctions"
+                >
+                  <RotateCw size={14} className={isLoadingJunctions ? "animate-spin text-indigo-400" : ""} />
+                </button>
+              )}
+              <button
+                onClick={() => setIsChatOpen(false)}
+                className="w-8 h-8 rounded-full text-slate-400 hover:text-white hover:bg-white/10 flex items-center justify-center transition-all cursor-pointer"
+                title="Close panel"
+              >
+                <X size={16} />
+              </button>
+            </div>
           </div>
-          
-          {/* Private Message Recipient Selector */}
-          <div className="flex items-center gap-2 bg-black/20 rounded-xl p-1 border border-white/5 shadow-inner">
-            <span className="text-[10px] font-bold text-slate-500 pl-2 uppercase tracking-wider">To:</span>
-            <select
-              value={privateRecipient}
-              onChange={(e) => setPrivateRecipient(e.target.value)}
-              className="flex-1 bg-transparent text-[11px] text-slate-200 font-semibold focus:outline-none py-1.5 px-1 cursor-pointer appearance-none [&>option]:bg-slate-900"
-            >
-              <option value="all">Everyone in Room</option>
-              {participants
-                .filter(p => p.identity !== guest.name)
-                .map(p => (
-                  <option key={p.identity} value={p.identity}>{p.name} (Whisper)</option>
-                ))
-              }
-            </select>
-          </div>
+
+          {/* Subheader info depending on tab */}
+          {rightPanelTab === "chat" ? (
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2">
+                {/* Private Message Recipient Selector - Custom Styled Glassmorphic Dropdown */}
+                <div className="relative flex-1" ref={recipientMenuRef}>
+                  <button
+                    type="button"
+                    onClick={() => setIsRecipientMenuOpen(!isRecipientMenuOpen)}
+                    className="w-full flex items-center justify-between gap-2 bg-white/[0.04] hover:bg-white/[0.07] border border-white/10 hover:border-white/20 rounded-2xl px-3.5 py-2 transition-all cursor-pointer shadow-inner active:scale-[0.99]"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider shrink-0">
+                        To:
+                      </span>
+                      <span className="text-xs font-semibold text-white truncate">
+                        {privateRecipient === "all" ? "Everyone in Room" : privateRecipient}
+                      </span>
+                    </div>
+                    <ChevronDown 
+                      size={14} 
+                      className={`text-slate-400 shrink-0 transition-transform duration-200 ${isRecipientMenuOpen ? 'rotate-180 text-white' : ''}`} 
+                    />
+                  </button>
+
+                  {/* Custom Dropdown Menu with Glassmorphic Styling */}
+                  {isRecipientMenuOpen && (
+                    <div className="absolute left-0 right-0 top-full mt-1.5 bg-[#141622]/95 border border-white/10 rounded-2xl shadow-2xl backdrop-blur-2xl p-1.5 z-50 flex flex-col gap-0.5 animate-in fade-in zoom-in-95 duration-150">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPrivateRecipient("all");
+                          setIsRecipientMenuOpen(false);
+                        }}
+                        className={`w-full px-3 py-2 rounded-xl text-left text-xs font-semibold flex items-center justify-between transition-colors cursor-pointer ${
+                          privateRecipient === "all"
+                            ? "bg-indigo-600/20 text-indigo-300 border border-indigo-500/30"
+                            : "text-slate-300 hover:text-white hover:bg-white/5"
+                        }`}
+                      >
+                        <span>Everyone in Room</span>
+                        {privateRecipient === "all" && <Check size={14} className="text-indigo-400" />}
+                      </button>
+
+                      {participants
+                        .filter(p => p.identity !== guest.name)
+                        .map(p => {
+                          const isSelected = privateRecipient === p.identity;
+                          return (
+                            <button
+                              key={p.identity}
+                              type="button"
+                              onClick={() => {
+                                setPrivateRecipient(p.identity);
+                                setIsRecipientMenuOpen(false);
+                              }}
+                              className={`w-full px-3 py-2 rounded-xl text-left text-xs font-semibold flex items-center justify-between transition-colors cursor-pointer ${
+                                isSelected
+                                  ? "bg-indigo-600/20 text-indigo-300 border border-indigo-500/30"
+                                  : "text-slate-300 hover:text-white hover:bg-white/5"
+                              }`}
+                            >
+                              <span className="truncate">{p.name}</span>
+                              {isSelected && <Check size={14} className="text-indigo-400" />}
+                            </button>
+                          );
+                        })}
+                    </div>
+                  )}
+                </div>
+
+                {/* Feature: Show msgs / Not show msgs Toggle */}
+                <button
+                  type="button"
+                  onClick={toggleShowInRoomPopups}
+                  className={`flex items-center gap-1.5 px-3 py-2 rounded-2xl border text-xs font-medium transition-all cursor-pointer shrink-0 active:scale-95 ${
+                    showInRoomPopups
+                      ? "bg-white/10 text-white border-white/20 hover:bg-white/15"
+                      : "bg-transparent text-slate-400 border-white/10 hover:text-slate-200 hover:bg-white/5"
+                  }`}
+                  title={
+                    showInRoomPopups
+                      ? "Side pop-up messages are ON (Click to set Not show msgs)"
+                      : "Side pop-up messages are OFF (Click to set Show msgs)"
+                  }
+                >
+                  {showInRoomPopups ? (
+                    <>
+                      <Eye size={13} className="text-slate-200" />
+                      <span>Show msgs</span>
+                      <span className="w-1.5 h-1.5 rounded-full bg-white/70" />
+                    </>
+                  ) : (
+                    <>
+                      <EyeOff size={13} className="text-slate-500" />
+                      <span>Not show msgs</span>
+                      <span className="w-1.5 h-1.5 rounded-full bg-slate-600" />
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* Status helper banner */}
+              <div className="flex items-center justify-between px-1 text-[10px] text-slate-400">
+                <span className="truncate">
+                  {showInRoomPopups
+                    ? "Pop-up previews active when chat is closed"
+                    : "Pop-up previews hidden"}
+                </span>
+              </div>
+            </div>
+          ) : (
+            <p className="text-[11px] text-slate-400 flex items-center justify-between">
+              <span>Shift directly between active junctions</span>
+              <span className="text-indigo-300 font-semibold">{otherJunctions.length} available</span>
+            </p>
+          )}
         </div>
 
-        {/* Chat Messages Log */}
-        <div className="flex-1 p-3 sm:p-4 overflow-y-auto space-y-3 scroll-smooth">
+        {/* TAB 1: WHISPER CHAT */}
+        {rightPanelTab === "chat" && (
+          <>
+            {/* Chat Messages Log */}
+        <div className="flex-1 p-3 sm:p-4 overflow-y-auto space-y-3.5 scroll-smooth flex flex-col">
           {chatMessages.length === 0 ? (
-             <div className="flex flex-col items-center justify-center h-full text-slate-500 gap-2 opacity-60">
-               <MessageSquare size={32} />
-               <span className="text-xs font-medium">Say hello to the room!</span>
-             </div>
+            <div className="flex flex-col items-center justify-center m-auto text-center py-8 px-4 select-none animate-in fade-in zoom-in-95 duration-200">
+              <div className="w-12 h-12 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 mb-3 shadow-lg shadow-indigo-500/5">
+                <MessageSquare size={22} />
+              </div>
+              <span className="text-sm font-semibold text-slate-200">Start your conversation</span>
+              <p className="text-xs text-slate-400 mt-1 max-w-[220px] leading-relaxed">
+                Send a message to the room or whisper privately to any user.
+              </p>
+            </div>
           ) : chatMessages.map((msg) => {
+            // System Announcement Card
+            if (msg.senderId === "system") {
+              return (
+                <div key={msg.id} className="w-full flex justify-center py-2 px-1">
+                  <div className="max-w-[95%] px-3.5 py-2.5 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-200 text-xs text-center flex items-center gap-2.5 shadow-sm">
+                    <Sparkles size={14} className="text-indigo-400 shrink-0" />
+                    <p className="leading-relaxed font-medium">{msg.text}</p>
+                  </div>
+                </div>
+              );
+            }
+
             const isMe = msg.senderName === guest.name;
             const isPrivate = msg.targetIdentity !== undefined;
 
             return (
-              <div key={msg.id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
+              <div key={msg.id} className={`group/msg relative flex flex-col ${isMe ? 'items-end' : 'items-start'} py-1`}>
+                {/* Sender Header for Incoming Messages */}
                 {!isMe && (
                   <div className="flex items-center gap-1.5 mb-1 pl-1">
-                    <span className="text-[10px] font-semibold text-slate-400">{msg.senderName}</span>
+                    <div className="w-5 h-5 rounded-full overflow-hidden shrink-0 border border-white/10 bg-slate-800">
+                      <UserAvatar avatar={msg.senderAvatar} size="sm" className="!w-full !h-full" />
+                    </div>
+                    <span className="text-[11px] font-semibold text-slate-300">{msg.senderName}</span>
                     {msg.isModerator && (
-                      <Crown size={10} className="text-amber-400" />
+                      <span className="flex items-center gap-0.5 px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                        <Crown size={9} /> Mod
+                      </span>
+                    )}
+                    {isPrivate && (
+                      <span className="flex items-center gap-0.5 px-1.5 py-0.2 rounded text-[9px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                        <Lock size={9} /> Whisper
+                      </span>
                     )}
                   </div>
                 )}
+
+                {/* Header for own whisper */}
+                {isMe && isPrivate && (
+                  <div className="flex items-center gap-1 mb-1 pr-1 text-[10px] font-bold text-purple-300 uppercase tracking-wider">
+                    <Lock size={10} /> Whisper to {msg.targetIdentity}
+                  </div>
+                )}
+
+                {/* Quoted Message Preview if Reply */}
+                {msg.replyTo && (
+                  <div className={`mb-1 px-3 py-1.5 rounded-xl border-l-2 max-w-[85%] text-xs flex flex-col ${
+                    isMe 
+                      ? 'bg-indigo-950/40 border-indigo-400 text-indigo-200' 
+                      : 'bg-black/30 border-purple-400 text-purple-200'
+                  }`}>
+                    <span className="text-[10px] font-bold opacity-80 flex items-center gap-1">
+                      <Reply size={10} /> Replying to {msg.replyTo.senderName}
+                    </span>
+                    <span className="truncate opacity-75 italic text-[11px]">
+                      "{msg.replyTo.text}"
+                    </span>
+                  </div>
+                )}
                 
-                <div className={`
-                  relative max-w-[85%] px-4 py-2.5 text-[13px] sm:text-sm shadow-md backdrop-blur-md leading-relaxed tracking-wide
-                  ${isMe 
-                    ? (isPrivate ? 'rounded-[1.5rem] rounded-br-[4px] text-white bg-gradient-to-br from-fuchsia-600 to-purple-600 shadow-purple-500/20' : 'rounded-[1.5rem] rounded-br-[4px] text-white bg-gradient-to-br from-blue-500 to-indigo-600 shadow-blue-500/20')
-                    : (isPrivate ? 'rounded-[1.5rem] rounded-bl-[4px] border border-white/5 bg-[#2A1635]/90 text-purple-100 border-purple-500/30' : 'rounded-[1.5rem] rounded-bl-[4px] border border-white/5 bg-[#25262B]/90 text-slate-100')
-                  }
-                `}>
-                  {isPrivate && (
-                     <div className={`text-[9px] font-black uppercase tracking-widest mb-1 flex items-center gap-1 opacity-80 ${isMe ? 'text-purple-200' : 'text-purple-300'}`}>
-                       <Shield size={10} /> Whisper
-                     </div>
+                {/* Bubble Container with Non-Overlapping Action Toolbar Beside It */}
+                <div className="relative group/bubble max-w-[85%] flex items-center">
+                  {/* Action Bar for isMe: Placed to the LEFT of the bubble in open row space */}
+                  {isMe && (
+                    <div className="absolute right-full mr-2.5 top-1/2 -translate-y-1/2 opacity-0 group-hover/msg:opacity-100 transition-all duration-150 flex items-center gap-1 bg-[#141622]/95 border border-white/10 rounded-full px-1.5 py-1 shadow-2xl backdrop-blur-xl z-20 pointer-events-none group-hover/msg:pointer-events-auto">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setReplyingToMessage(msg);
+                          setEditingMessage(null);
+                        }}
+                        className="w-6 h-6 rounded-full text-slate-400 hover:text-white hover:bg-white/15 flex items-center justify-center transition-colors cursor-pointer"
+                        title="Reply"
+                        aria-label="Reply"
+                      >
+                        <Reply size={12} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingMessage(msg);
+                          setInputMessage(msg.text);
+                          setReplyingToMessage(null);
+                        }}
+                        className="w-6 h-6 rounded-full text-slate-400 hover:text-amber-300 hover:bg-amber-400/15 flex items-center justify-center transition-colors cursor-pointer"
+                        title="Edit message"
+                        aria-label="Edit"
+                      >
+                        <Edit2 size={12} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteMessage(msg.id)}
+                        className="w-6 h-6 rounded-full text-slate-400 hover:text-rose-400 hover:bg-rose-400/15 flex items-center justify-center transition-colors cursor-pointer"
+                        title="Delete message"
+                        aria-label="Delete"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
                   )}
-                  {msg.text}
+
+                  {/* Message Bubble */}
+                  <div className={`
+                    px-4 py-2.5 text-[13.5px] leading-relaxed shadow-lg backdrop-blur-md break-words transition-all
+                    ${isMe 
+                      ? (isPrivate 
+                          ? 'rounded-2xl rounded-tr-xs text-white bg-gradient-to-br from-purple-600 to-fuchsia-600 shadow-purple-600/25' 
+                          : 'rounded-2xl rounded-tr-xs text-white bg-gradient-to-br from-indigo-600 to-indigo-500 shadow-indigo-600/25')
+                      : (isPrivate 
+                          ? 'rounded-2xl rounded-tl-xs border border-purple-500/30 bg-[#251532]/90 text-purple-100 shadow-purple-950/20' 
+                          : 'rounded-2xl rounded-tl-xs border border-white/[0.08] bg-[#181924]/90 text-slate-100 shadow-black/20')
+                    }
+                  `}>
+                    <span>{msg.text}</span>
+                    {msg.isEdited && (
+                      <span className="text-[10px] opacity-70 ml-1.5 italic select-none">
+                        (edited)
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Action Bar for other users: Placed to the RIGHT of the bubble in open row space */}
+                  {!isMe && (
+                    <div className="absolute left-full ml-2.5 top-1/2 -translate-y-1/2 opacity-0 group-hover/msg:opacity-100 transition-all duration-150 flex items-center gap-1 bg-[#141622]/95 border border-white/10 rounded-full px-1.5 py-1 shadow-2xl backdrop-blur-xl z-20 pointer-events-none group-hover/msg:pointer-events-auto">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setReplyingToMessage(msg);
+                          setEditingMessage(null);
+                        }}
+                        className="w-6 h-6 rounded-full text-slate-400 hover:text-white hover:bg-white/15 flex items-center justify-center transition-colors cursor-pointer"
+                        title="Reply"
+                        aria-label="Reply"
+                      >
+                        <Reply size={12} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteMessage(msg.id)}
+                        className="w-6 h-6 rounded-full text-slate-400 hover:text-rose-400 hover:bg-rose-400/15 flex items-center justify-center transition-colors cursor-pointer"
+                        title="Delete message"
+                        aria-label="Delete"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  )}
                 </div>
-                <span className="text-[9px] text-slate-600 mt-1 px-1">
+
+                <span className="text-[9.5px] text-slate-500 mt-1 px-1 select-none">
                   {new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                 </span>
               </div>
             );
           })}
+          <div ref={chatMessagesEndRef} />
         </div>
 
-        {/* Chat Input */}
-        <form onSubmit={handleSendMessage} className="p-3 sm:p-4 border-t border-white/5 bg-[#0B0C10]/40 shrink-0">
-          <div className="relative flex items-center bg-white/5 border border-white/10 rounded-full p-1 focus-within:border-blue-500/50 focus-within:bg-white/10 transition-all shadow-inner">
+        {/* Reply Context Banner */}
+        {replyingToMessage && (
+          <div className="px-3.5 py-2 bg-indigo-950/70 border-t border-indigo-500/30 flex items-center justify-between gap-2 shrink-0 animate-in fade-in duration-150">
+            <div className="flex items-center gap-2 min-w-0 text-xs">
+              <div className="w-5 h-5 rounded-full bg-indigo-500/20 flex items-center justify-center text-indigo-400 shrink-0">
+                <Reply size={11} />
+              </div>
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className="text-indigo-300 font-semibold truncate">
+                  Replying to {replyingToMessage.senderName}:
+                </span>
+                <span className="text-slate-400 truncate italic text-[11px]">
+                  "{replyingToMessage.text}"
+                </span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setReplyingToMessage(null)}
+              className="w-6 h-6 rounded-full text-slate-400 hover:text-white hover:bg-white/10 flex items-center justify-center shrink-0 cursor-pointer"
+              title="Cancel reply"
+            >
+              <X size={13} />
+            </button>
+          </div>
+        )}
+
+        {/* Edit Context Banner */}
+        {editingMessage && (
+          <div className="px-3.5 py-2 bg-amber-950/70 border-t border-amber-500/30 flex items-center justify-between gap-2 shrink-0 animate-in fade-in duration-150">
+            <div className="flex items-center gap-2 min-w-0 text-xs">
+              <div className="w-5 h-5 rounded-full bg-amber-500/20 flex items-center justify-center text-amber-400 shrink-0">
+                <Edit2 size={11} />
+              </div>
+              <span className="text-amber-300 font-semibold truncate">
+                Editing your message (Enter to save, Esc to cancel)
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setEditingMessage(null);
+                setInputMessage("");
+              }}
+              className="w-6 h-6 rounded-full text-slate-400 hover:text-white hover:bg-white/10 flex items-center justify-center shrink-0 cursor-pointer"
+              title="Cancel edit"
+            >
+              <X size={13} />
+            </button>
+          </div>
+        )}
+
+        {/* Chat Input Area */}
+        <form onSubmit={handleSendMessage} className="p-3 sm:p-4 border-t border-white/[0.08] bg-[#0E0F17]/90 backdrop-blur-xl shrink-0">
+          <div className="relative flex items-center bg-white/[0.04] border border-white/10 rounded-2xl p-1 focus-within:border-indigo-500/60 focus-within:bg-white/[0.07] focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-inner">
             <input
               type="text"
               value={inputMessage}
               onChange={(e) => setInputMessage(e.target.value)}
-              placeholder={privateRecipient !== "all" ? "Send a secret whisper..." : "iMessage room..."}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  if (editingMessage) {
+                    setEditingMessage(null);
+                    setInputMessage("");
+                  } else if (replyingToMessage) {
+                    setReplyingToMessage(null);
+                  }
+                }
+              }}
+              placeholder={
+                editingMessage 
+                  ? "Edit message..." 
+                  : privateRecipient !== "all" 
+                    ? `Whisper to ${privateRecipient}...` 
+                    : "Send a message..."
+              }
               maxLength={200}
-              className="flex-1 bg-transparent px-4 py-2 text-xs sm:text-sm text-white placeholder-slate-500 focus:outline-none"
+              className="flex-1 bg-transparent px-3.5 py-2 text-xs sm:text-sm text-white placeholder-slate-500 focus:outline-none"
             />
             <button
               type="submit"
               disabled={!inputMessage.trim()}
-              className="w-8 h-8 rounded-full flex items-center justify-center bg-blue-500 text-white disabled:opacity-0 disabled:scale-75 hover:bg-blue-400 transition-all duration-300 cursor-pointer shadow-lg shadow-blue-500/20"
+              className="w-8 h-8 rounded-xl flex items-center justify-center bg-indigo-600 hover:bg-indigo-500 active:scale-95 disabled:bg-white/5 disabled:text-slate-600 text-white transition-all shadow-md shadow-indigo-600/20 cursor-pointer disabled:cursor-not-allowed"
+              aria-label="Send message"
             >
               <Send size={14} className={inputMessage.trim() ? "translate-x-0.5 -translate-y-0.5 transition-transform" : ""} />
             </button>
           </div>
         </form>
+          </>
+        )}
+
+        {/* TAB 2: OTHER JUNCTIONS EXPLORER */}
+        {rightPanelTab === "junctions" && (
+          <div className="flex-1 flex flex-col overflow-hidden">
+            {/* Search Input */}
+            <div className="p-3 border-b border-white/[0.06] bg-white/[0.02]">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+                <input
+                  type="text"
+                  value={junctionSearchQuery}
+                  onChange={(e) => setJunctionSearchQuery(e.target.value)}
+                  placeholder="Search live junctions..."
+                  className="w-full pl-8 pr-3 py-1.5 bg-black/40 border border-white/10 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500/50 transition-colors"
+                />
+              </div>
+            </div>
+
+            {/* Junctions List */}
+            <div className="flex-1 overflow-y-auto p-3 space-y-2.5">
+              {isLoadingJunctions && otherJunctions.length === 0 ? (
+                <div className="flex items-center justify-center h-48 text-slate-500 text-xs">
+                  <span className="w-4 h-4 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mr-2" />
+                  Scanning active voice junctions...
+                </div>
+              ) : otherJunctions.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-52 text-center px-4 text-slate-500">
+                  <div className="w-12 h-12 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center text-slate-400 mb-2.5">
+                    <Radio size={22} />
+                  </div>
+                  <h4 className="text-xs font-semibold text-slate-300">No Other Public Junctions</h4>
+                  <p className="text-[11px] text-slate-500 mt-1 max-w-[200px]">
+                    You are currently in the only active public voice junction.
+                  </p>
+                </div>
+              ) : (
+                otherJunctions
+                  .filter((j) =>
+                    j.name.toLowerCase().includes(junctionSearchQuery.toLowerCase()) ||
+                    j.category.toLowerCase().includes(junctionSearchQuery.toLowerCase()) ||
+                    (j.tags && j.tags.some((t) => t.toLowerCase().includes(junctionSearchQuery.toLowerCase())))
+                  )
+                  .map((j) => {
+                    const jCount = j.participants?.length ?? j.currentCount;
+                    const maxCap = j.maxParticipants || 7;
+                    const isOccupied = jCount > 0;
+                    const isSwitching = isSwitchingRoomId === j.id;
+
+                    return (
+                      <div
+                        key={j.id}
+                        className={`p-3.5 rounded-2xl border transition-all duration-200 ${
+                          isOccupied
+                            ? "bg-white/[0.04] hover:bg-white/[0.07] border-white/10 hover:border-indigo-500/30"
+                            : "bg-white/[0.02] border-white/5 opacity-80 hover:opacity-100"
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-2 mb-2">
+                          <div className="min-w-0">
+                            <h4 className="text-xs font-bold text-white truncate max-w-[190px]">
+                              {j.name}
+                            </h4>
+                            <span className="text-[10px] font-medium text-slate-400 capitalize">
+                              {j.category}
+                            </span>
+                          </div>
+
+                          {/* Live Occupancy Status Badge */}
+                          <div
+                            className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold shrink-0 ${
+                              isOccupied
+                                ? "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+                                : "bg-white/5 text-slate-400 border border-white/10"
+                            }`}
+                          >
+                            <span
+                              className={`w-1.5 h-1.5 rounded-full ${
+                                isOccupied ? "bg-emerald-400 animate-pulse shadow-[0_0_6px_rgba(52,211,153,0.8)]" : "bg-slate-500"
+                              }`}
+                            />
+                            <span>
+                              {jCount}/{maxCap} {isOccupied ? "live" : "empty"}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Avatars Preview if participants exist */}
+                        {j.participants && j.participants.length > 0 && (
+                          <div className="flex items-center gap-1 mb-2.5">
+                            <div className="flex -space-x-1.5 overflow-hidden">
+                              {j.participants.slice(0, 4).map((p, idx) => (
+                                <div
+                                  key={p.id || idx}
+                                  className="w-5 h-5 rounded-full border border-black/40 overflow-hidden bg-slate-800"
+                                  title={p.name}
+                                >
+                                  <UserAvatar avatar={p.avatar} color={p.color} size="sm" className="!w-full !h-full" />
+                                </div>
+                              ))}
+                            </div>
+                            <span className="text-[10px] text-slate-400 ml-1.5">
+                              {j.participants[0]?.name}
+                              {j.participants.length > 1 && ` +${j.participants.length - 1} more`}
+                            </span>
+                          </div>
+                        )}
+
+                        {/* Tags */}
+                        {j.tags && j.tags.length > 0 && (
+                          <div className="flex flex-wrap gap-1 mb-3">
+                            {j.tags.slice(0, 3).map((tag, tIdx) => (
+                              <span
+                                key={tIdx}
+                                className="px-1.5 py-0.2 rounded-md bg-white/5 text-[9px] text-slate-400 font-medium"
+                              >
+                                #{tag}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Switch Room Action Button */}
+                        <button
+                          type="button"
+                          disabled={isSwitching || !!isSwitchingRoomId}
+                          onClick={() => handleShiftJunction(j.id, j.name)}
+                          className="w-full py-1.5 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 active:scale-98 disabled:bg-indigo-900/50 disabled:text-indigo-300/50 text-white text-xs font-semibold flex items-center justify-center gap-1.5 shadow-md shadow-indigo-600/20 transition-all cursor-pointer disabled:cursor-wait"
+                        >
+                          {isSwitching ? (
+                            <>
+                              <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                              <span>Switching...</span>
+                            </>
+                          ) : (
+                            <>
+                              <LogIn size={13} />
+                              <span>Switch to this Junction</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    );
+                  })
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Floating Bottom Audio Dock Controls */}
-      <div className="fixed bottom-3 sm:bottom-4 inset-x-0 z-50 flex justify-center px-3 pointer-events-none">
-        <div className="pointer-events-auto p-2 rounded-2xl bg-[#12131A]/80 backdrop-blur-2xl border border-white/10 shadow-2xl flex items-center gap-1.5 sm:gap-2.5">
+      <div className="fixed bottom-3 sm:bottom-4 inset-x-0 z-50 flex justify-center px-2 pointer-events-none">
+        <div className="pointer-events-auto p-1.5 sm:p-2 rounded-2xl bg-[#12131A]/90 backdrop-blur-2xl border border-white/10 shadow-2xl flex items-center gap-1 sm:gap-2.5 max-w-full">
           {/* Mute / Unmute Mic */}
           <button
             onClick={handleToggleMic}
@@ -1348,27 +2166,71 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
 
           {/* Chat Toggle Button */}
           <button
-            onClick={() => setIsChatOpen(!isChatOpen)}
-            className={`relative p-2 sm:p-2.5 rounded-xl text-xs transition-colors cursor-pointer active:scale-95 ${isChatOpen
+            onClick={() => {
+              if (isChatOpen && rightPanelTab === "chat") {
+                setIsChatOpen(false);
+              } else {
+                setRightPanelTab("chat");
+                setIsChatOpen(true);
+                setInRoomPopups([]);
+              }
+            }}
+            className={`relative p-2 sm:p-2.5 rounded-xl text-xs transition-colors cursor-pointer active:scale-95 ${
+              isChatOpen && rightPanelTab === "chat"
                 ? "bg-indigo-600 text-white border border-indigo-500"
                 : "bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10"
-              }`}
-            title="Room Chat"
+            }`}
+            title={showInRoomPopups ? "Room Chat (Show msgs active)" : "Room Chat (Not show msgs)"}
           >
             <MessageSquare size={15} />
-            {chatMessages.length > 1 && !isChatOpen && (
+            {chatMessages.length > 0 && (!isChatOpen || rightPanelTab !== "chat") && (
               <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-indigo-400 rounded-full animate-pulse" />
             )}
           </button>
 
-          {/* Audio Settings Modal Trigger */}
+          {/* Other Junctions Explorer Toggle Button */}
           <button
-            onClick={() => setIsAudioSettingsOpen(true)}
-            className="p-2 sm:p-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 text-xs transition-colors cursor-pointer active:scale-95"
-            title="Settings"
+            onClick={() => {
+              if (isChatOpen && rightPanelTab === "junctions") {
+                setIsChatOpen(false);
+              } else {
+                setRightPanelTab("junctions");
+                setIsChatOpen(true);
+                fetchOtherJunctions();
+              }
+            }}
+            className={`relative p-2 sm:p-2.5 rounded-xl text-xs transition-colors cursor-pointer active:scale-95 ${
+              isChatOpen && rightPanelTab === "junctions"
+                ? "bg-indigo-600 text-white border border-indigo-500"
+                : "bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10"
+            }`}
+            title="Explore Other Junctions"
           >
-            <Sliders size={15} />
+            <Compass size={15} />
+            {otherJunctions.some((j) => j.currentCount > 0) && (
+              <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-emerald-400 rounded-full animate-pulse shadow-[0_0_6px_rgba(52,211,153,0.8)]" />
+            )}
           </button>
+
+          {/* Inside Direct Messages Toggle Button (Only visible to logged-in users with minimalist dock styling) */}
+          {isRegistered && user && (
+            <button
+              onClick={() => setIsDirectMessengerOpen(!isDirectMessengerOpen)}
+              className={`relative p-2 sm:p-2.5 rounded-xl text-xs transition-colors cursor-pointer active:scale-95 ${
+                isDirectMessengerOpen
+                  ? "bg-indigo-600 text-white border border-indigo-500 shadow-md shadow-indigo-600/20"
+                  : "bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10"
+              }`}
+              title="Direct Messages"
+            >
+              <MessageCircle size={15} />
+              {unreadCount > 0 && (
+                <span className="absolute -top-1 -right-1 px-1 min-w-[16px] h-4 rounded-full bg-rose-500 text-white text-[9px] font-extrabold flex items-center justify-center border border-[#12131A] shadow-md animate-pulse">
+                  {unreadCount > 99 ? "99+" : unreadCount}
+                </span>
+              )}
+            </button>
+          )}
 
           <div className="h-5 w-px bg-white/10 mx-0.5" />
 
@@ -1383,13 +2245,6 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
           </button>
         </div>
       </div>
-
-      {/* Audio Settings Modal */}
-      <AudioSettingsModal
-        isOpen={isAudioSettingsOpen}
-        onClose={() => setIsAudioSettingsOpen(false)}
-        micVolume={100}
-      />
 
       {/* Moderator Control Modal */}
       {junction && isCurrentModerator && (
@@ -1413,6 +2268,102 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
         onClose={() => setPreviewParticipant(null)}
         participant={previewParticipant}
       />
+
+      {/* Floating Instagram-Style Direct Messenger for Logged-In Users */}
+      <InRoomMessenger isOpen={isDirectMessengerOpen} onClose={() => setIsDirectMessengerOpen(false)} />
+
+      {/* Junction Switching Transition Overlay */}
+      {isSwitchingRoomId && (
+        <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/85 backdrop-blur-md animate-in fade-in duration-200 select-none">
+          <div className="p-6 rounded-3xl bg-[#12131A] border border-white/10 shadow-2xl flex flex-col items-center text-center max-w-xs mx-4">
+            <div className="w-13 h-13 rounded-2xl bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center text-indigo-400 mb-4 shadow-inner">
+              <Compass size={24} className="animate-spin" />
+            </div>
+            <h3 className="text-base font-bold text-white mb-1">
+              Switching Junction
+            </h3>
+            <p className="text-xs text-indigo-300 font-semibold truncate max-w-[220px] mb-2">
+              {switchingRoomName || "Connecting..."}
+            </p>
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              Disconnecting from current voice audio and entering the new junction...
+            </p>
+          </div>
+        </div>
+      )}
+      {/* Floating Pop-up Notification (In-Room Whisper Chat Preview) - Positioned right above bottom controls dock */}
+      {!isChatOpen && showInRoomPopups && inRoomPopups.length > 0 && (
+        <div className="fixed bottom-20 left-3 right-3 sm:left-auto sm:right-6 sm:bottom-24 z-40 max-w-sm sm:max-w-[340px] mx-auto sm:mx-0 pointer-events-none transition-all duration-200">
+          {inRoomPopups.map((popup) => (
+            <div
+              key={popup.id}
+              onClick={() => {
+                setIsChatOpen(true);
+                setRightPanelTab("chat");
+                if (popup.isWhisper && popup.senderName) {
+                  setPrivateRecipient(popup.senderName);
+                }
+                setInRoomPopups([]);
+              }}
+              className="pointer-events-auto rounded-2xl p-3 sm:p-3.5 bg-[#12131C]/95 backdrop-blur-2xl border border-white/15 shadow-2xl shadow-black/80 transition-all duration-200 animate-in slide-in-from-bottom-3 sm:slide-in-from-right-3 fade-in group cursor-pointer hover:border-white/25 active:scale-[0.99]"
+            >
+              {/* Top Header */}
+              <div className="flex items-center justify-between gap-2 mb-1.5">
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="w-5 h-5 rounded-full overflow-hidden shrink-0 border border-white/15">
+                    <UserAvatar avatar={popup.avatar || "zap"} color={popup.color || "#8B5CF6"} size="sm" className="!w-full !h-full" />
+                  </div>
+                  <span className="text-xs font-bold text-white truncate max-w-[120px] sm:max-w-[150px]">
+                    {popup.senderName}
+                  </span>
+                  {popup.isWhisper && (
+                    <span className="text-[10px] text-slate-300 bg-white/10 px-1.5 py-0.2 rounded-full font-medium flex items-center gap-0.5 shrink-0">
+                      <Lock size={9} /> Whisper
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setInRoomPopups([]);
+                    }}
+                    className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+                    title="Dismiss"
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              </div>
+
+              {/* Message text */}
+              <p className="text-xs text-slate-200 font-medium line-clamp-2 leading-relaxed break-words pl-0.5 mt-0.5">
+                {popup.text}
+              </p>
+
+              {/* Action Footer */}
+              <div className="mt-2 pt-1.5 border-t border-white/[0.08] flex items-center justify-between text-[11px] text-slate-400">
+                <span className="text-indigo-400 font-semibold group-hover:text-indigo-300 transition-colors flex items-center gap-1">
+                  Tap to reply <span className="group-hover:translate-x-0.5 transition-transform">→</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleShowInRoomPopups();
+                  }}
+                  className="text-[10px] text-slate-500 hover:text-slate-300 transition-colors cursor-pointer"
+                  title="Silence future pop-up messages"
+                >
+                  Not show msgs
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

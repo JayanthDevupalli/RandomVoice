@@ -6,18 +6,23 @@ import { supabase } from "@/lib/supabase";
 import { useUser, HybridUser } from "@/hooks/useUser";
 import { Navbar } from "@/components/layout/Navbar";
 import { UserAvatar } from "@/components/ui/UserAvatar";
-import { LogOut, Edit3, Camera, Check, X, ShieldAlert, Loader2, ArrowLeft } from "lucide-react";
+import { LogOut, Edit3, Camera, Check, X, ShieldAlert, Loader2, ArrowLeft, Trash2 } from "lucide-react";
 import { ConnectionsModal } from "@/components/profile/ConnectionsModal";
+import { DeleteAccountModal } from "@/components/profile/DeleteAccountModal";
+import { useGuestUser } from "@/hooks/useGuestUser";
 
 export default function ProfilePage({ params }: { params: { id: string } }) {
   const router = useRouter();
   const { user: currentUser, isRegistered, isLoaded: isAuthLoaded, signOut } = useUser();
+  const { clearProfile } = useGuestUser();
   
   const [profile, setProfile] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [followersCount, setFollowersCount] = useState(0);
   const [followingCount, setFollowingCount] = useState(0);
   const [connectionsModalMode, setConnectionsModalMode] = useState<"followers" | "following" | null>(null);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+  const [isDeletingAccount, setIsDeletingAccount] = useState(false);
   
   // Edit mode state
   const [isEditing, setIsEditing] = useState(false);
@@ -77,11 +82,70 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
     }
 
     fetchProfile();
+
+    // Realtime connection updates for live follower/following counts
+    const channelId = `profile_live_${profileIdToFetch}_${Math.random().toString(36).substring(2, 7)}`;
+    const channel = supabase
+      .channel(channelId)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "connections",
+        },
+        () => {
+          fetchProfile();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [profileIdToFetch, isAuthLoaded, currentUser, isRegistered, router, params.id]);
 
   const handleLogout = async () => {
     await signOut();
     router.push("/");
+  };
+
+  const handleDeleteAccount = async () => {
+    if (!currentUser || !profile) return;
+    setIsDeletingAccount(true);
+
+    try {
+      // 1. Clean up user's active participants and custom junctions
+      await fetch("/api/account/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId: currentUser.id,
+          username: profile.username,
+        }),
+      });
+
+      // 2. Direct RLS-authorized deletion of profile row (cascades to connections, conversation_members, messages)
+      await supabase.from("profiles").delete().eq("id", currentUser.id);
+
+      // 3. Clear local storage caches
+      try {
+        localStorage.removeItem(`yapclub_last_read_${currentUser.id}`);
+        localStorage.removeItem(`yapclub_nicknames_${currentUser.id}`);
+      } catch (e) {}
+
+      // 4. Reset guest session and onboarding flags
+      clearProfile();
+
+      // 5. Sign out of Supabase auth
+      await signOut();
+
+      // 6. Hard redirect to landing page to flush all React and memory states
+      window.location.href = "/";
+    } catch (err) {
+      console.error("Failed to delete account:", err);
+      setIsDeletingAccount(false);
+    }
   };
 
   const saveProfile = async () => {
@@ -284,15 +348,24 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
             </div>
 
             {/* Actions */}
-            <div className="w-full flex items-center justify-center gap-3">
+            <div className="w-full flex flex-wrap items-center justify-center gap-3">
               {isOwner ? (
-                <button
-                  onClick={handleLogout}
-                  className="flex items-center gap-2 px-6 py-2.5 rounded-xl border border-rose-500/20 text-rose-400 hover:bg-rose-500/10 font-medium text-sm transition-colors"
-                >
-                  <LogOut size={16} />
-                  Log Out
-                </button>
+                <>
+                  <button
+                    onClick={handleLogout}
+                    className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/5 text-slate-300 hover:text-white font-medium text-sm transition-all active:scale-95"
+                  >
+                    <LogOut size={16} />
+                    <span>Log Out</span>
+                  </button>
+                  <button
+                    onClick={() => setIsDeleteModalOpen(true)}
+                    className="flex items-center gap-2 px-5 py-2.5 rounded-xl border border-rose-500/20 text-rose-400 hover:bg-rose-500/10 hover:border-rose-500/30 font-medium text-sm transition-all active:scale-95 shadow-sm"
+                  >
+                    <Trash2 size={16} />
+                    <span>Delete Account</span>
+                  </button>
+                </>
               ) : (
                 <button
                   className="w-full max-w-[200px] flex items-center justify-center gap-2 px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm transition-colors shadow-lg shadow-indigo-600/20"
@@ -312,6 +385,16 @@ export default function ProfilePage({ params }: { params: { id: string } }) {
           onClose={() => setConnectionsModalMode(null)}
           currentUser={currentUser}
           mode={connectionsModalMode}
+        />
+      )}
+
+      {isOwner && (
+        <DeleteAccountModal
+          isOpen={isDeleteModalOpen}
+          onClose={() => setIsDeleteModalOpen(false)}
+          onConfirm={handleDeleteAccount}
+          isDeleting={isDeletingAccount}
+          username={profile.username}
         />
       )}
     </div>

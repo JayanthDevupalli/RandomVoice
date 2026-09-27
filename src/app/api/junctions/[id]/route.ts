@@ -10,7 +10,8 @@ import {
   updateJunctionDetails,
 } from "@/lib/junctions-store";
 
-export const revalidate = 5;
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 export async function GET(
   request: NextRequest,
@@ -21,7 +22,14 @@ export async function GET(
     if (!junction) {
       return NextResponse.json({ error: "Junction not found" }, { status: 404 });
     }
-    return NextResponse.json({ junction });
+    return NextResponse.json(
+      { junction },
+      {
+        headers: {
+          "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+        },
+      }
+    );
   } catch (error: any) {
     console.error(`GET /api/junctions/${params.id} error:`, error);
     return NextResponse.json(

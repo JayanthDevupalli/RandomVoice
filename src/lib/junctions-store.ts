@@ -45,7 +45,7 @@ function rowToJunction(row: JunctionRow, participants: ParticipantRow[]): Juncti
     icon: row.icon,
     tags: row.tags || [],
     maxParticipants: row.max_participants,
-    currentCount: row.current_count,
+    currentCount: participants.length,
     createdAt: row.created_at,
     isCustom: row.is_custom,
     creatorId: row.creator_id || undefined,
@@ -90,7 +90,16 @@ async function fetchJunctionWithParticipants(junctionId: string): Promise<Juncti
     .eq("junction_id", junctionId)
     .order("joined_at", { ascending: true });
 
-  return rowToJunction(jRow as JunctionRow, (pRows || []) as ParticipantRow[]);
+  const participants = (pRows || []) as ParticipantRow[];
+  if (jRow.current_count !== participants.length) {
+    // Keep cached DB count synchronized
+    await supabase
+      .from("junctions")
+      .update({ current_count: participants.length })
+      .eq("id", junctionId);
+  }
+
+  return rowToJunction(jRow as JunctionRow, participants);
 }
 
 // ─── Sync current_count helper ──────────────────────────────────────────────
@@ -128,6 +137,18 @@ export async function getAllJunctions(): Promise<Junction[]> {
       participantsByJunction[p.junction_id] = [];
     }
     participantsByJunction[p.junction_id].push(p);
+  }
+
+  // Synchronize any out-of-sync current_count columns in the background
+  for (const row of (jRows as JunctionRow[])) {
+    const realCount = (participantsByJunction[row.id] || []).length;
+    if (row.current_count !== realCount) {
+      supabase
+        .from("junctions")
+        .update({ current_count: realCount })
+        .eq("id", row.id)
+        .then();
+    }
   }
 
   return (jRows as JunctionRow[]).map((row) =>
@@ -233,6 +254,7 @@ export async function addParticipantToJunction(
 
   if (!isAlreadyPresent) {
     // Insert new participant securely
+    const shouldModMute = Boolean(participant.isMutedByMod);
     const { error: insertError } = await supabase.from("junction_participants").insert({
       id: "p_" + Date.now() + "_" + Math.random().toString(36).substr(2, 5), // Securely generate fresh session ID
       junction_id: junctionId,
@@ -241,9 +263,9 @@ export async function addParticipantToJunction(
       avatar: participant.avatar || "zap",
       color: participant.color || "#6366F1",
       role: isMod ? "moderator" : (participant.role || "speaker"),
-      is_muted: participant.isMuted || false,
-      is_muted_by_mod: false,
-      is_speaking: participant.isSpeaking || false,
+      is_muted: shouldModMute ? true : (participant.isMuted !== undefined ? participant.isMuted : true), // Default to muted on entry
+      is_muted_by_mod: shouldModMute,
+      is_speaking: false,
       joined_at: Date.now(),
       connection_quality: participant.connectionQuality || "excellent",
     });
@@ -263,8 +285,9 @@ export async function addParticipantToJunction(
         .eq("id", junctionId);
     }
   } else {
-    // Update existing participant (re-joining)
+    // Update existing participant (re-joining) - preserve role and force-mute state!
     const existing = junction.participants.find((p) => p.identity === participant.identity);
+    const shouldKeepModMute = Boolean(existing?.isMutedByMod || participant.isMutedByMod);
     const { error: updateError } = await supabase
       .from("junction_participants")
       .update({
@@ -272,6 +295,8 @@ export async function addParticipantToJunction(
         avatar: participant.avatar || existing?.avatar || "zap",
         color: participant.color || existing?.color || "#6366F1",
         role: isMod ? "moderator" : (existing?.role || participant.role || "speaker"),
+        is_muted_by_mod: shouldKeepModMute,
+        is_muted: shouldKeepModMute ? true : (existing?.isMuted !== undefined ? existing.isMuted : true),
       })
       .eq("junction_id", junctionId)
       .eq("identity", participant.identity);

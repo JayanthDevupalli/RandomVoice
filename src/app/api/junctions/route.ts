@@ -1,19 +1,26 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAllJunctions, createJunction } from "@/lib/junctions-store";
 
-export const revalidate = 10;
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 export async function GET(request: NextRequest) {
   try {
-
     const list = await getAllJunctions();
     const totalOnline = list.reduce((acc, j) => acc + j.currentCount, 0);
 
-    return NextResponse.json({
-      junctions: list,
-      totalOnline,
-      totalJunctions: list.length,
-    });
+    return NextResponse.json(
+      {
+        junctions: list,
+        totalOnline,
+        totalJunctions: list.length,
+      },
+      {
+        headers: {
+          "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+        },
+      }
+    );
   } catch (error: any) {
     console.error("GET /api/junctions error:", error);
     return NextResponse.json(

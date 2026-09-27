@@ -51,6 +51,12 @@ export interface RoomChatMessage {
   timestamp: number;
   isModerator?: boolean;
   targetIdentity?: string; // For private whispering
+  isEdited?: boolean;
+  replyTo?: {
+    id: string;
+    senderName: string;
+    text: string;
+  };
 }
 
 export interface SoundReaction {
