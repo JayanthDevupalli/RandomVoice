@@ -59,16 +59,42 @@ export function InRoomMessenger({ isOpen, onClose }: InRoomMessengerProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Load nicknames from local storage
+  // Load nicknames from local storage & Supabase user_metadata
   useEffect(() => {
-    if (!user?.id) return;
-    try {
-      const saved = localStorage.getItem(`yapclub_nicknames_${user.id}`);
-      if (saved) setNicknames(JSON.parse(saved));
-    } catch (e) {
-      console.error("Failed to load nicknames:", e);
-    }
-  }, [user?.id]);
+    if (!user?.id || !isRegistered) return;
+
+    const loadNicknames = async () => {
+      let localMap: Record<string, string> = {};
+      try {
+        const saved = localStorage.getItem(`yapclub_nicknames_${user.id}`);
+        if (saved) localMap = JSON.parse(saved);
+      } catch (e) {}
+
+      setNicknames(localMap);
+
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        const cloudMap = session?.user?.user_metadata?.nicknames;
+        if (cloudMap && typeof cloudMap === "object") {
+          const merged = { ...cloudMap, ...localMap };
+          setNicknames(merged);
+        }
+      } catch (e) {}
+    };
+
+    loadNicknames();
+
+    const handleNicknameUpdateEvent = (e: Event) => {
+      const customEvent = e as CustomEvent<Record<string, string>>;
+      if (customEvent.detail) {
+        setNicknames(customEvent.detail);
+      }
+    };
+    window.addEventListener("yapclub_nicknames_updated", handleNicknameUpdateEvent);
+    return () => {
+      window.removeEventListener("yapclub_nicknames_updated", handleNicknameUpdateEvent);
+    };
+  }, [user?.id, isRegistered]);
 
   // Fetch user conversations
   const fetchConversations = useCallback(async () => {
@@ -483,25 +509,30 @@ export function InRoomMessenger({ isOpen, onClose }: InRoomMessengerProps) {
                         return (
                           <div
                             key={m.id}
-                            className={`flex flex-col ${isMe ? "items-end" : "items-start"}`}
+                            className={`flex flex-col min-w-0 max-w-full ${isMe ? "items-end" : "items-start"}`}
                           >
                             <div
-                              className={`max-w-[80%] px-3.5 py-2 rounded-2xl text-xs leading-relaxed break-words shadow-sm ${
+                              className={`max-w-[85%] sm:max-w-[75%] px-3.5 py-2 rounded-2xl text-xs leading-relaxed break-words shadow-sm w-full min-w-0 overflow-hidden ${
                                 isMe
                                   ? "bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-br-xs"
                                   : "bg-white/10 text-slate-200 rounded-bl-xs border border-white/5"
                               }`}
                             >
                               {parsed.replyTo && (
-                                <div className="mb-1.5 px-2 py-1 rounded-lg bg-black/20 text-[10px] border-l-2 border-indigo-400">
-                                  <span className="font-semibold text-indigo-300">@{parsed.replyTo.sender}: </span>
-                                  <span className="opacity-80 truncate">{parsed.replyTo.isVoice ? "🎵 Voice Note" : parsed.replyTo.text}</span>
+                                <div className="mb-1.5 px-2.5 py-1.5 rounded-xl bg-black/30 text-[10px] border-l-2 border-indigo-400 w-full min-w-0 overflow-hidden">
+                                  <div className="flex items-center gap-1 font-semibold text-indigo-300 min-w-0 mb-0.5">
+                                    <span className="truncate">@{parsed.replyTo.sender}</span>
+                                  </div>
+                                  <p className="line-clamp-2 break-words w-full overflow-hidden text-ellipsis opacity-80">
+                                    {parsed.replyTo.isVoice ? "🎵 Voice Note" : parsed.replyTo.text}
+                                  </p>
                                 </div>
                               )}
+
                               {parsed.type === "voice" ? (
                                 <VoiceNotePlayer audioUrl={parsed.audioUrl || ""} duration={parsed.duration} isMe={isMe} />
                               ) : (
-                                <p className="whitespace-pre-wrap select-text">{parsed.text}</p>
+                                <p className="whitespace-pre-wrap select-text break-words w-full overflow-hidden">{parsed.text}</p>
                               )}
                             </div>
                             <span className="text-[9px] text-slate-500 mt-0.5 px-1 select-none flex items-center gap-1">

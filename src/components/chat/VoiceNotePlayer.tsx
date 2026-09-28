@@ -39,15 +39,25 @@ export function VoiceNotePlayer({ audioUrl, duration: initialDuration = 0, isMe 
       setCurrentTime(0);
     };
 
+    const handlePauseOthers = (e: Event) => {
+      const custom = e as CustomEvent<{ audioUrl: string }>;
+      if (custom.detail?.audioUrl !== audioUrl) {
+        audio.pause();
+        setIsPlaying(false);
+      }
+    };
+
     audio.addEventListener("loadedmetadata", handleLoadedMetadata);
     audio.addEventListener("timeupdate", handleTimeUpdate);
     audio.addEventListener("ended", handleEnded);
+    window.addEventListener("yapclub_pause_other_audio", handlePauseOthers);
 
     return () => {
       audio.pause();
       audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
       audio.removeEventListener("timeupdate", handleTimeUpdate);
       audio.removeEventListener("ended", handleEnded);
+      window.removeEventListener("yapclub_pause_other_audio", handlePauseOthers);
       audioRef.current = null;
     };
   }, [audioUrl]);
@@ -58,6 +68,11 @@ export function VoiceNotePlayer({ audioUrl, duration: initialDuration = 0, isMe 
       audioRef.current.pause();
       setIsPlaying(false);
     } else {
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("yapclub_pause_other_audio", { detail: { audioUrl } })
+        );
+      }
       audioRef.current.playbackRate = playbackRate;
       audioRef.current.play().then(() => {
         setIsPlaying(true);

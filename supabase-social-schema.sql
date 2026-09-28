@@ -43,8 +43,12 @@ CREATE TABLE IF NOT EXISTS conversation_members (
   user_id UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
   role TEXT DEFAULT 'member' CHECK (role IN ('admin', 'member')),
   joined_at TIMESTAMPTZ DEFAULT NOW(),
+  last_read_at TIMESTAMPTZ DEFAULT NOW(),
   PRIMARY KEY (conversation_id, user_id)
 );
+
+-- Migration statement for existing databases:
+ALTER TABLE conversation_members ADD COLUMN IF NOT EXISTS last_read_at TIMESTAMPTZ DEFAULT NOW();
 
 -- 5. Messages
 CREATE TABLE IF NOT EXISTS messages (

@@ -32,6 +32,35 @@ const CATEGORY_COLORS: Record<string, { bg: string; text: string; border: string
   casual: { bg: "bg-rose-600/10", text: "text-rose-400", border: "border-rose-500/30" },
 };
 
+const CITY_FAMOUS_MAP: Record<string, string> = {
+  "Hyderabad": "Famous for Biryani, Charminar & Global IT Tech Hub",
+  "Secunderabad": "Famous for Twin City heritage, Railway Hub & Hussain Sagar Lake",
+  "Visakhapatnam": "Famous for RK Beach, Eastern Naval Command & Araku Valley",
+  "Vijayawada": "Famous for Kanaka Durga Temple, Prakasam Barrage & Commerce",
+  "Bengaluru": "Famous for Silicon Valley of India, Garden City & Pub Capital",
+  "Mysuru": "Famous for Mysuru Palace, Silk Sarees & Grand Dasara Festival",
+  "Chennai": "Famous for Marina Beach, Kollywood Cinema & Classical Music",
+  "Coimbatore": "Famous for Manchester of South India, Textiles & Marudhamalai",
+  "Mumbai": "Famous for City of Dreams, Bollywood & Gateway of India",
+  "Pune": "Famous for Cultural Capital of MH, Shaniwar Wada & IT Parks",
+  "Kochi": "Famous for Queen of Arabian Sea, Chinese Nets & Backwaters",
+  "Thiruvananthapuram": "Famous for Padmanabhaswamy Temple & Kovalam Beach",
+  "Ahmedabad": "Famous for Sabarmati Ashram, Textiles & Gujarati Street Food",
+  "Surat": "Famous for Diamond Cutting Capital, Silk Textiles & Ghari Sweets",
+  "Jaipur": "Famous for The Pink City, Hawa Mahal & Royal Rajput Forts",
+  "Udaipur": "Famous for City of Lakes, Lake Palace & Regal Heritage",
+  "Lucknow": "Famous for City of Nawabs, Tunday Kababs & Chikankari Embroidery",
+  "Varanasi": "Famous for Spiritual Capital of India, Kashi Vishwanath & Ganga Ghats",
+  "Kolkata": "Famous for City of Joy, Howrah Bridge, Durga Puja & Rosogolla",
+  "Darjeeling": "Famous for World-famous Tea Gardens, Toy Train & Kanchenjunga Views",
+  "Amritsar": "Famous for Golden Temple, Wagah Border & Amritsari Kulchas",
+  "Ludhiana": "Famous for Industrial Hub of Punjab & Authentic Punjabi Cuisine",
+  "Indore": "Famous for Cleanest City in India, Sarafa Night Market & Poha",
+  "Bhopal": "Famous for City of Lakes, Upper Lake & Royal Begum Heritage",
+  "New Delhi": "Famous for Capital of India, India Gate, Red Fort & Power Hub",
+  "Old Delhi": "Famous for Chandni Chowk, Jama Masjid & Paranthe Wali Gali"
+};
+
 import React from "react";
 
 export const JunctionCard = React.memo(
@@ -39,11 +68,15 @@ export const JunctionCard = React.memo(
     const { guest } = useGuestUser();
     const [isDeleting, setIsDeleting] = useState(false);
 
-  const IconComponent = !junction.isCustom ? MapPin : (CATEGORY_ICONS[junction.category] || Mic);
+  const isPublic = !junction.isCustom && !junction.creatorId && (!junction.id.startsWith("junc_"));
+  const IconComponent = isPublic ? MapPin : (CATEGORY_ICONS[junction.category] || Mic);
   const colorScheme = CATEGORY_COLORS[junction.category] || CATEGORY_COLORS.casual;
-  const displayLabel = !junction.isCustom 
+  const displayLabel = isPublic 
     ? (["North", "South", "East", "West", "Central"].find(r => junction.tags?.includes(r)) || "Public")
     : junction.category;
+  const displayDescription = isPublic 
+    ? (CITY_FAMOUS_MAP[junction.name] || junction.description)
+    : junction.description;
   const participantCount = junction.participants?.length ?? junction.currentCount;
   const maxCapacity = junction.maxParticipants || 7;
   const isFull = participantCount >= maxCapacity;
@@ -95,19 +128,27 @@ export const JunctionCard = React.memo(
           </div>
         </div>
 
-        <div className="flex items-start justify-between gap-2 mb-4">
-          <h3 className="text-sm sm:text-base font-medium text-white group-hover:text-indigo-300 transition-colors line-clamp-1">
-            {junction.name}
-          </h3>
-          {isCreator && (
-            <button
-              onClick={handleDelete}
-              disabled={isDeleting}
-              className="p-1.5 rounded-md text-slate-500 hover:bg-rose-500/20 hover:text-rose-400 transition-colors z-10 shrink-0 disabled:opacity-50"
-              title="Delete Room"
-            >
-              {isDeleting ? <Loader2 size={14} className="animate-spin text-rose-400" /> : <Trash2 size={14} />}
-            </button>
+        <div className="mb-3.5">
+          <div className="flex items-start justify-between gap-2">
+            <h3 className="text-base sm:text-lg font-semibold text-white tracking-tight group-hover:text-indigo-300 transition-colors line-clamp-1">
+              {junction.name}
+            </h3>
+            {isCreator && (
+              <button
+                onClick={handleDelete}
+                disabled={isDeleting}
+                className="p-1.5 rounded-md text-slate-500 hover:bg-rose-500/20 hover:text-rose-400 transition-colors z-10 shrink-0 disabled:opacity-50"
+                title="Delete Room"
+              >
+                {isDeleting ? <Loader2 size={14} className="animate-spin text-rose-400" /> : <Trash2 size={14} />}
+              </button>
+            )}
+          </div>
+
+          {displayDescription && (
+            <p className="text-xs text-slate-400 font-light leading-relaxed line-clamp-2 mt-1 tracking-wide">
+              {displayDescription}
+            </p>
           )}
         </div>
 

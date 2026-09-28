@@ -41,7 +41,7 @@ export function useUnreadMessages() {
     if (!user?.id || !isRegistered) return;
 
     try {
-      // 1. Fetch conversations the user is a member of
+      // 1. Fetch conversations the user is a member of (standard columns only to avoid 400 error)
       const { data: memberRows, error: memberErr } = await supabase
         .from("conversation_members")
         .select("conversation_id, joined_at")
@@ -57,8 +57,14 @@ export function useUnreadMessages() {
       const convIds = memberRows.map((r) => r.conversation_id);
       myConvIdsRef.current = convIds;
 
+      const memberMap: Record<string, string> = {};
+      for (const m of memberRows) {
+        memberMap[m.conversation_id] = m.joined_at;
+      }
+
       const lastReadMap = loadLastReadMap();
-      lastReadMapRef.current = lastReadMap;
+      const updatedLastReadMap = { ...lastReadMap };
+      let mapChanged = false;
 
       // 2. Fetch recent messages in these conversations not sent by current user
       const { data: messages, error: msgErr } = await supabase
@@ -85,19 +91,35 @@ export function useUnreadMessages() {
           continue;
         }
 
-        const lastRead = lastReadMap[msg.conversation_id];
-        if (!lastRead) {
-          counts[msg.conversation_id] = (counts[msg.conversation_id] || 0) + 1;
-          total++;
-        } else {
-          const msgTime = new Date(msg.created_at).getTime();
+        const msgTime = new Date(msg.created_at).getTime();
+        const joinedAtMs = memberMap[msg.conversation_id]
+          ? new Date(memberMap[msg.conversation_id]).getTime()
+          : 0;
+
+        const lastRead = updatedLastReadMap[msg.conversation_id];
+
+        if (lastRead) {
           const readTime = new Date(lastRead).getTime();
-          // Message is unread only if created strictly after the last read timestamp
-          if (msgTime > readTime) {
+          // Message is unread only if created strictly after the last read timestamp (+1s clock buffer)
+          if (msgTime > readTime + 1000) {
             counts[msg.conversation_id] = (counts[msg.conversation_id] || 0) + 1;
             total++;
           }
+        } else {
+          // On first load/new device where lastRead timestamp is missing:
+          // Treat all historical messages prior to initial session as read
+          // and seed the lastReadMap so ancient messages never count as unread on login.
+          const safeSeedTime = new Date(Date.now() + 5000).toISOString();
+          updatedLastReadMap[msg.conversation_id] = safeSeedTime;
+          mapChanged = true;
         }
+      }
+
+      if (mapChanged) {
+        lastReadMapRef.current = updatedLastReadMap;
+        saveLastReadMap(updatedLastReadMap);
+      } else {
+        lastReadMapRef.current = lastReadMap;
       }
 
       setUnreadByConversation(counts);
@@ -105,7 +127,7 @@ export function useUnreadMessages() {
     } catch (err) {
       console.error("Error calculating unread messages:", err);
     }
-  }, [user?.id, isRegistered, loadLastReadMap]);
+  }, [user?.id, isRegistered, loadLastReadMap, saveLastReadMap]);
 
   // Mark a conversation as read with clock-skew compensation
   const markAsRead = useCallback(
@@ -118,9 +140,9 @@ export function useUnreadMessages() {
         ? new Date(latestMessageTimestamp).getTime()
         : 0;
 
-      // Add a 5000ms safety buffer to ensure any clock drift between Supabase server and user device
+      // Add a 10000ms safety buffer to ensure server clock drift or client time
       // does not cause viewed messages to be marked as unread
-      const safeReadTimestamp = new Date(Math.max(nowMs, latestMsgMs) + 5000).toISOString();
+      const safeReadTimestamp = new Date(Math.max(nowMs, latestMsgMs) + 10000).toISOString();
       currentMap[conversationId] = safeReadTimestamp;
       lastReadMapRef.current = currentMap;
       saveLastReadMap(currentMap);
@@ -241,10 +263,50 @@ export function useUnreadMessages() {
     };
   }, [user?.id, isRegistered, recalculateUnread, markAsRead, loadLastReadMap, saveLastReadMap, getStorageKey]);
 
+  const markAllAsRead = useCallback(async () => {
+    if (!user?.id) return;
+    const currentMap = loadLastReadMap();
+    const safeReadTimestamp = new Date(Date.now() + 10000).toISOString();
+
+    let convIds = myConvIdsRef.current;
+    if (convIds.length === 0) {
+      const { data } = await supabase
+        .from("conversation_members")
+        .select("conversation_id")
+        .eq("user_id", user.id);
+      if (data) {
+        convIds = data.map((d: any) => d.conversation_id);
+        myConvIdsRef.current = convIds;
+      }
+    }
+
+    for (const convId of convIds) {
+      currentMap[convId] = safeReadTimestamp;
+    }
+    lastReadMapRef.current = currentMap;
+    saveLastReadMap(currentMap);
+    setUnreadByConversation({});
+    setUnreadCount(0);
+
+    // Persist to database
+    supabase
+      .from("conversation_members")
+      .update({ last_read_at: safeReadTimestamp } as any)
+      .eq("user_id", user.id)
+      .then();
+
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent("yapclub_messages_read", { detail: {} })
+      );
+    }
+  }, [user?.id, loadLastReadMap, saveLastReadMap]);
+
   return {
     unreadCount,
     unreadByConversation,
     markAsRead,
+    markAllAsRead,
     refreshUnread: recalculateUnread,
   };
 }

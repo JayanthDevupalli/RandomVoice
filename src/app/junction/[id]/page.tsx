@@ -4,9 +4,12 @@ import { useUser } from "@/hooks/useUser";
 import { Navbar } from "@/components/layout/Navbar";
 import { JunctionRoom } from "@/components/voice/JunctionRoom";
 import { Radio } from "lucide-react";
+import { useParams } from "next/navigation";
 
-export default function JunctionVoicePage({ params }: { params: { id: string } }) {
+export default function JunctionVoicePage({ params: propParams }: { params?: { id: string } }) {
   const { user, isLoaded } = useUser();
+  const routeParams = useParams();
+  const junctionId = (routeParams?.id as string) || propParams?.id || "";
 
   if (!isLoaded || !user) {
     return (
@@ -22,8 +25,9 @@ export default function JunctionVoicePage({ params }: { params: { id: string } }
   return (
     <div className="min-h-screen flex flex-col bg-background selection:bg-indigo-500 selection:text-white">
       <main className="flex-1 flex flex-col">
-        <JunctionRoom junctionId={params.id} guest={user as any} />
+        <JunctionRoom junctionId={junctionId} guest={user as any} />
       </main>
     </div>
   );
 }
+

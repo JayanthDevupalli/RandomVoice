@@ -99,7 +99,7 @@ export default function JunctionsPage() {
       
       await fetchJunctions(abortController.signal);
       setIsLoading(false);
-      timeoutId = setTimeout(poll, 8000);
+      timeoutId = setTimeout(poll, 30000);
     };
 
     poll();
@@ -149,6 +149,13 @@ export default function JunctionsPage() {
     setJunctions((prev) => prev.filter((j) => j.id !== id));
   };
 
+  const isPublicJunction = (j: Junction) => {
+    if (j.isCustom || j.creatorId || (typeof j.id === "string" && j.id.startsWith("junc_"))) {
+      return false;
+    }
+    return (typeof j.id === "string" && j.id.startsWith("station_")) || (Array.isArray(j.tags) && j.tags.includes("Public"));
+  };
+
   const filteredJunctions = junctions
     .filter((j) => {
       const matchesCategory =
@@ -164,8 +171,8 @@ export default function JunctionsPage() {
     })
     .sort((a, b) => (b.participants?.length ?? b.currentCount) - (a.participants?.length ?? a.currentCount));
 
-  const publicStations = filteredJunctions.filter((j) => !j.isCustom);
-  const userRooms = filteredJunctions.filter((j) => j.isCustom && !j.isLocked);
+  const publicStations = filteredJunctions.filter(isPublicJunction);
+  const userRooms = filteredJunctions.filter((j) => !isPublicJunction(j) && !j.isLocked);
   const currentTabRooms = activeTab === "public" ? publicStations : userRooms;
 
   if (!isLoaded || !guest) {

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { supabase } from "@/lib/supabase";
+import { supabaseAdmin } from "@/lib/supabase-admin";
 
 export const dynamic = "force-dynamic";
 
@@ -12,7 +12,7 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json({ error: "Missing required parameters" }, { status: 400 });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from("messages")
       .update({ content })
       .eq("id", id)
@@ -21,7 +21,7 @@ export async function PATCH(request: NextRequest) {
       .single();
 
     if (error) {
-      console.error("Error updating message:", error);
+      console.error("Error updating message via admin:", error);
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
@@ -43,14 +43,14 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json({ error: "Missing id or userId" }, { status: 400 });
     }
 
-    const { error } = await supabase
+    const { error } = await supabaseAdmin
       .from("messages")
       .delete()
       .eq("id", id)
       .eq("sender_id", userId);
 
     if (error) {
-      console.error("Error deleting message:", error);
+      console.error("Error deleting message via admin:", error);
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
@@ -60,3 +60,4 @@ export async function DELETE(request: NextRequest) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
+

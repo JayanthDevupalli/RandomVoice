@@ -20,8 +20,10 @@ import {
   ShieldAlert,
   ShieldCheck,
   Check,
+  CheckCheck,
   Reply,
-  Volume2
+  Volume2,
+  ArrowDown
 } from "lucide-react";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import { useRouter } from "next/navigation";
@@ -91,11 +93,28 @@ export default function MessagesPage() {
   const audioStreamRef = useRef<MediaStream | null>(null);
   const textInputRef = useRef<HTMLInputElement>(null);
 
-  // --- Feature 6: Active Status & Typing ---
+  // --- Feature 6: Active Status, Typing & Read Receipts ---
   const [isOtherUserOnline, setIsOtherUserOnline] = useState(false);
   const [isOtherUserTyping, setIsOtherUserTyping] = useState(false);
+  const [otherUserLastReadAt, setOtherUserLastReadAt] = useState<string | null>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const presenceChannelRef = useRef<any>(null);
+
+  // --- Scroll to Bottom & Container ---
+  const chatContainerRef = useRef<HTMLDivElement>(null);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [unreadNewMsgs, setUnreadNewMsgs] = useState(0);
+
+  // Scroll handler for detecting upward scrolling
+  const handleChatScroll = () => {
+    if (!chatContainerRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = chatContainerRef.current;
+    const isScrolledUp = scrollHeight - scrollTop - clientHeight > 140;
+    setShowScrollToBottom(isScrolledUp);
+    if (!isScrolledUp) {
+      setUnreadNewMsgs(0);
+    }
+  };
 
   // Auto-scroll to bottom of chat
   const scrollToBottom = (behavior: ScrollBehavior = "smooth") => {
@@ -103,7 +122,11 @@ export default function MessagesPage() {
   };
 
   useEffect(() => {
-    scrollToBottom("auto");
+    if (showScrollToBottom) {
+      setUnreadNewMsgs(prev => prev + 1);
+    } else {
+      scrollToBottom("auto");
+    }
   }, [messages.length, activeConversationId]);
 
   // Support direct linking via ?id=
@@ -286,18 +309,47 @@ export default function MessagesPage() {
 
   const activeConversation = conversations.find(c => c.id === activeConversationId);
 
-  // Load saved contact nicknames
+  // Load saved contact nicknames (local storage + Supabase user_metadata backup)
   useEffect(() => {
-    if (!user?.id) return;
-    try {
-      const saved = localStorage.getItem(`yapclub_nicknames_${user.id}`);
-      if (saved) setNicknames(JSON.parse(saved));
-    } catch (e) {
-      console.error("Failed to load nicknames:", e);
-    }
-  }, [user?.id]);
+    if (!user?.id || !isRegistered) return;
 
-  const handleSaveNickname = (targetUserId: string, newNickname: string) => {
+    const loadNicknames = async () => {
+      let localMap: Record<string, string> = {};
+      try {
+        const saved = localStorage.getItem(`yapclub_nicknames_${user.id}`);
+        if (saved) localMap = JSON.parse(saved);
+      } catch (e) {}
+
+      setNicknames(localMap);
+
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        const cloudMap = session?.user?.user_metadata?.nicknames;
+        if (cloudMap && typeof cloudMap === "object") {
+          const merged = { ...cloudMap, ...localMap };
+          setNicknames(merged);
+          localStorage.setItem(`yapclub_nicknames_${user.id}`, JSON.stringify(merged));
+        }
+      } catch (e) {
+        console.error("Failed to load cloud nicknames:", e);
+      }
+    };
+
+    loadNicknames();
+
+    const handleNicknameUpdateEvent = (e: Event) => {
+      const customEvent = e as CustomEvent<Record<string, string>>;
+      if (customEvent.detail) {
+        setNicknames(customEvent.detail);
+      }
+    };
+    window.addEventListener("yapclub_nicknames_updated", handleNicknameUpdateEvent);
+    return () => {
+      window.removeEventListener("yapclub_nicknames_updated", handleNicknameUpdateEvent);
+    };
+  }, [user?.id, isRegistered]);
+
+  const handleSaveNickname = async (targetUserId: string, newNickname: string) => {
     if (!user?.id || !targetUserId) return;
     const updated = { ...nicknames };
     if (newNickname.trim()) {
@@ -305,18 +357,39 @@ export default function MessagesPage() {
     } else {
       delete updated[targetUserId];
     }
+    
+    // 1. Update React state immediately
     setNicknames(updated);
+
+    // 2. Persist to localStorage
     try {
       localStorage.setItem(`yapclub_nicknames_${user.id}`, JSON.stringify(updated));
     } catch (e) {
-      console.error("Failed to save nickname:", e);
+      console.error("Failed to save nickname to localStorage:", e);
     }
+
+    // 3. Broadcast event to other open components/tabs
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent("yapclub_nicknames_updated", { detail: updated })
+      );
+    }
+
     setIsNicknameModalOpen(false);
+
+    // 4. Persist to Supabase user_metadata for cloud persistence across logins
+    try {
+      await supabase.auth.updateUser({
+        data: { nicknames: updated }
+      });
+    } catch (e) {
+      console.error("Failed to sync nicknames to Supabase user_metadata:", e);
+    }
   };
 
   // Load and sync blocked users
   useEffect(() => {
-    if (!user?.id) return;
+    if (!user?.id || !isRegistered) return;
     try {
       const saved = localStorage.getItem(`yapclub_blocked_${user.id}`);
       if (saved) setBlockedUsers(JSON.parse(saved));
@@ -334,7 +407,7 @@ export default function MessagesPage() {
       }
     };
     fetchBlocked();
-  }, [user?.id]);
+  }, [user?.id, isRegistered]);
 
   const handleToggleBlock = async (targetUserId: string) => {
     if (!user?.id || !targetUserId) return;
@@ -394,6 +467,17 @@ export default function MessagesPage() {
       setIsDeleting(false);
     }
   };
+
+  // Cleanup microphone stream & timer on page unmount
+  useEffect(() => {
+    return () => {
+      if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+      if (audioStreamRef.current) {
+        audioStreamRef.current.getTracks().forEach((track) => track.stop());
+        audioStreamRef.current = null;
+      }
+    };
+  }, []);
 
   // --- Feature: Voice Notes (Real Audio Recording) ---
   const startVoiceRecording = async () => {
@@ -542,18 +626,14 @@ export default function MessagesPage() {
     cancelEditing();
 
     try {
-      const { error } = await supabase
-        .from("messages")
-        .update({ content: newContent })
-        .eq("id", messageId)
-        .eq("sender_id", user.id);
+      const res = await fetch("/api/messages", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: messageId, content: newContent, userId: user.id }),
+      });
 
-      if (error) {
-        await fetch("/api/messages", {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id: messageId, content: newContent, userId: user.id }),
-        });
+      if (!res.ok) {
+        console.error("Error editing message via API:", await res.text());
       }
     } catch (err) {
       console.error("Failed to edit message:", err);
@@ -570,16 +650,12 @@ export default function MessagesPage() {
     setIsDeletingMessage(false);
 
     try {
-      const { error } = await supabase
-        .from("messages")
-        .delete()
-        .eq("id", targetId)
-        .eq("sender_id", user.id);
+      const res = await fetch(`/api/messages?id=${targetId}&userId=${user.id}`, {
+        method: "DELETE",
+      });
 
-      if (error) {
-        await fetch(`/api/messages?id=${targetId}&userId=${user.id}`, {
-          method: "DELETE",
-        });
+      if (!res.ok) {
+        console.error("Error deleting message via API:", await res.text());
       }
     } catch (err) {
       console.error("Failed to delete message:", err);
@@ -598,11 +674,12 @@ export default function MessagesPage() {
     }
   };
 
-  // Realtime Presence & Typing indicator
+  // Realtime Presence, Typing & Read Receipts indicator
   useEffect(() => {
     if (!activeConversationId || !user?.id) {
       setIsOtherUserOnline(false);
       setIsOtherUserTyping(false);
+      setOtherUserLastReadAt(null);
       return;
     }
 
@@ -610,6 +687,7 @@ export default function MessagesPage() {
     if (!otherUserId || activeConversation?.type === "group") {
       setIsOtherUserOnline(false);
       setIsOtherUserTyping(false);
+      setOtherUserLastReadAt(null);
       return;
     }
 
@@ -621,14 +699,21 @@ export default function MessagesPage() {
       .on("presence", { event: "sync" }, () => {
         const state = presenceChannel.presenceState();
         let isOnline = false;
+        let latestReadTime: string | null = null;
         for (const key of Object.keys(state)) {
           const presences = state[key] as any[];
-          if (presences.some((p: any) => p.user_id === otherUserId)) {
+          const otherPresence = presences.find((p: any) => p.user_id === otherUserId);
+          if (otherPresence) {
             isOnline = true;
-            break;
+            if (otherPresence.last_read_at) {
+              latestReadTime = otherPresence.last_read_at;
+            }
           }
         }
         setIsOtherUserOnline(isOnline);
+        if (latestReadTime) {
+          setOtherUserLastReadAt(latestReadTime);
+        }
       })
       .on("broadcast", { event: "typing" }, (payload: any) => {
         if (payload.payload?.user_id === otherUserId) {
@@ -639,9 +724,15 @@ export default function MessagesPage() {
           }, 2500);
         }
       })
+      .on("broadcast", { event: "read_receipt" }, (payload: any) => {
+        if (payload.payload?.user_id === otherUserId && payload.payload?.read_at) {
+          setOtherUserLastReadAt(payload.payload.read_at);
+        }
+      })
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
-          await presenceChannel.track({ user_id: user.id, online_at: Date.now() });
+          const nowIso = new Date().toISOString();
+          await presenceChannel.track({ user_id: user.id, online_at: Date.now(), last_read_at: nowIso });
         }
       });
 
@@ -916,7 +1007,7 @@ export default function MessagesPage() {
                 const isBlocked = otherUserId ? blockedUsers.includes(otherUserId) : false;
 
                 return (
-                  <div className="h-16 border-b border-white/5 flex items-center justify-between px-3 sm:px-6 shrink-0 bg-background/50 backdrop-blur-md">
+                  <div className="relative z-30 h-16 border-b border-white/5 flex items-center justify-between px-3 sm:px-6 shrink-0 bg-[#090A0F]/90 backdrop-blur-xl shadow-sm">
                     <div className="flex items-center gap-2.5 sm:gap-3.5 min-w-0">
                       {/* Back Button */}
                       <button
@@ -1055,179 +1146,218 @@ export default function MessagesPage() {
               })()}
 
               {/* Chat Messages */}
-              <div className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6 flex flex-col gap-3.5">
-                {messages.length === 0 ? (
-                  <div className="my-auto text-center py-10">
-                    <p className="text-sm text-slate-400">No messages in this chat yet.</p>
-                    <p className="text-xs text-slate-600 mt-1">Send a message to break the ice! 💬</p>
-                  </div>
-                ) : (
-                  messages.map(msg => {
-                    const isMe = msg.sender_id === user.id;
-                    const senderName = msg.profiles?.username || "Someone";
-                    const senderAvatar = msg.profiles?.avatar;
-                    const parsed = parseMessageContent(msg.content);
+              <div className="relative flex-1 min-h-0 flex flex-col">
+                <div 
+                  ref={chatContainerRef}
+                  onScroll={handleChatScroll}
+                  className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6 flex flex-col gap-3.5"
+                >
+                  {messages.length === 0 ? (
+                    <div className="my-auto text-center py-10">
+                      <p className="text-sm text-slate-400">No messages in this chat yet.</p>
+                      <p className="text-xs text-slate-600 mt-1">Send a message to break the ice! 💬</p>
+                    </div>
+                  ) : (
+                    messages.map(msg => {
+                      const isMe = msg.sender_id === user.id;
+                      const senderName = msg.profiles?.username || "Someone";
+                      const senderAvatar = msg.profiles?.avatar;
+                      const parsed = parseMessageContent(msg.content);
 
-                    return (
-                      <div 
-                        key={msg.id} 
-                        id={`msg-${msg.id}`}
-                        className={`group relative flex items-end gap-2 transition-all duration-300 rounded-2xl p-1 ${isMe ? 'justify-end' : 'justify-start'}`}
-                      >
-                        {/* Avatar in group for incoming messages */}
-                        {!isMe && activeConversation?.type === "group" && (
-                          <div className="w-7 h-7 rounded-full bg-slate-800 overflow-hidden shrink-0 border border-white/10 mb-1">
-                            {senderAvatar?.includes("http") ? (
-                              <img src={senderAvatar} alt={senderName} className="w-full h-full object-cover" />
-                            ) : (
-                              <UserAvatar avatar={senderAvatar} size="sm" className="!w-full !h-full" />
-                            )}
-                          </div>
-                        )}
-
-                        {/* Hover Actions for own messages (Reply, Edit, Delete) */}
-                        {isMe && (
-                          <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5 bg-[#12131A] border border-white/10 rounded-xl px-1.5 py-0.5 shadow-lg mb-1 backdrop-blur-md">
-                            <button
-                              type="button"
-                              onClick={() => setReplyingTo({
-                                id: msg.id,
-                                sender: senderName,
-                                text: parsed.type === "voice" ? "Voice Note" : parsed.text || "",
-                                isVoice: parsed.type === "voice",
-                              })}
-                              className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
-                              title="Reply"
-                              aria-label="Reply"
-                            >
-                              <Reply size={13} />
-                            </button>
-
-                            {parsed.type !== "voice" && (
-                              <button
-                                type="button"
-                                onClick={() => startEditingMessage(msg.id, msg.content)}
-                                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
-                                title="Edit message"
-                                aria-label="Edit message"
-                              >
-                                <Edit3 size={13} />
-                              </button>
-                            )}
-
-                            <button
-                              type="button"
-                              onClick={() => setDeletingMessageId(msg.id)}
-                              className="p-1 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
-                              title="Delete message"
-                              aria-label="Delete message"
-                            >
-                              <Trash2 size={13} />
-                            </button>
-                          </div>
-                        )}
-
-                        <div className={`max-w-[85%] sm:max-w-[70%] flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
-                          {/* Sender name in group */}
+                      return (
+                        <div 
+                          key={msg.id} 
+                          id={`msg-${msg.id}`}
+                          className={`group relative flex items-end gap-2 transition-all duration-300 rounded-2xl p-1 ${isMe ? 'justify-end' : 'justify-start'}`}
+                        >
+                          {/* Avatar in group for incoming messages */}
                           {!isMe && activeConversation?.type === "group" && (
-                            <span className="text-[11px] font-semibold text-indigo-400 mb-1 px-1">
-                              {senderName}
-                            </span>
+                            <div className="w-7 h-7 rounded-full bg-slate-800 overflow-hidden shrink-0 border border-white/10 mb-1">
+                              {senderAvatar?.includes("http") ? (
+                                <img src={senderAvatar} alt={senderName} className="w-full h-full object-cover" />
+                              ) : (
+                                <UserAvatar avatar={senderAvatar} size="sm" className="!w-full !h-full" />
+                              )}
+                            </div>
                           )}
 
-                          <div 
-                            className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed shadow-md break-words ${
-                              isMe 
-                                ? 'bg-gradient-to-r from-indigo-600 to-indigo-500 text-white rounded-tr-xs' 
-                                : 'bg-white/10 text-slate-100 border border-white/5 rounded-tl-xs backdrop-blur-sm'
-                            }`}
-                          >
-                            {/* Quoted Reply reference if this message was in reply to another */}
-                            {parsed.replyTo && (
-                              <div
-                                onClick={() => scrollToMessage(parsed.replyTo?.id)}
-                                className={`mb-2 px-2.5 py-1.5 rounded-xl text-xs border-l-2 cursor-pointer transition-colors ${
-                                  isMe
-                                    ? "bg-indigo-950/50 border-white/60 hover:bg-indigo-950/70 text-white/90"
-                                    : "bg-white/5 border-indigo-400 hover:bg-white/10 text-slate-300"
-                                }`}
+                          {/* Hover Actions for own messages (Reply, Edit, Delete) */}
+                          {isMe && (
+                            <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5 bg-[#12131A] border border-white/10 rounded-xl px-1.5 py-0.5 shadow-lg mb-1 backdrop-blur-md">
+                              <button
+                                type="button"
+                                onClick={() => setReplyingTo({
+                                  id: msg.id,
+                                  sender: senderName,
+                                  text: parsed.type === "voice" ? "Voice Note" : parsed.text || "",
+                                  isVoice: parsed.type === "voice",
+                                })}
+                                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+                                title="Reply"
+                                aria-label="Reply"
                               >
-                                <div className="flex items-center gap-1 font-semibold text-[11px] mb-0.5 text-indigo-300">
-                                  <Reply size={11} className="rotate-180" />
-                                  <span>{parsed.replyTo.sender}</span>
-                                </div>
-                                <p className="truncate text-[11px] opacity-80 max-w-[220px]">
-                                  {parsed.replyTo.isVoice ? "🎵 Voice Note" : parsed.replyTo.text}
-                                </p>
-                              </div>
+                                <Reply size={13} />
+                              </button>
+
+                              {parsed.type !== "voice" && (
+                                <button
+                                  type="button"
+                                  onClick={() => startEditingMessage(msg.id, msg.content)}
+                                  className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+                                  title="Edit message"
+                                  aria-label="Edit message"
+                                >
+                                  <Edit3 size={13} />
+                                </button>
+                              )}
+
+                              <button
+                                type="button"
+                                onClick={() => setDeletingMessageId(msg.id)}
+                                className="p-1 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
+                                title="Delete message"
+                                aria-label="Delete message"
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
+                          )}
+
+                          <div className={`max-w-[85%] sm:max-w-[70%] min-w-0 flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
+                            {/* Sender name in group */}
+                            {!isMe && activeConversation?.type === "group" && (
+                              <span className="text-[11px] font-semibold text-indigo-400 mb-1 px-1 truncate max-w-full">
+                                {senderName}
+                              </span>
                             )}
 
-                            {/* Voice Note or Text */}
-                            {parsed.type === "voice" ? (
-                              <VoiceNotePlayer
-                                audioUrl={parsed.audioUrl || ""}
-                                duration={parsed.duration}
-                                isMe={isMe}
-                              />
-                            ) : (
-                              <p className="whitespace-pre-wrap select-text">{parsed.text}</p>
-                            )}
-
-                            {/* Timestamp and (edited) indicator */}
                             <div 
-                              className={`text-[9px] mt-1 flex items-center gap-1 select-none ${
-                                isMe ? 'text-indigo-200/80 justify-end' : 'text-slate-400 justify-end'
+                              className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed shadow-md break-words w-full min-w-0 overflow-hidden ${
+                                isMe 
+                                  ? 'bg-gradient-to-r from-indigo-600 to-indigo-500 text-white rounded-tr-xs' 
+                                  : 'bg-white/10 text-slate-100 border border-white/5 rounded-tl-xs backdrop-blur-sm'
                               }`}
                             >
-                              {parsed.isEdited && <span className="italic opacity-80">(edited)</span>}
-                              <span>{new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                              {/* Quoted Reply reference if this message was in reply to another */}
+                              {parsed.replyTo && (
+                                <div
+                                  onClick={() => scrollToMessage(parsed.replyTo?.id)}
+                                  className={`mb-2 px-2.5 py-1.5 rounded-xl text-xs border-l-2 cursor-pointer transition-colors w-full min-w-0 overflow-hidden ${
+                                    isMe
+                                      ? "bg-indigo-950/50 border-white/60 hover:bg-indigo-950/70 text-white/90"
+                                      : "bg-white/5 border-indigo-400 hover:bg-white/10 text-slate-300"
+                                  }`}
+                                >
+                                  <div className="flex items-center gap-1 font-semibold text-[11px] mb-0.5 text-indigo-300 min-w-0">
+                                    <Reply size={11} className="rotate-180 shrink-0" />
+                                    <span className="truncate">{parsed.replyTo.sender}</span>
+                                  </div>
+                                  <p className="line-clamp-2 text-[11px] opacity-80 break-words w-full overflow-hidden text-ellipsis">
+                                    {parsed.replyTo.isVoice ? "🎵 Voice Note" : parsed.replyTo.text}
+                                  </p>
+                                </div>
+                              )}
+
+                              {/* Voice Note or Text */}
+                              {parsed.type === "voice" ? (
+                                <VoiceNotePlayer
+                                  audioUrl={parsed.audioUrl || ""}
+                                  duration={parsed.duration}
+                                  isMe={isMe}
+                                />
+                              ) : (
+                                <p className="whitespace-pre-wrap select-text">{parsed.text}</p>
+                              )}
+
+                              {/* Timestamp, (edited) and Read Receipts */}
+                              <div 
+                                className={`text-[9px] mt-1 flex items-center gap-1 select-none ${
+                                  isMe ? 'text-indigo-200/80 justify-end' : 'text-slate-400 justify-end'
+                                }`}
+                              >
+                                {parsed.isEdited && <span className="italic opacity-80">(edited)</span>}
+                                <span>{new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+
+                                {/* Read Receipt status icons (WhatsApp style) for 1-on-1 chats */}
+                                {isMe && activeConversation?.type !== "group" && (
+                                  <span className="ml-0.5 inline-flex items-center">
+                                    {otherUserLastReadAt && new Date(msg.created_at).getTime() <= new Date(otherUserLastReadAt).getTime() ? (
+                                      <span title="Seen"><CheckCheck size={13} className="text-sky-300 font-bold" /></span>
+                                    ) : isOtherUserOnline ? (
+                                      <span title="Delivered"><CheckCheck size={13} className="text-indigo-200/70" /></span>
+                                    ) : (
+                                      <span title="Sent"><Check size={13} className="text-indigo-200/70" /></span>
+                                    )}
+                                  </span>
+                                )}
+                              </div>
                             </div>
                           </div>
-                        </div>
 
-                        {/* Hover Actions for incoming messages (Reply only) */}
-                        {!isMe && (
-                          <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5 bg-[#12131A] border border-white/10 rounded-xl px-1.5 py-0.5 shadow-lg mb-1 backdrop-blur-md">
-                            <button
-                              type="button"
-                              onClick={() => setReplyingTo({
-                                id: msg.id,
-                                sender: senderName,
-                                text: parsed.type === "voice" ? "Voice Note" : parsed.text || "",
-                                isVoice: parsed.type === "voice",
-                              })}
-                              className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
-                              title="Reply"
-                              aria-label="Reply"
-                            >
-                              <Reply size={13} />
-                            </button>
-                          </div>
+                          {/* Hover Actions for incoming messages (Reply only) */}
+                          {!isMe && (
+                            <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5 bg-[#12131A] border border-white/10 rounded-xl px-1.5 py-0.5 shadow-lg mb-1 backdrop-blur-md">
+                              <button
+                                type="button"
+                                onClick={() => setReplyingTo({
+                                  id: msg.id,
+                                  sender: senderName,
+                                  text: parsed.type === "voice" ? "Voice Note" : parsed.text || "",
+                                  isVoice: parsed.type === "voice",
+                                })}
+                                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+                                title="Reply"
+                                aria-label="Reply"
+                              >
+                                <Reply size={13} />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
+
+                  {/* Bouncing Typing Bubble */}
+                  {isOtherUserTyping && activeConversation?.type !== "group" && (
+                    <div className="flex items-center gap-2 justify-start py-1">
+                      <div className="w-7 h-7 rounded-full bg-slate-800 overflow-hidden shrink-0 border border-white/10 flex items-center justify-center">
+                        {activeConversation?.other_user?.avatar?.includes("http") ? (
+                          <img src={activeConversation.other_user.avatar} className="w-full h-full object-cover" />
+                        ) : (
+                          <UserAvatar avatar={activeConversation?.other_user?.avatar} size="sm" className="!w-full !h-full" />
                         )}
                       </div>
-                    );
-                  })
-                )}
-
-                {/* Bouncing Typing Bubble */}
-                {isOtherUserTyping && activeConversation?.type !== "group" && (
-                  <div className="flex items-center gap-2 justify-start py-1">
-                    <div className="w-7 h-7 rounded-full bg-slate-800 overflow-hidden shrink-0 border border-white/10 flex items-center justify-center">
-                      {activeConversation?.other_user?.avatar?.includes("http") ? (
-                        <img src={activeConversation.other_user.avatar} className="w-full h-full object-cover" />
-                      ) : (
-                        <UserAvatar avatar={activeConversation?.other_user?.avatar} size="sm" className="!w-full !h-full" />
-                      )}
+                      <div className="bg-white/10 border border-white/5 rounded-2xl rounded-tl-xs px-3.5 py-2.5 flex items-center gap-1 shadow-sm">
+                        <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce" style={{ animationDelay: "0ms" }} />
+                        <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce" style={{ animationDelay: "150ms" }} />
+                        <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce" style={{ animationDelay: "300ms" }} />
+                      </div>
                     </div>
-                    <div className="bg-white/10 border border-white/5 rounded-2xl rounded-tl-xs px-3.5 py-2.5 flex items-center gap-1 shadow-sm">
-                      <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce" style={{ animationDelay: "0ms" }} />
-                      <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce" style={{ animationDelay: "150ms" }} />
-                      <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce" style={{ animationDelay: "300ms" }} />
-                    </div>
-                  </div>
-                )}
+                  )}
 
-                <div ref={messagesEndRef} />
+                  <div ref={messagesEndRef} />
+                </div>
+
+                {/* Floating Scroll to Bottom Arrow Button */}
+                {showScrollToBottom && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      scrollToBottom("smooth");
+                      setUnreadNewMsgs(0);
+                    }}
+                    className="absolute bottom-4 right-6 z-20 flex items-center gap-1.5 px-3.5 py-2 rounded-full bg-indigo-600/90 hover:bg-indigo-500 text-white text-xs font-semibold shadow-2xl backdrop-blur-md border border-white/20 transition-all transform animate-in fade-in slide-in-from-bottom-3 hover:scale-105 active:scale-95 cursor-pointer"
+                    title="Go to recent messages"
+                  >
+                    <ArrowDown size={14} className="animate-bounce" />
+                    {unreadNewMsgs > 0 ? (
+                      <span>{unreadNewMsgs} new message{unreadNewMsgs > 1 ? "s" : ""}</span>
+                    ) : (
+                      <span>Recent msgs</span>
+                    )}
+                  </button>
+                )}
               </div>
 
               {/* Chat Input or Blocked Notice */}

@@ -19,7 +19,7 @@ interface NavbarProps {
 export function Navbar({ totalOnline: propTotalOnline }: NavbarProps) {
   const router = useRouter();
   const { user, isRegistered, isLoaded } = useUser();
-  const { unreadCount } = useUnreadMessages();
+  const { unreadCount, markAllAsRead } = useUnreadMessages();
   const { totalOnline: liveOnline } = useLiveStats();
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
 
@@ -53,6 +53,7 @@ export function Navbar({ totalOnline: propTotalOnline }: NavbarProps) {
                   <>
                     <Link
                       href="/messages"
+                      onClick={() => markAllAsRead()}
                       className="relative flex items-center justify-center w-9 h-9 rounded-full bg-white/5 border border-white/10 text-slate-400 hover:text-white hover:bg-white/10 transition-all cursor-pointer shadow-sm shrink-0"
                       title="Messages"
                     >

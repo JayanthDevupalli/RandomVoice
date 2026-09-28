@@ -302,7 +302,13 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
       const data = await res.json();
       if (data?.junctions) {
         const others = (data.junctions as Junction[]).filter(
-          (j) => j.id !== junctionId && !j.isLocked
+          (j) =>
+            j.id !== junctionId &&
+            !j.isLocked &&
+            !j.isCustom &&
+            !j.creatorId &&
+            typeof j.id === "string" &&
+            !j.id.startsWith("junc_")
         );
         setOtherJunctions(others);
       }
