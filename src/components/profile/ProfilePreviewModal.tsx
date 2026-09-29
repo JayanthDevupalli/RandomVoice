@@ -166,66 +166,10 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
                 {currentUser?.id !== profile.id && (
                   <div className="w-full">
                     {connectionStatus === "accepted" ? (
-                      <div className="flex gap-2 w-full">
-                        <button className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-emerald-500/20 text-emerald-400 font-medium text-sm border border-emerald-500/30 cursor-default">
-                          <Check size={16} />
-                          Friends
-                        </button>
-                        <button 
-                          onClick={async () => {
-                            if (!currentUser) return;
-                            setIsRequesting(true);
-                            try {
-                              const { data: myConvs } = await supabase
-                                .from('conversation_members')
-                                .select('conversation_id, conversations!inner(type)')
-                                .eq('user_id', currentUser.id)
-                                .eq('conversations.type', 'direct');
-
-                              let existingConvId = null;
-
-                              if (myConvs && myConvs.length > 0) {
-                                const convIds = myConvs.map((c: any) => c.conversation_id);
-                                const { data: shared } = await supabase
-                                  .from('conversation_members')
-                                  .select('conversation_id')
-                                  .eq('user_id', profile.id)
-                                  .in('conversation_id', convIds);
-                                  
-                                if (shared && shared.length > 0) {
-                                  existingConvId = shared[0].conversation_id;
-                                }
-                              }
-
-                              if (!existingConvId) {
-                                const { data: newConv } = await supabase
-                                  .from('conversations')
-                                  .insert({ type: 'direct' })
-                                  .select('id')
-                                  .single();
-                                  
-                                if (newConv) {
-                                  await supabase.from('conversation_members').insert([
-                                    { conversation_id: newConv.id, user_id: currentUser.id },
-                                    { conversation_id: newConv.id, user_id: profile.id }
-                                  ]);
-                                  existingConvId = newConv.id;
-                                }
-                              }
-
-                              window.location.href = '/messages';
-                            } catch (e) {
-                              console.error(e);
-                            }
-                            setIsRequesting(false);
-                          }}
-                          disabled={isRequesting}
-                          className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm transition-colors shadow-lg"
-                        >
-                          {isRequesting ? <Loader2 size={16} className="animate-spin" /> : <MessageSquare size={16} />}
-                          Message
-                        </button>
-                      </div>
+                      <button className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-emerald-500/20 text-emerald-400 font-medium text-sm border border-emerald-500/30 cursor-default">
+                        <Check size={16} />
+                        Friends
+                      </button>
                     ) : connectionStatus === "pending" ? (
                       <button className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-slate-800 text-slate-300 font-medium text-sm border border-white/5 cursor-default">
                         Request Sent

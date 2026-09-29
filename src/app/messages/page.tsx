@@ -30,6 +30,7 @@ import { useRouter } from "next/navigation";
 import { CreateGroupModal } from "@/components/chat/CreateGroupModal";
 import { useUnreadMessages } from "@/hooks/useUnreadMessages";
 import { VoiceNotePlayer } from "@/components/chat/VoiceNotePlayer";
+import { useGlobalPresence } from "@/components/providers/GlobalPresenceProvider";
 import { 
   parseMessageContent, 
   serializeTextMessage, 
@@ -40,6 +41,7 @@ import {
 export default function MessagesPage() {
   const { user, isRegistered, isLoaded } = useUser();
   const { markAsRead, unreadByConversation } = useUnreadMessages();
+  const { onlineUserIds } = useGlobalPresence();
   const router = useRouter();
   
   const [conversations, setConversations] = useState<any[]>([]);
@@ -94,7 +96,7 @@ export default function MessagesPage() {
   const textInputRef = useRef<HTMLInputElement>(null);
 
   // --- Feature 6: Active Status, Typing & Read Receipts ---
-  const [isOtherUserOnline, setIsOtherUserOnline] = useState(false);
+  const [isOtherUserConvOnline, setIsOtherUserConvOnline] = useState(false);
   const [isOtherUserTyping, setIsOtherUserTyping] = useState(false);
   const [otherUserLastReadAt, setOtherUserLastReadAt] = useState<string | null>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -674,10 +676,10 @@ export default function MessagesPage() {
     }
   };
 
-  // Realtime Presence, Typing & Read Receipts indicator
+  // Realtime Presence, Typing & Read Receipts indicator for active chat
   useEffect(() => {
     if (!activeConversationId || !user?.id) {
-      setIsOtherUserOnline(false);
+      setIsOtherUserConvOnline(false);
       setIsOtherUserTyping(false);
       setOtherUserLastReadAt(null);
       return;
@@ -685,7 +687,7 @@ export default function MessagesPage() {
 
     const otherUserId = activeConversation?.other_user?.id;
     if (!otherUserId || activeConversation?.type === "group") {
-      setIsOtherUserOnline(false);
+      setIsOtherUserConvOnline(false);
       setIsOtherUserTyping(false);
       setOtherUserLastReadAt(null);
       return;
@@ -710,7 +712,7 @@ export default function MessagesPage() {
             }
           }
         }
-        setIsOtherUserOnline(isOnline);
+        setIsOtherUserConvOnline(isOnline);
         if (latestReadTime) {
           setOtherUserLastReadAt(latestReadTime);
         }
@@ -741,10 +743,12 @@ export default function MessagesPage() {
     return () => {
       if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
       supabase.removeChannel(presenceChannel);
-      setIsOtherUserOnline(false);
+      setIsOtherUserConvOnline(false);
       setIsOtherUserTyping(false);
     };
   }, [activeConversationId, user?.id, activeConversation?.other_user?.id, activeConversation?.type]);
+
+  const isOtherUserOnline = isOtherUserConvOnline || (activeConversation?.other_user?.id ? onlineUserIds.has(activeConversation.other_user.id) : false);
 
   // Close header 3-dots menu on outside click
   useEffect(() => {
@@ -907,6 +911,7 @@ export default function MessagesPage() {
                   : (customNickname || conv.other_user?.username || "Unknown");
                 const avatarUrl = isGroup ? null : conv.other_user?.avatar;
                 const isBlocked = otherUserId ? blockedUsers.includes(otherUserId) : false;
+                const isUserOnline = otherUserId ? onlineUserIds.has(otherUserId) : false;
 
                 return (
                   <button 
@@ -950,7 +955,7 @@ export default function MessagesPage() {
                       </div>
                       <div className="flex items-center justify-between gap-2">
                         <p className="text-xs text-slate-400 truncate flex items-center gap-1.5">
-                          <span className={`w-1.5 h-1.5 rounded-full ${isGroup ? 'bg-indigo-400' : isBlocked ? 'bg-rose-500' : 'bg-emerald-400'}`} />
+                          <span className={`w-1.5 h-1.5 rounded-full ${isGroup ? 'bg-indigo-400' : isBlocked ? 'bg-rose-500' : isUserOnline ? 'bg-emerald-400' : 'bg-slate-500'}`} />
                           <span>
                             {isGroup 
                               ? "Group Conversation" 
@@ -1278,15 +1283,16 @@ export default function MessagesPage() {
                                 {parsed.isEdited && <span className="italic opacity-80">(edited)</span>}
                                 <span>{new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
 
-                                {/* Read Receipt status icons (WhatsApp style) for 1-on-1 chats */}
+                                {/* Read Receipt status text labels for 1-on-1 chats */}
                                 {isMe && activeConversation?.type !== "group" && (
-                                  <span className="ml-0.5 inline-flex items-center">
+                                  <span className="ml-1 inline-flex items-center gap-1 font-medium tracking-wide">
+                                    <span className="opacity-40">•</span>
                                     {otherUserLastReadAt && new Date(msg.created_at).getTime() <= new Date(otherUserLastReadAt).getTime() ? (
-                                      <span title="Seen"><CheckCheck size={13} className="text-sky-300 font-bold" /></span>
+                                      <span className="text-sky-300 font-semibold opacity-95">seen</span>
                                     ) : isOtherUserOnline ? (
-                                      <span title="Delivered"><CheckCheck size={13} className="text-indigo-200/70" /></span>
+                                      <span className="text-indigo-200/80 font-medium opacity-85">delivered</span>
                                     ) : (
-                                      <span title="Sent"><Check size={13} className="text-indigo-200/70" /></span>
+                                      <span className="text-indigo-200/60 font-medium opacity-70">sent</span>
                                     )}
                                   </span>
                                 )}
