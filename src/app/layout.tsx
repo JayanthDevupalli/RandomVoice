@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { GlobalPresenceProvider } from "@/components/providers/GlobalPresenceProvider";
+import { DMVoiceCallProvider } from "@/components/providers/DMVoiceCallContext";
+import { DMVoiceCallOverlay } from "@/components/voice/DMVoiceCallOverlay";
 
 export const metadata: Metadata = {
   title: "YapClub - 7-Seat Voice Hangouts | No Cap, Pure Yapping",
@@ -33,16 +35,20 @@ export default function RootLayout({
       </head>
       <body className="bg-background text-foreground min-h-screen antialiased selection:bg-indigo-500/30 selection:text-white font-sans overflow-x-hidden relative">
         <GlobalPresenceProvider>
-          {/* Global Background Glows - Subtle and Modern */}
-          <div className="fixed inset-0 overflow-hidden pointer-events-none -z-50">
-            <div className="absolute top-[-10%] left-[-20%] sm:top-[-20%] sm:left-[-10%] w-[80%] h-[60%] sm:w-[60%] sm:h-[60%] bg-indigo-600/10 blur-[100px] sm:blur-[120px] rounded-full mix-blend-screen" />
-            <div className="absolute bottom-[-10%] right-[-20%] sm:bottom-[-20%] sm:right-[-10%] w-[70%] h-[50%] sm:w-[50%] sm:h-[50%] bg-purple-600/10 blur-[100px] sm:blur-[120px] rounded-full mix-blend-screen" />
-          </div>
-          
-          {children}
+          <DMVoiceCallProvider>
+            {/* Global Background Glows - Subtle and Modern */}
+            <div className="fixed inset-0 overflow-hidden pointer-events-none -z-50">
+              <div className="absolute top-[-10%] left-[-20%] sm:top-[-20%] sm:left-[-10%] w-[80%] h-[60%] sm:w-[60%] sm:h-[60%] bg-indigo-600/10 blur-[100px] sm:blur-[120px] rounded-full mix-blend-screen" />
+              <div className="absolute bottom-[-10%] right-[-20%] sm:bottom-[-20%] sm:right-[-10%] w-[70%] h-[50%] sm:w-[50%] sm:h-[50%] bg-purple-600/10 blur-[100px] sm:blur-[120px] rounded-full mix-blend-screen" />
+            </div>
+            
+            {children}
+            <DMVoiceCallOverlay />
+          </DMVoiceCallProvider>
         </GlobalPresenceProvider>
       </body>
     </html>
   );
 }
+
 

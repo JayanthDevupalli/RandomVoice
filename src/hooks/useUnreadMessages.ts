@@ -288,13 +288,6 @@ export function useUnreadMessages() {
     setUnreadByConversation({});
     setUnreadCount(0);
 
-    // Persist to database
-    supabase
-      .from("conversation_members")
-      .update({ last_read_at: safeReadTimestamp } as any)
-      .eq("user_id", user.id)
-      .then();
-
     if (typeof window !== "undefined") {
       window.dispatchEvent(
         new CustomEvent("yapclub_messages_read", { detail: {} })

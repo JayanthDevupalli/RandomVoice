@@ -23,7 +23,8 @@ import {
   CheckCheck,
   Reply,
   Volume2,
-  ArrowDown
+  ArrowDown,
+  PhoneCall
 } from "lucide-react";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import { useRouter } from "next/navigation";
@@ -31,6 +32,7 @@ import { CreateGroupModal } from "@/components/chat/CreateGroupModal";
 import { useUnreadMessages } from "@/hooks/useUnreadMessages";
 import { VoiceNotePlayer } from "@/components/chat/VoiceNotePlayer";
 import { useGlobalPresence } from "@/components/providers/GlobalPresenceProvider";
+import { useDMVoiceCall } from "@/components/providers/DMVoiceCallContext";
 import { 
   parseMessageContent, 
   serializeTextMessage, 
@@ -42,6 +44,7 @@ export default function MessagesPage() {
   const { user, isRegistered, isLoaded } = useUser();
   const { markAsRead, unreadByConversation } = useUnreadMessages();
   const { onlineUserIds } = useGlobalPresence();
+  const { startCall, callState, activeCall } = useDMVoiceCall();
   const router = useRouter();
   
   const [conversations, setConversations] = useState<any[]>([]);
@@ -169,7 +172,58 @@ export default function MessagesPage() {
           .order("joined_at", { ascending: false });
 
         if (error) {
-          console.error("Error fetching conversation members:", error);
+          console.warn("Nested query warning, using fallback query:", error.message);
+          
+          // Resilient fallback query
+          const { data: flatMembers } = await supabase
+            .from("conversation_members")
+            .select("conversation_id, joined_at")
+            .eq("user_id", user.id);
+
+          if (!flatMembers || flatMembers.length === 0) {
+            setConversations([]);
+            setIsLoading(false);
+            return;
+          }
+
+          const convIds = flatMembers.map(m => m.conversation_id);
+          const { data: convsData } = await supabase
+            .from("conversations")
+            .select("id, type, name, last_message_at")
+            .in("id", convIds);
+
+          const { data: otherMembersData } = await supabase
+            .from("conversation_members")
+            .select("conversation_id, user_id")
+            .in("conversation_id", convIds)
+            .neq("user_id", user.id);
+
+          const otherUserIds = (otherMembersData || []).map(m => m.user_id);
+          const { data: profilesData } = await supabase
+            .from("profiles")
+            .select("id, username, avatar")
+            .in("id", otherUserIds);
+
+          const profileMap = new Map((profilesData || []).map(p => [p.id, p]));
+          const convMap = new Map((convsData || []).map(c => [c.id, c]));
+
+          const formattedFallback = flatMembers.map(m => {
+            const conv = convMap.get(m.conversation_id);
+            const otherMem = (otherMembersData || []).find(om => om.conversation_id === m.conversation_id);
+            const profile = otherMem ? profileMap.get(otherMem.user_id) : null;
+            return {
+              id: m.conversation_id,
+              type: conv?.type,
+              name: conv?.name,
+              last_message_at: conv?.last_message_at || new Date().toISOString(),
+              other_user: profile
+            };
+          }).sort((a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime());
+
+          setConversations(formattedFallback);
+          if (formattedFallback.length > 0 && typeof window !== "undefined" && window.innerWidth >= 640) {
+            setActiveConversationId(prev => prev || formattedFallback[0].id);
+          }
           setIsLoading(false);
           return;
         }
@@ -1081,16 +1135,46 @@ export default function MessagesPage() {
                       </div>
                     </div>
 
-                    {/* Chat Actions Dropdown Menu */}
-                    <div className="relative" ref={headerMenuRef}>
-                      <button
-                        onClick={() => setIsHeaderMenuOpen(!isHeaderMenuOpen)}
-                        className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/10 active:scale-95 transition-all"
-                        title="Chat Options"
-                        aria-label="Chat Options"
-                      >
-                        <MoreVertical size={18} />
-                      </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {/* Voice Call Button for 1-on-1 chats */}
+                      {!isGroup && otherUserId && (
+                        <button
+                          onClick={() => {
+                            if (isBlocked) {
+                              alert("Cannot call a blocked contact.");
+                              return;
+                            }
+                            const peerUsername = customNickname || activeConversation?.other_user?.username || "Unknown";
+                            const peerAvatar = activeConversation?.other_user?.avatar;
+                            startCall(activeConversationId, {
+                              id: otherUserId,
+                              username: peerUsername,
+                              avatar: peerAvatar,
+                            });
+                          }}
+                          disabled={callState !== "idle"}
+                          className={`px-3 py-1.5 rounded-xl flex items-center gap-1.5 transition-all active:scale-95 text-xs font-semibold shadow-sm ${
+                            callState !== "idle" && activeCall?.conversationId === activeConversationId
+                              ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 animate-pulse"
+                              : "text-slate-200 hover:text-white bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/30"
+                          }`}
+                          title="Start Voice Call"
+                        >
+                          <PhoneCall size={15} className="text-indigo-400" />
+                          <span className="hidden sm:inline">Voice Call</span>
+                        </button>
+                      )}
+
+                      {/* Chat Actions Dropdown Menu */}
+                      <div className="relative" ref={headerMenuRef}>
+                        <button
+                          onClick={() => setIsHeaderMenuOpen(!isHeaderMenuOpen)}
+                          className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/10 active:scale-95 transition-all"
+                          title="Chat Options"
+                          aria-label="Chat Options"
+                        >
+                          <MoreVertical size={18} />
+                        </button>
 
                       {isHeaderMenuOpen && (
                         <div className="absolute right-0 top-full mt-2 w-48 rounded-2xl bg-[#12131A] border border-white/10 shadow-2xl py-1.5 z-50 animate-in fade-in zoom-in-95 duration-150 backdrop-blur-2xl">
@@ -1145,6 +1229,7 @@ export default function MessagesPage() {
                           </button>
                         </div>
                       )}
+                      </div>
                     </div>
                   </div>
                 );
@@ -1168,6 +1253,20 @@ export default function MessagesPage() {
                       const senderName = msg.profiles?.username || "Someone";
                       const senderAvatar = msg.profiles?.avatar;
                       const parsed = parseMessageContent(msg.content);
+
+                      if (parsed.text && parsed.text.startsWith("📞")) {
+                        return (
+                          <div key={msg.id} id={`msg-${msg.id}`} className="w-full flex justify-center my-2">
+                            <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-indigo-950/40 border border-indigo-500/20 text-indigo-300 text-xs font-medium shadow-sm backdrop-blur-md">
+                              <PhoneCall size={14} className="text-indigo-400 shrink-0" />
+                              <span>{parsed.text.replace("📞", "").trim()}</span>
+                              <span className="text-[10px] text-slate-500 ml-1 font-mono">
+                                {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      }
 
                       return (
                         <div 
