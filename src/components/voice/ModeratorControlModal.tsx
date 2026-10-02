@@ -49,7 +49,7 @@ export function ModeratorControlModal({
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [confirmEnd, setConfirmEnd] = useState(false);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
-  
+
   // Edit Details State
   const [editName, setEditName] = useState(junction.name);
   const [editCapacity, setEditCapacity] = useState(junction.maxParticipants);
@@ -159,22 +159,20 @@ export function ModeratorControlModal({
         <div className="flex items-center gap-2 mt-3 mb-4 p-1 bg-slate-100 dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800">
           <button
             onClick={() => setActiveTab("participants")}
-            className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-              activeTab === "participants"
+            className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${activeTab === "participants"
                 ? "bg-amber-500 text-black shadow-md"
                 : "text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:text-slate-200"
-            }`}
+              }`}
           >
             <Users size={14} />
             <span>Participants ({participantList.length}/{junction.maxParticipants || 7})</span>
           </button>
           <button
             onClick={() => setActiveTab("room")}
-            className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-              activeTab === "room"
+            className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${activeTab === "room"
                 ? "bg-amber-500 text-black shadow-md"
                 : "text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:text-slate-200"
-            }`}
+              }`}
           >
             <Settings size={14} />
             <span>Room Controls</span>
@@ -234,11 +232,10 @@ export function ModeratorControlModal({
                           )
                         }
                         disabled={actionLoading !== null}
-                        className={`p-1.5 px-2 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer ${
-                          p.isMutedByMod
+                        className={`p-1.5 px-2 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer ${p.isMutedByMod
                             ? "bg-slate-200 dark:bg-slate-800 hover:bg-slate-700 text-slate-700 dark:text-slate-300"
                             : "bg-rose-600/20 hover:bg-rose-600/40 text-rose-300 border border-rose-500/30"
-                        }`}
+                          }`}
                         title={p.isMutedByMod ? "Allow unmuting" : "Force mute user mic"}
                       >
                         {p.isMutedByMod ? <Mic size={13} /> : <MicOff size={13} />}
@@ -353,11 +350,10 @@ export function ModeratorControlModal({
                 <button
                   onClick={handleToggleLock}
                   disabled={actionLoading !== null}
-                  className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-colors cursor-pointer ${
-                    junction.isLocked 
+                  className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-colors cursor-pointer ${junction.isLocked
                       ? "bg-slate-200 dark:bg-slate-800 hover:bg-slate-700 text-slate-800 dark:text-slate-200"
                       : "bg-amber-500/20 hover:bg-amber-500/40 text-amber-500 border border-amber-500/30"
-                  }`}
+                    }`}
                 >
                   {junction.isLocked ? "Unlock Room" : "Lock Room"}
                 </button>
@@ -410,8 +406,8 @@ export function ModeratorControlModal({
                   <div className="space-y-3">
                     <div>
                       <label className="text-[10px] uppercase tracking-wider text-slate-500 font-bold mb-1 block">Name</label>
-                      <input 
-                        type="text" 
+                      <input
+                        type="text"
                         value={editName}
                         onChange={(e) => setEditName(e.target.value)}
                         className="w-full bg-black/20 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
@@ -426,11 +422,10 @@ export function ModeratorControlModal({
                             <button
                               key={size}
                               onClick={() => setEditCapacity(size)}
-                              className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-colors ${
-                                editCapacity === size 
-                                  ? "bg-indigo-600/30 text-indigo-300 border border-indigo-500/30" 
+                              className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-colors ${editCapacity === size
+                                  ? "bg-indigo-600/30 text-indigo-300 border border-indigo-500/30"
                                   : "bg-black/20 text-slate-400 border border-white/5 hover:bg-white/5"
-                              }`}
+                                }`}
                             >
                               {size}
                             </button>
@@ -473,39 +468,39 @@ export function ModeratorControlModal({
             {/* End Junction Danger Zone */}
             {currentModerator === junction.creatorId && (
               <div className="p-4 rounded-2xl bg-rose-950/30 border border-rose-500/40">
-              <div className="flex items-center gap-2 text-rose-400 font-bold text-xs mb-1">
-                <AlertTriangle size={15} />
-                <span>Danger Zone</span>
-              </div>
-              <p className="text-[11px] text-slate-700 dark:text-slate-300 mb-3">
-                Closing this junction will instantly disconnect all participants and delete the voice room.
-              </p>
-
-              {!confirmEnd ? (
-                <button
-                  onClick={() => setConfirmEnd(true)}
-                  className="w-full py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
-                >
-                  <PhoneOff size={14} />
-                  <span>End Junction for Everyone</span>
-                </button>
-              ) : (
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={handleEndJunction}
-                    disabled={actionLoading !== null}
-                    className="flex-1 py-2.5 rounded-xl bg-rose-700 hover:bg-rose-600 text-white font-bold text-xs transition-colors cursor-pointer"
-                  >
-                    Yes, Terminate Junction
-                  </button>
-                  <button
-                    onClick={() => setConfirmEnd(false)}
-                    className="px-4 py-2.5 rounded-xl bg-slate-200 dark:bg-slate-800 hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-bold text-xs transition-colors cursor-pointer"
-                  >
-                    Cancel
-                  </button>
+                <div className="flex items-center gap-2 text-rose-400 font-bold text-xs mb-1">
+                  <AlertTriangle size={15} />
+                  <span>Danger Zone</span>
                 </div>
-              )}
+                <p className="text-[11px] text-slate-700 dark:text-slate-300 mb-3">
+                  Closing this junction will instantly disconnect all participants and delete the voice room.
+                </p>
+
+                {!confirmEnd ? (
+                  <button
+                    onClick={() => setConfirmEnd(true)}
+                    className="w-full py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <PhoneOff size={14} />
+                    <span>End Junction for Everyone</span>
+                  </button>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={handleEndJunction}
+                      disabled={actionLoading !== null}
+                      className="flex-1 py-2.5 rounded-xl bg-rose-700 hover:bg-rose-600 text-white font-bold text-xs transition-colors cursor-pointer"
+                    >
+                      Yes, Terminate Junction
+                    </button>
+                    <button
+                      onClick={() => setConfirmEnd(false)}
+                      className="px-4 py-2.5 rounded-xl bg-slate-200 dark:bg-slate-800 hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-bold text-xs transition-colors cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>

@@ -4,6 +4,7 @@ import {
   addParticipantToJunction,
   removeParticipantFromJunction,
   moderateParticipant,
+  claimModeratorRole,
   deleteJunction,
   updateParticipantProfile,
   reportParticipant,
@@ -109,6 +110,17 @@ export async function POST(
         return NextResponse.json({ error: result.error }, { status: 400 });
       }
       return NextResponse.json({ junction: result.junction, banned: result.banned, success: true });
+    }
+
+    if (action === "claim_mod") {
+      if (!identity) {
+        return NextResponse.json({ error: "Missing identity parameter" }, { status: 400 });
+      }
+      const result = await claimModeratorRole(params.id, identity);
+      if (!result.success) {
+        return NextResponse.json({ error: result.error }, { status: 400 });
+      }
+      return NextResponse.json({ junction: result.junction, success: true });
     }
 
     return NextResponse.json({ error: "Invalid action" }, { status: 400 });

@@ -15,7 +15,7 @@ class CallSoundManager {
       }
     }
     if (this.audioCtx && this.audioCtx.state === "suspended") {
-      this.audioCtx.resume().catch(() => {});
+      this.audioCtx.resume().catch(() => { });
     }
   }
 
@@ -161,7 +161,7 @@ class CallSoundManager {
       gain.connect(this.audioCtx.destination);
       osc.start(now);
       osc.stop(now + 0.32);
-    } catch (e) {}
+    } catch (e) { }
   }
 
   public stopAll() {

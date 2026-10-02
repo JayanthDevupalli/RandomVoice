@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS junction_participants (
   name TEXT NOT NULL,
   avatar TEXT DEFAULT 'zap',
   color TEXT DEFAULT '#6366F1',
+  card_bg_color TEXT DEFAULT '#465B73',
+  card_pattern TEXT DEFAULT 'none',
   role TEXT DEFAULT 'speaker' CHECK (role IN ('moderator','speaker','listener')),
   is_muted BOOLEAN DEFAULT false,
   is_muted_by_mod BOOLEAN DEFAULT false,
@@ -38,6 +40,9 @@ CREATE TABLE IF NOT EXISTS junction_participants (
   reported_by TEXT[] DEFAULT '{}',
   UNIQUE(junction_id, identity)
 );
+
+ALTER TABLE junction_participants ADD COLUMN IF NOT EXISTS card_bg_color TEXT DEFAULT '#465B73';
+ALTER TABLE junction_participants ADD COLUMN IF NOT EXISTS card_pattern TEXT DEFAULT 'none';
 
 -- 3. Enable Row Level Security (required by Supabase)
 ALTER TABLE junctions ENABLE ROW LEVEL SECURITY;

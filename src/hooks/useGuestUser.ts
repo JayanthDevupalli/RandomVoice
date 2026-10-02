@@ -12,6 +12,8 @@ const DEFAULT_GUEST: GuestUser = {
   name: "CyberOtter",
   avatar: "zap",
   color: "#6366F1",
+  cardBgColor: "#465B73",
+  cardPattern: "none",
 };
 
 export function useGuestUser() {

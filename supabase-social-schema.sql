@@ -11,11 +11,15 @@ CREATE TABLE IF NOT EXISTS profiles (
   bio TEXT DEFAULT '',
   social_links JSONB DEFAULT '{}'::jsonb,
   recovery_code TEXT,
+  card_bg_color TEXT DEFAULT '#465B73',
+  card_pattern TEXT DEFAULT 'none',
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- Migration statement for existing databases:
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS recovery_code TEXT;
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS card_bg_color TEXT DEFAULT '#465B73';
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS card_pattern TEXT DEFAULT 'none';
 
 -- 2. Connections Table (Follow Requests & Mutuals)
 -- status: 'pending', 'accepted', 'blocked'

@@ -10,6 +10,8 @@ export interface HybridUser {
   name: string;
   avatar: string;
   color: string;
+  cardBgColor?: string;
+  cardPattern?: string;
   bio: string;
   isRegistered: boolean;
 }
@@ -39,6 +41,8 @@ export function useUser() {
             name: profile.username,
             avatar: profile.avatar,
             color: "#6366F1", // Default color for registered users
+            cardBgColor: profile.card_bg_color || profile.social_links?.card_bg_color || "#465B73",
+            cardPattern: profile.card_pattern || profile.social_links?.card_pattern || "none",
             bio: profile.bio || "",
             isRegistered: true,
           });
@@ -64,6 +68,8 @@ export function useUser() {
             name: profile.username,
             avatar: profile.avatar,
             color: "#6366F1",
+            cardBgColor: profile.card_bg_color || profile.social_links?.card_bg_color || "#465B73",
+            cardPattern: profile.card_pattern || profile.social_links?.card_pattern || "none",
             bio: profile.bio || "",
             isRegistered: true,
           });
@@ -82,11 +88,13 @@ export function useUser() {
   const isLoaded = guestLoaded && isAuthLoaded;
 
   // The active profile is the Registered User if they are logged in, otherwise the Guest
-  const activeProfile = user || (guest ? {
+  const activeProfile: HybridUser | null = user || (guest ? {
     id: guest.id,
     name: guest.name,
     avatar: guest.avatar,
     color: guest.color,
+    cardBgColor: guest.cardBgColor || "#465B73",
+    cardPattern: guest.cardPattern || "none",
     bio: "",
     isRegistered: false,
   } : null);

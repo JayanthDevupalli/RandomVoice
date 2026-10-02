@@ -27,6 +27,8 @@ interface ParticipantRow {
   name: string;
   avatar: string;
   color: string;
+  card_bg_color?: string;
+  card_pattern?: string;
   role: string;
   is_muted: boolean;
   is_muted_by_mod: boolean;
@@ -56,13 +58,42 @@ function rowToJunction(row: JunctionRow, participants: ParticipantRow[]): Juncti
   };
 }
 
+function encodeParticipantColor(color?: string, cardBgColor?: string, cardPattern?: string): string {
+  const c = color || "#6366F1";
+  const bg = cardBgColor || "#465B73";
+  const p = cardPattern || "none";
+  return `${c}|${bg}|${p}`;
+}
+
+function decodeParticipantColor(rawColor?: string): { color: string; cardBgColor: string; cardPattern: string } {
+  if (!rawColor) {
+    return { color: "#6366F1", cardBgColor: "#465B73", cardPattern: "none" };
+  }
+  if (rawColor.includes("|")) {
+    const parts = rawColor.split("|");
+    return {
+      color: parts[0] || "#6366F1",
+      cardBgColor: parts[1] || "#465B73",
+      cardPattern: parts[2] || "none",
+    };
+  }
+  return {
+    color: rawColor,
+    cardBgColor: "#465B73",
+    cardPattern: "none",
+  };
+}
+
 function rowToParticipant(row: ParticipantRow): JunctionParticipant {
+  const decoded = decodeParticipantColor(row.color);
   return {
     id: row.id,
     identity: row.identity,
     name: row.name,
     avatar: row.avatar,
-    color: row.color,
+    color: decoded.color,
+    cardBgColor: row.card_bg_color || decoded.cardBgColor,
+    cardPattern: row.card_pattern || decoded.cardPattern,
     role: row.role as JunctionParticipant["role"],
     isMuted: row.is_muted,
     isMutedByMod: row.is_muted_by_mod,
@@ -255,13 +286,19 @@ export async function addParticipantToJunction(
   if (!isAlreadyPresent) {
     // Insert new participant securely
     const shouldModMute = Boolean(participant.isMutedByMod);
+    const encodedColor = encodeParticipantColor(
+      participant.color,
+      participant.cardBgColor,
+      participant.cardPattern
+    );
+
     const { error: insertError } = await supabase.from("junction_participants").insert({
       id: "p_" + Date.now() + "_" + Math.random().toString(36).substr(2, 5), // Securely generate fresh session ID
       junction_id: junctionId,
       identity: participant.identity,
       name: participant.name,
       avatar: participant.avatar || "zap",
-      color: participant.color || "#6366F1",
+      color: encodedColor,
       role: isMod ? "moderator" : (participant.role || "speaker"),
       is_muted: shouldModMute ? true : (participant.isMuted !== undefined ? participant.isMuted : true), // Default to muted on entry
       is_muted_by_mod: shouldModMute,
@@ -288,12 +325,18 @@ export async function addParticipantToJunction(
     // Update existing participant (re-joining) - preserve role and force-mute state!
     const existing = junction.participants.find((p) => p.identity === participant.identity);
     const shouldKeepModMute = Boolean(existing?.isMutedByMod || participant.isMutedByMod);
+    const encodedColor = encodeParticipantColor(
+      participant.color || existing?.color,
+      participant.cardBgColor || existing?.cardBgColor,
+      participant.cardPattern || existing?.cardPattern
+    );
+
     const { error: updateError } = await supabase
       .from("junction_participants")
       .update({
         name: participant.name,
         avatar: participant.avatar || existing?.avatar || "zap",
-        color: participant.color || existing?.color || "#6366F1",
+        color: encodedColor,
         role: isMod ? "moderator" : (existing?.role || participant.role || "speaker"),
         is_muted_by_mod: shouldKeepModMute,
         is_muted: shouldKeepModMute ? true : (existing?.isMuted !== undefined ? existing.isMuted : true),
@@ -437,6 +480,53 @@ export async function moderateParticipant(
   return { success: true, junction: updated };
 }
 
+
+export async function claimModeratorRole(
+  junctionId: string,
+  identity: string
+): Promise<{ success: boolean; error?: string; junction?: Junction }> {
+  const junction = await fetchJunctionWithParticipants(junctionId);
+
+  if (!junction) {
+    return { success: false, error: "Junction not found" };
+  }
+
+  const participant = junction.participants.find((p) => p.identity === identity);
+  if (!participant) {
+    return { success: false, error: "Participant not found in junction" };
+  }
+
+  if (participant.role === "moderator") {
+    return { success: true, junction };
+  }
+
+  // Check 3-minute timer (180,000 ms with 5s clock drift tolerance)
+  const timeInRoom = Date.now() - (participant.joinedAt || Date.now());
+  const MIN_CLAIM_TIME_MS = 175000;
+
+  if (timeInRoom < MIN_CLAIM_TIME_MS) {
+    const remainingSecs = Math.ceil((180000 - timeInRoom) / 1000);
+    return {
+      success: false,
+      error: `You must wait 3 minutes before claiming Moderator privileges (${remainingSecs}s remaining).`,
+    };
+  }
+
+  // Promote participant to moderator
+  const { error: updateError } = await supabase
+    .from("junction_participants")
+    .update({ role: "moderator" })
+    .eq("junction_id", junctionId)
+    .eq("identity", identity);
+
+  if (updateError) {
+    console.error("Failed to promote to moderator:", updateError);
+    return { success: false, error: "Failed to promote to moderator" };
+  }
+
+  const updated = await fetchJunctionWithParticipants(junctionId);
+  return { success: true, junction: updated };
+}
 
 export async function updateParticipantProfile(
   junctionId: string,

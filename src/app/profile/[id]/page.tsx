@@ -1,26 +1,49 @@
 "use client";
 
 import { useEffect, useState, useRef } from "react";
-import { useRouter, useParams } from "next/navigation";
+import { useRouter, useParams, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import { useUser, HybridUser } from "@/hooks/useUser";
+import { useUser } from "@/hooks/useUser";
 import { Navbar } from "@/components/layout/Navbar";
 import { UserAvatar } from "@/components/ui/UserAvatar";
-import { LogOut, Edit3, Camera, Check, X, ShieldAlert, Loader2, ArrowLeft, Trash2, UserPlus, MessageSquare, Clock, UserCheck } from "lucide-react";
+import {
+  LogOut,
+  Edit3,
+  Camera,
+  Check,
+  ShieldAlert,
+  Loader2,
+  ArrowLeft,
+  Trash2,
+  UserPlus,
+  MessageSquare,
+  Clock,
+  User,
+  Palette,
+  Shield,
+  Sparkles,
+} from "lucide-react";
 import { ConnectionsModal } from "@/components/profile/ConnectionsModal";
 import { DeleteAccountModal } from "@/components/profile/DeleteAccountModal";
 import { useGuestUser } from "@/hooks/useGuestUser";
 import { ImageCropModal } from "@/components/profile/ImageCropModal";
 import { AccountSecurityCard } from "@/components/profile/AccountSecurityCard";
+import { CardCustomizer } from "@/components/profile/CardCustomizer";
+
+type SettingsTab = "profile" | "theme" | "security";
 
 export default function ProfilePage({ params: propParams }: { params?: { id: string } }) {
   const router = useRouter();
   const routeParams = useParams();
+  const searchParams = useSearchParams();
   const targetId = (routeParams?.id as string) || propParams?.id || "me";
 
+  const initialTab = (searchParams?.get("tab") as SettingsTab) || "profile";
+  const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
+
   const { user: currentUser, isRegistered, isLoaded: isAuthLoaded, signOut } = useUser();
-  const { clearProfile } = useGuestUser();
-  
+  const { guest, updateGuest, clearProfile } = useGuestUser();
+
   const [profile, setProfile] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [followersCount, setFollowersCount] = useState(0);
@@ -33,12 +56,12 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
   const [connectionStatus, setConnectionStatus] = useState<"none" | "pending_sent" | "pending_received" | "accepted">("none");
   const [connectionId, setConnectionId] = useState<string | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
-  
+
   // Edit mode state
   const [isEditing, setIsEditing] = useState(false);
   const [bio, setBio] = useState("");
   const [isSaving, setIsSaving] = useState(false);
-  
+
   // File upload & crop state
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -46,22 +69,35 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
   const [tempImageSrc, setTempImageSrc] = useState<string | null>(null);
 
   // Determine if the current user is viewing their own profile
-  const isOwner = isRegistered && (targetId === "me" || targetId === currentUser?.id);
+  const isOwner = targetId === "me" || (currentUser && targetId === currentUser.id);
   const profileIdToFetch = targetId === "me" && currentUser ? currentUser.id : targetId;
 
   useEffect(() => {
     if (!isAuthLoaded) return;
 
-    if (targetId === "me" && (!currentUser || !isRegistered)) {
+    if (targetId === "me" && !currentUser) {
       router.push("/");
+      return;
+    }
+
+    if (targetId === "me" && !isRegistered && guest) {
+      setProfile({
+        id: guest.id,
+        username: guest.name,
+        avatar: guest.avatar,
+        bio: "Guest Profile (Anonymous Voice Handle)",
+        card_bg_color: guest.cardBgColor || "#465B73",
+        card_pattern: guest.cardPattern || "none",
+      });
+      setIsLoading(false);
       return;
     }
 
     async function fetchProfile() {
       if (!profileIdToFetch) return;
       setIsLoading(true);
-      
-      const { data, error } = await supabase
+
+      const { data } = await supabase
         .from("profiles")
         .select("*")
         .eq("id", profileIdToFetch)
@@ -71,28 +107,28 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
         setProfile(data);
         setBio(data.bio || "");
 
-        // Fetch counts for followers and following
         const { count: followers } = await supabase
           .from("connections")
-          .select("*", { count: 'exact', head: true })
+          .select("*", { count: "exact", head: true })
           .eq("receiver_id", profileIdToFetch)
           .eq("status", "accepted");
-          
+
         const { count: following } = await supabase
           .from("connections")
-          .select("*", { count: 'exact', head: true })
+          .select("*", { count: "exact", head: true })
           .eq("requester_id", profileIdToFetch)
           .eq("status", "accepted");
-          
+
         if (followers !== null) setFollowersCount(followers);
         if (following !== null) setFollowingCount(following);
 
-        // Fetch connection status if not viewing own profile
         if (currentUser && currentUser.id !== profileIdToFetch) {
           const { data: conn } = await supabase
             .from("connections")
             .select("*")
-            .or(`and(requester_id.eq.${currentUser.id},receiver_id.eq.${profileIdToFetch}),and(requester_id.eq.${profileIdToFetch},receiver_id.eq.${currentUser.id})`)
+            .or(
+              `and(requester_id.eq.${currentUser.id},receiver_id.eq.${profileIdToFetch}),and(requester_id.eq.${profileIdToFetch},receiver_id.eq.${currentUser.id})`
+            )
             .maybeSingle();
 
           if (conn) {
@@ -134,23 +170,23 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [profileIdToFetch, isAuthLoaded, currentUser, isRegistered, router, targetId]);
+  }, [profileIdToFetch, isAuthLoaded, currentUser, isRegistered, router, targetId, guest]);
 
   const handleSendFollowRequest = async () => {
     if (!currentUser || !profile) return;
     setIsConnecting(true);
     try {
-      const { data, error } = await supabase
+      const { data } = await supabase
         .from("connections")
         .insert({
           requester_id: currentUser.id,
           receiver_id: profile.id,
-          status: "pending"
+          status: "pending",
         })
         .select()
         .single();
 
-      if (!error && data) {
+      if (data) {
         setConnectionStatus("pending_sent");
         setConnectionId(data.id);
       }
@@ -185,24 +221,23 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
         .eq("id", connectionId);
 
       setConnectionStatus("accepted");
-      setFollowersCount(prev => prev + 1);
+      setFollowersCount((prev) => prev + 1);
 
-      // Create direct conversation if missing
       const { data: myConvs } = await supabase
-        .from('conversation_members')
-        .select('conversation_id, conversations!inner(type)')
-        .eq('user_id', currentUser.id)
-        .eq('conversations.type', 'direct');
+        .from("conversation_members")
+        .select("conversation_id, conversations!inner(type)")
+        .eq("user_id", currentUser.id)
+        .eq("conversations.type", "direct");
 
       let existingConvId = null;
       if (myConvs && myConvs.length > 0) {
         const convIds = myConvs.map((c: any) => c.conversation_id);
         const { data: shared } = await supabase
-          .from('conversation_members')
-          .select('conversation_id')
-          .eq('user_id', profile.id)
-          .in('conversation_id', convIds);
-          
+          .from("conversation_members")
+          .select("conversation_id")
+          .eq("user_id", profile.id)
+          .in("conversation_id", convIds);
+
         if (shared && shared.length > 0) {
           existingConvId = shared[0].conversation_id;
         }
@@ -210,15 +245,15 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
 
       if (!existingConvId) {
         const { data: newConv } = await supabase
-          .from('conversations')
-          .insert({ type: 'direct' })
-          .select('id')
+          .from("conversations")
+          .insert({ type: "direct" })
+          .select("id")
           .single();
-          
+
         if (newConv) {
-          await supabase.from('conversation_members').insert([
+          await supabase.from("conversation_members").insert([
             { conversation_id: newConv.id, user_id: currentUser.id },
-            { conversation_id: newConv.id, user_id: profile.id }
+            { conversation_id: newConv.id, user_id: profile.id },
           ]);
         }
       }
@@ -234,21 +269,21 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
     setIsConnecting(true);
     try {
       const { data: myConvs } = await supabase
-        .from('conversation_members')
-        .select('conversation_id, conversations!inner(type)')
-        .eq('user_id', currentUser.id)
-        .eq('conversations.type', 'direct');
+        .from("conversation_members")
+        .select("conversation_id, conversations!inner(type)")
+        .eq("user_id", currentUser.id)
+        .eq("conversations.type", "direct");
 
       let existingConvId = null;
 
       if (myConvs && myConvs.length > 0) {
         const convIds = myConvs.map((c: any) => c.conversation_id);
         const { data: shared } = await supabase
-          .from('conversation_members')
-          .select('conversation_id')
-          .eq('user_id', profile.id)
-          .in('conversation_id', convIds);
-          
+          .from("conversation_members")
+          .select("conversation_id")
+          .eq("user_id", profile.id)
+          .in("conversation_id", convIds);
+
         if (shared && shared.length > 0) {
           existingConvId = shared[0].conversation_id;
         }
@@ -256,15 +291,15 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
 
       if (!existingConvId) {
         const { data: newConv } = await supabase
-          .from('conversations')
-          .insert({ type: 'direct' })
-          .select('id')
+          .from("conversations")
+          .insert({ type: "direct" })
+          .select("id")
           .single();
-          
+
         if (newConv) {
-          await supabase.from('conversation_members').insert([
+          await supabase.from("conversation_members").insert([
             { conversation_id: newConv.id, user_id: currentUser.id },
-            { conversation_id: newConv.id, user_id: profile.id }
+            { conversation_id: newConv.id, user_id: profile.id },
           ]);
           existingConvId = newConv.id;
         }
@@ -316,12 +351,12 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
   const saveProfile = async () => {
     if (!isOwner || !profile) return;
     setIsSaving(true);
-    
+
     const { error } = await supabase
       .from("profiles")
       .update({ bio })
       .eq("id", profile.id);
-      
+
     if (!error) {
       setProfile({ ...profile, bio });
       setIsEditing(false);
@@ -331,7 +366,7 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0 || !isOwner || !profile) return;
-    
+
     const file = e.target.files[0];
     if (!file.type.startsWith("image/")) {
       alert("Please select a valid image file");
@@ -369,7 +404,7 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
       if (uploadError) throw uploadError;
 
       const { data } = supabase.storage.from("avatars").getPublicUrl(filePath);
-      
+
       const { error: updateError } = await supabase
         .from("profiles")
         .update({ avatar: data.publicUrl })
@@ -389,6 +424,44 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
       alert("Failed to upload cropped image. Make sure the storage bucket exists.");
     } finally {
       setIsUploading(false);
+    }
+  };
+
+  const handleSaveTheme = async (cardBgColor: string, cardPattern: string) => {
+    if (!isOwner) return;
+
+    if (isRegistered && profile) {
+      const updatedSocialLinks = {
+        ...(profile.social_links || {}),
+        card_bg_color: cardBgColor,
+        card_pattern: cardPattern,
+      };
+
+      const { error } = await supabase
+        .from("profiles")
+        .update({
+          social_links: updatedSocialLinks,
+        })
+        .eq("id", profile.id);
+
+      if (!error) {
+        setProfile({
+          ...profile,
+          card_bg_color: cardBgColor,
+          card_pattern: cardPattern,
+          social_links: updatedSocialLinks,
+        });
+      }
+    } else if (guest) {
+      updateGuest({
+        cardBgColor,
+        cardPattern,
+      });
+      setProfile((prev: any) => ({
+        ...prev,
+        card_bg_color: cardBgColor,
+        card_pattern: cardPattern,
+      }));
     }
   };
 
@@ -413,117 +486,145 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
     );
   }
 
+  const TABS = [
+    { id: "profile", label: "Overview", icon: User },
+    { id: "theme", label: "Card Theme", icon: Palette },
+    ...(isOwner && isRegistered ? [{ id: "security", label: "Security", icon: Shield }] : []),
+  ];
+
   return (
     <div className="min-h-screen bg-background flex flex-col text-slate-200">
       <Navbar />
 
-      <main className="flex-1 max-w-xl sm:max-w-2xl w-full mx-auto px-3.5 sm:px-6 py-4 sm:py-8 space-y-3.5 sm:space-y-5">
-        {/* Back Button */}
-        <button
-          onClick={() => router.push("/junctions")}
-          className="inline-flex items-center gap-2 text-xs sm:text-sm text-slate-400 hover:text-white transition-colors group mb-0.5"
-        >
-          <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-white/5 border border-white/10 flex items-center justify-center group-hover:bg-white/10 group-hover:border-white/20 active:scale-95 transition-all">
-            <ArrowLeft size={14} />
-          </div>
-          <span>Back to Voice Rooms</span>
-        </button>
+      <main className="flex-1 max-w-4xl w-full mx-auto px-4 sm:px-6 py-4 sm:py-8 space-y-6">
+        
+        {/* Streamlined Top Navigation Bar */}
+        <div className="flex items-center justify-between pb-3 border-b border-white/10">
+          <button
+            onClick={() => router.push("/junctions")}
+            className="inline-flex items-center gap-2 text-xs sm:text-sm text-slate-400 hover:text-white transition-colors cursor-pointer group"
+          >
+            <div className="w-8 h-8 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center group-hover:bg-white/10 group-hover:border-white/20 active:scale-95 transition-all shrink-0">
+              <ArrowLeft size={16} />
+            </div>
+            <span className="font-medium truncate">Back to Voice Rooms</span>
+          </button>
 
-        {/* Profile Card */}
-        <div className="bg-[#12131A]/90 border border-white/10 rounded-2xl sm:rounded-3xl p-5 sm:p-8 shadow-2xl backdrop-blur-xl relative overflow-hidden">
-          <div className="absolute -top-20 -right-20 w-56 h-56 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" />
-          
-          <div className="relative flex flex-col items-center text-center">
+          <span className="text-xs font-semibold px-3 py-1.5 rounded-full bg-indigo-600/15 border border-indigo-500/30 text-indigo-300 shrink-0">
+            {isOwner ? "My Account" : "User Profile"}
+          </span>
+        </div>
+
+        {/* SINGLE UNIFIED HERO PROFILE CARD */}
+        <div className="bg-[#12131A]/95 border border-white/10 rounded-2xl sm:rounded-3xl shadow-2xl backdrop-blur-xl overflow-hidden relative">
+          {/* Ambient Header Banner */}
+          <div
+            className="h-28 sm:h-36 w-full relative transition-colors duration-500 border-b border-white/5"
+            style={{ backgroundColor: profile.card_bg_color || profile.social_links?.card_bg_color || "#465B73" }}
+          >
+            <div className="absolute inset-0 bg-gradient-to-b from-black/30 via-transparent to-[#12131A]" />
+          </div>
+
+          <div className="px-5 sm:px-8 pb-6 relative flex flex-col items-center text-center -mt-14 sm:-mt-16">
             
             {/* Avatar Section */}
-            <div className="relative group mb-3.5 sm:mb-5">
-              <div className="w-24 h-24 sm:w-28 sm:h-28 rounded-full overflow-hidden border-4 border-[#12131A] shadow-xl bg-indigo-900/50 flex items-center justify-center">
+            <div className="relative group mb-3">
+              <div className="w-24 h-24 sm:w-30 sm:h-30 rounded-full overflow-hidden border-4 border-[#12131A] shadow-2xl bg-indigo-900/50 flex items-center justify-center relative">
                 {profile.avatar.includes("http") ? (
                   <img src={profile.avatar} alt={profile.username} className="w-full h-full object-cover" />
                 ) : (
                   <UserAvatar avatar={profile.avatar} color="#6366F1" size="lg" className="!rounded-full !w-full !h-full" />
                 )}
               </div>
-              
+
               {isOwner && (
                 <>
-                  <button 
+                  <button
                     onClick={() => fileInputRef.current?.click()}
                     disabled={isUploading}
-                    className="absolute bottom-0 right-0 w-8 h-8 sm:w-9 sm:h-9 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full flex items-center justify-center shadow-lg transition-transform active:scale-95 disabled:opacity-50"
+                    className="absolute bottom-0 right-0 w-8 h-8 sm:w-9 sm:h-9 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full flex items-center justify-center shadow-lg transition-transform active:scale-95 disabled:opacity-50 cursor-pointer border-2 border-[#12131A]"
+                    title="Change Profile Avatar"
                   >
                     {isUploading ? <Loader2 size={15} className="animate-spin" /> : <Camera size={15} />}
                   </button>
-                  <input 
-                    type="file" 
-                    ref={fileInputRef} 
-                    onChange={handleFileSelect} 
-                    accept="image/*" 
-                    className="hidden" 
+                  <input
+                    type="file"
+                    ref={fileInputRef}
+                    onChange={handleFileSelect}
+                    accept="image/*"
+                    className="hidden"
                   />
                 </>
               )}
             </div>
 
-            {/* Username & Stats */}
-            <h1 className="text-xl sm:text-2xl font-bold text-white mb-1.5">{profile.username}</h1>
-            
-            <div className="flex items-center gap-6 text-sm mb-4 sm:mb-5">
-              <button 
+            {/* Username & Badge */}
+            <h1 className="text-xl sm:text-2xl font-extrabold text-white mb-1 tracking-tight">{profile.username}</h1>
+            <span className="text-[11px] font-medium text-slate-400 bg-white/5 border border-white/10 px-3 py-0.5 rounded-full mb-4">
+              {isRegistered ? "Registered Member" : "Guest Voice Handle"}
+            </span>
+
+            {/* Followers / Following Stats */}
+            <div className="w-full max-w-xs sm:max-w-sm grid grid-cols-2 gap-2 p-2.5 rounded-2xl bg-black/40 border border-white/5 mb-4">
+              <button
                 onClick={() => isOwner && setConnectionsModalMode("followers")}
-                className={`flex flex-col items-center transition-transform ${isOwner ? 'hover:scale-105 group cursor-pointer' : 'cursor-default'}`}
+                className={`flex flex-col items-center py-1 rounded-xl transition-all ${isOwner ? "hover:bg-white/5 cursor-pointer" : "cursor-default"}`}
               >
-                <span className="font-bold text-white text-base sm:text-lg group-hover:text-indigo-400 transition-colors">{followersCount}</span>
-                <span className="text-slate-400 text-xs font-medium group-hover:text-slate-300 transition-colors">Followers</span>
+                <span className="font-extrabold text-white text-base sm:text-lg">{followersCount}</span>
+                <span className="text-slate-400 text-xs font-medium">Followers</span>
               </button>
-              <div className="w-px h-7 bg-white/10" />
-              <button 
+
+              <button
                 onClick={() => isOwner && setConnectionsModalMode("following")}
-                className={`flex flex-col items-center transition-transform ${isOwner ? 'hover:scale-105 group cursor-pointer' : 'cursor-default'}`}
+                className={`flex flex-col items-center py-1 rounded-xl transition-all ${isOwner ? "hover:bg-white/5 cursor-pointer" : "cursor-default"}`}
               >
-                <span className="font-bold text-white text-base sm:text-lg group-hover:text-indigo-400 transition-colors">{followingCount}</span>
-                <span className="text-slate-400 text-xs font-medium group-hover:text-slate-300 transition-colors">Following</span>
+                <span className="font-extrabold text-white text-base sm:text-lg">{followingCount}</span>
+                <span className="text-slate-400 text-xs font-medium">Following</span>
               </button>
             </div>
 
             {/* Bio Section */}
-            <div className="w-full max-w-md mx-auto mb-4 sm:mb-6">
+            <div className="w-full max-w-md">
               {isEditing ? (
-                <div className="flex flex-col gap-2.5">
+                <div className="flex flex-col gap-2">
                   <textarea
                     value={bio}
                     onChange={(e) => setBio(e.target.value)}
                     placeholder="Write a short bio..."
                     maxLength={150}
-                    className="w-full h-24 p-3 bg-black/20 border border-white/10 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 resize-none text-xs sm:text-sm"
+                    className="w-full h-20 p-3 bg-black/40 border border-white/10 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 resize-none text-xs sm:text-sm"
                   />
                   <div className="flex justify-end gap-2">
-                    <button 
-                      onClick={() => { setIsEditing(false); setBio(profile.bio || ""); }}
-                      className="px-3 py-1.5 rounded-lg text-xs font-medium text-slate-300 hover:bg-white/5 transition-colors"
+                    <button
+                      onClick={() => {
+                        setIsEditing(false);
+                        setBio(profile.bio || "");
+                      }}
+                      className="px-3 py-1 rounded-lg text-xs font-medium text-slate-300 hover:bg-white/5 transition-colors cursor-pointer"
                     >
                       Cancel
                     </button>
-                    <button 
+                    <button
                       onClick={saveProfile}
                       disabled={isSaving}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 text-xs font-medium transition-colors"
+                      className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 text-xs font-semibold transition-colors cursor-pointer"
                     >
                       {isSaving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
-                      Save
+                      Save Bio
                     </button>
                   </div>
                 </div>
               ) : (
-                <div className="relative group p-3 rounded-xl border border-transparent hover:border-white/5 hover:bg-white/[0.02] transition-colors">
+                <div className="relative group p-3 rounded-xl bg-black/30 border border-white/5 hover:border-white/10 transition-colors text-center">
                   <p className="text-slate-300 text-xs sm:text-sm leading-relaxed whitespace-pre-wrap">
-                    {profile.bio || <span className="text-slate-500 italic">No bio yet.</span>}
+                    {profile.bio || <span className="text-slate-500 italic">No bio written yet.</span>}
                   </p>
-                  
+
                   {isOwner && (
-                    <button 
+                    <button
                       onClick={() => setIsEditing(true)}
-                      className="absolute top-1.5 right-1.5 p-1 rounded-lg bg-white/5 text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity hover:text-white"
+                      className="absolute top-2 right-2 p-1 rounded-lg bg-white/5 text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity hover:text-white cursor-pointer"
+                      title="Edit Bio"
                     >
                       <Edit3 size={13} />
                     </button>
@@ -532,27 +633,10 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
               )}
             </div>
 
-            {/* Actions */}
-            <div className="w-full">
-              {isOwner ? (
-                <div className="grid grid-cols-2 gap-2.5 w-full sm:max-w-xs sm:mx-auto">
-                  <button
-                    onClick={handleLogout}
-                    className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-white/5 hover:bg-white/10 border border-white/5 text-slate-300 hover:text-white font-medium text-xs sm:text-sm transition-all active:scale-95"
-                  >
-                    <LogOut size={15} />
-                    <span>Log Out</span>
-                  </button>
-                  <button
-                    onClick={() => setIsDeleteModalOpen(true)}
-                    className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl border border-rose-500/20 text-rose-400 hover:bg-rose-500/10 hover:border-rose-500/30 font-medium text-xs sm:text-sm transition-all active:scale-95 shadow-sm"
-                  >
-                    <Trash2 size={15} />
-                    <span>Delete</span>
-                  </button>
-                </div>
-              ) : (
-                <div className="flex items-center justify-center gap-2 max-w-sm mx-auto w-full">
+            {/* Visitor Actions (Message / Follow) */}
+            {!isOwner && (
+              <div className="w-full max-w-md mt-4">
+                <div className="flex items-center justify-center gap-2.5 w-full">
                   {connectionStatus === "accepted" ? (
                     <>
                       <div className="flex-1 flex items-center justify-center gap-1.5 py-2.5 px-4 rounded-xl bg-emerald-500/20 text-emerald-400 font-semibold text-xs sm:text-sm border border-emerald-500/30">
@@ -570,7 +654,7 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
                       <button
                         onClick={handleCancelOrUnfollowRequest}
                         disabled={isConnecting}
-                        className="py-2.5 px-3 rounded-xl bg-white/5 hover:bg-rose-500/10 text-slate-400 hover:text-rose-400 border border-white/5 transition-colors text-xs font-medium"
+                        className="py-2.5 px-3 rounded-xl bg-white/5 hover:bg-rose-500/10 text-slate-400 hover:text-rose-400 border border-white/5 transition-colors text-xs font-medium cursor-pointer"
                         title="Unfollow"
                       >
                         Unfollow
@@ -586,7 +670,7 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
                       <span>Requested (Click to Cancel)</span>
                     </button>
                   ) : connectionStatus === "pending_received" ? (
-                    <div className="flex items-center gap-2 w-full">
+                    <div className="flex items-center gap-2.5 w-full">
                       <button
                         onClick={handleAcceptFollowRequest}
                         disabled={isConnecting}
@@ -614,14 +698,73 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
                     </button>
                   )}
                 </div>
-              )}
-            </div>
+              </div>
+            )}
 
           </div>
         </div>
 
-        {/* Account Recovery Code Section (Owner Only - Dedicated Card) */}
+        {/* NATIVE SEGMENTED TAB SWITCHER (For Owner Options) */}
         {isOwner && (
+          <div className="w-full p-1 bg-black/50 border border-white/10 rounded-2xl flex items-center gap-1 shadow-inner overflow-hidden">
+            {TABS.map((tab) => {
+              const Icon = tab.icon;
+              const isActive = activeTab === tab.id;
+
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id as SettingsTab)}
+                  className={`flex-1 min-h-[44px] h-11 flex items-center justify-center gap-1.5 px-2 sm:px-3 rounded-xl font-semibold text-xs sm:text-sm transition-all whitespace-nowrap cursor-pointer shrink-0 ${
+                    isActive
+                      ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/20 border border-indigo-500/40"
+                      : "text-slate-400 hover:text-white hover:bg-white/5"
+                  }`}
+                >
+                  <Icon size={16} className={`shrink-0 ${isActive ? "text-white" : "text-slate-400"}`} />
+                  <span className="truncate leading-none whitespace-nowrap">{tab.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {/* TAB 1: OVERVIEW & ACCOUNT CONTROLS */}
+        {activeTab === "profile" && isOwner && (
+          <div className="bg-[#12131A]/90 border border-white/10 rounded-2xl sm:rounded-3xl p-5 sm:p-7 shadow-xl space-y-4">
+            <h3 className="text-sm font-bold uppercase tracking-wider text-slate-400">Account Management</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <button
+                onClick={handleLogout}
+                className="flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-white/5 hover:bg-white/10 border border-white/5 text-slate-300 hover:text-white font-semibold text-xs sm:text-sm transition-all active:scale-95 cursor-pointer"
+              >
+                <LogOut size={16} />
+                <span>Log Out of Account</span>
+              </button>
+              <button
+                onClick={() => setIsDeleteModalOpen(true)}
+                className="flex items-center justify-center gap-2 py-3 px-4 rounded-xl border border-rose-500/20 text-rose-400 hover:bg-rose-500/10 hover:border-rose-500/30 font-semibold text-xs sm:text-sm transition-all active:scale-95 shadow-sm cursor-pointer"
+              >
+                <Trash2 size={16} />
+                <span>Delete Account</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* TAB 2: VOICE CARD THEME CUSTOMIZER */}
+        {activeTab === "theme" && isOwner && (
+          <CardCustomizer
+            username={profile.username}
+            avatar={profile.avatar}
+            initialColor={profile.card_bg_color || profile.social_links?.card_bg_color || "#465B73"}
+            initialPattern={profile.card_pattern || profile.social_links?.card_pattern || "none"}
+            onSave={handleSaveTheme}
+          />
+        )}
+
+        {/* TAB 3: ACCOUNT SECURITY */}
+        {activeTab === "security" && isOwner && isRegistered && (
           <AccountSecurityCard
             userId={profile.id}
             username={profile.username}
@@ -631,6 +774,7 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
             }}
           />
         )}
+
       </main>
 
       {isOwner && connectionsModalMode && (
@@ -670,4 +814,3 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
     </div>
   );
 }
-
