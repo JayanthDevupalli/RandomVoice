@@ -662,7 +662,6 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
               avatar: guest.avatar || "zap",
               color: guest.color || "#6366F1",
               cardBgColor: user?.cardBgColor || guest.cardBgColor || "#465B73",
-              cardPattern: user?.cardPattern || guest.cardPattern || "none",
               role: storedRole || "speaker", // Backend preserves moderator if already host
               isMuted: true, // Always start MUTED by default
               isMutedByMod: storedModMuted,
@@ -1385,7 +1384,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
               if (participant) {
                 const speaking = activeSpeakers.includes(participant.identity);
                 const muted = isLocal ? (isMuted || isMutedByMod) : (participant.isMuted || participant.isMutedByMod);
-                const cardThemeStyle = getCardThemeStyle(participant.cardBgColor || participant.color, participant.cardPattern);
+                const cardThemeStyle = getCardThemeStyle(participant.cardBgColor || participant.color);
 
                 return (
                   <div

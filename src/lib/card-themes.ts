@@ -7,25 +7,20 @@ export interface ColorPreset {
   category?: "gradient" | "solid";
 }
 
-export interface PatternPreset {
-  id: string;
-  name: string;
-  cssPattern: string;
-  bgSize?: string;
-}
-
 export const PRESET_COLORS: ColorPreset[] = [
-  // ─── Luxury Gradient & Metallic Presets ───
+  // ─── Luxury Metallic & Holographic Gradients ───
+  { id: "diamond_obsidian", name: "Diamond Obsidian", hex: "linear-gradient(135deg, #090A0F 0%, #18181B 35%, #27272A 70%, #3F3F46 100%)", category: "gradient" },
+  { id: "liquid_gold", name: "Liquid Gold", hex: "linear-gradient(135deg, #1C1917 0%, #78350F 40%, #B45309 70%, #F59E0B 100%)", category: "gradient" },
+  { id: "imperial_ruby", name: "Imperial Ruby", hex: "linear-gradient(135deg, #2A040D 0%, #7F1D1D 50%, #B91C1C 100%)", category: "gradient" },
   { id: "cyber_violet", name: "Cyber Violet", hex: "linear-gradient(135deg, #3B0764 0%, #6B21A8 50%, #A21CAF 100%)", category: "gradient" },
   { id: "aurora_teal", name: "Aurora Teal", hex: "linear-gradient(135deg, #042F2E 0%, #0F766E 50%, #0369A1 100%)", category: "gradient" },
-  { id: "obsidian_gold", name: "Obsidian Gold", hex: "linear-gradient(135deg, #18181B 0%, #3F3F46 50%, #854D0E 100%)", category: "gradient" },
+  { id: "supernova_neon", name: "Supernova Neon", hex: "linear-gradient(135deg, #030712 0%, #312E81 50%, #4F46E5 100%)", category: "gradient" },
   { id: "rose_gold", name: "Rose Gold", hex: "linear-gradient(135deg, #4C0519 0%, #9F1239 50%, #E11D48 100%)", category: "gradient" },
   { id: "royal_velvet", name: "Royal Velvet", hex: "linear-gradient(135deg, #2E1065 0%, #5B21B6 50%, #7C3AED 100%)", category: "gradient" },
-  { id: "emerald_luxury", name: "Emerald Luxe", hex: "linear-gradient(135deg, #022C22 0%, #047857 50%, #10B981 100%)", category: "gradient" },
+  { id: "emerald_dragon", name: "Emerald Dragon", hex: "linear-gradient(135deg, #022C22 0%, #064E3B 50%, #059669 100%)", category: "gradient" },
+  { id: "cyber_synthwave", name: "Synthwave Pulse", hex: "linear-gradient(135deg, #2E1065 0%, #A21CAF 50%, #F43F5E 100%)", category: "gradient" },
   { id: "midnight_nebula", name: "Midnight Nebula", hex: "linear-gradient(135deg, #020617 0%, #1E1B4B 50%, #312E81 100%)", category: "gradient" },
-  { id: "volcanic_amber", name: "Volcanic Amber", hex: "linear-gradient(135deg, #450A0A 0%, #9A3412 50%, #D97706 100%)", category: "gradient" },
   { id: "electric_cyan", name: "Electric Cyan", hex: "linear-gradient(135deg, #083344 0%, #0891B2 50%, #06B6D4 100%)", category: "gradient" },
-  { id: "platinum_noir", name: "Platinum Noir", hex: "linear-gradient(135deg, #09090B 0%, #27272A 50%, #52525B 100%)", category: "gradient" },
   { id: "solar_eclipse", name: "Solar Eclipse", hex: "linear-gradient(135deg, #2A0800 0%, #7C2D12 50%, #EAB308 100%)", category: "gradient" },
   { id: "deep_abyss", name: "Deep Abyss", hex: "linear-gradient(135deg, #050510 0%, #0F172A 50%, #1E293B 100%)", category: "gradient" },
 
@@ -56,127 +51,37 @@ export const PRESET_COLORS: ColorPreset[] = [
   { id: "cocoa", name: "Cocoa", hex: "#594239", category: "solid" },
 ];
 
-export const PRESET_PATTERNS: PatternPreset[] = [
-  {
-    id: "none",
-    name: "None",
-    cssPattern: "none",
-  },
-  {
-    id: "diagonal",
-    name: "Diagonal",
-    cssPattern: "repeating-linear-gradient(45deg, rgba(255,255,255,0.08) 0, rgba(255,255,255,0.08) 1px, transparent 0, transparent 10px)",
-  },
-  {
-    id: "grid",
-    name: "Grid",
-    cssPattern: "linear-gradient(to right, rgba(255,255,255,0.08) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.08) 1px, transparent 1px)",
-    bgSize: "16px 16px",
-  },
-  {
-    id: "dots",
-    name: "Dots",
-    cssPattern: "radial-gradient(rgba(255,255,255,0.18) 1.5px, transparent 1.5px)",
-    bgSize: "14px 14px",
-  },
-  {
-    id: "waves",
-    name: "Waves",
-    cssPattern: "radial-gradient(circle at 50% 100%, transparent 6px, rgba(255,255,255,0.08) 7px, rgba(255,255,255,0.08) 8px, transparent 9px)",
-    bgSize: "20px 12px",
-  },
-  {
-    id: "checker",
-    name: "Checker",
-    cssPattern: "conic-gradient(rgba(255,255,255,0.07) 90deg, transparent 90deg 180deg, rgba(255,255,255,0.07) 180deg 270deg, transparent 270deg)",
-    bgSize: "16px 16px",
-  },
-  {
-    id: "pinstripe",
-    name: "Pinstripe",
-    cssPattern: "repeating-linear-gradient(90deg, rgba(255,255,255,0.08), rgba(255,255,255,0.08) 1px, transparent 1px, transparent 12px)",
-  },
-  {
-    id: "rings",
-    name: "Rings",
-    cssPattern: "radial-gradient(circle, transparent 25%, rgba(255,255,255,0.08) 26%, rgba(255,255,255,0.08) 30%, transparent 31%)",
-    bgSize: "24px 24px",
-  },
-  {
-    id: "crosshatch",
-    name: "Crosshatch",
-    cssPattern: "repeating-linear-gradient(45deg, rgba(255,255,255,0.07) 0, rgba(255,255,255,0.07) 1px, transparent 0, transparent 8px), repeating-linear-gradient(-45deg, rgba(255,255,255,0.07) 0, rgba(255,255,255,0.07) 1px, transparent 0, transparent 8px)",
-  },
-  {
-    id: "carbon",
-    name: "Carbon Fiber",
-    cssPattern: "repeating-linear-gradient(45deg, rgba(0,0,0,0.3) 0, rgba(0,0,0,0.3) 2px, transparent 0, transparent 4px), repeating-linear-gradient(-45deg, rgba(255,255,255,0.08) 0, rgba(255,255,255,0.08) 1px, transparent 0, transparent 6px)",
-    bgSize: "10px 10px",
-  },
-  {
-    id: "hexagon",
-    name: "Honeycomb",
-    cssPattern: "radial-gradient(circle at 50% 50%, rgba(255,255,255,0.12) 1.5px, transparent 2px), radial-gradient(circle at 0% 100%, rgba(255,255,255,0.1) 1.5px, transparent 2px)",
-    bgSize: "18px 18px",
-  },
-  {
-    id: "stardust",
-    name: "Stardust",
-    cssPattern: "radial-gradient(rgba(255,255,255,0.22) 1px, transparent 1px), radial-gradient(rgba(255,255,255,0.12) 1px, transparent 1px)",
-    bgSize: "20px 20px, 12px 12px",
-  },
-  {
-    id: "prism",
-    name: "Prism Geometry",
-    cssPattern: "repeating-linear-gradient(60deg, rgba(255,255,255,0.06) 0, rgba(255,255,255,0.06) 1px, transparent 0, transparent 14px), repeating-linear-gradient(-60deg, rgba(255,255,255,0.06) 0, rgba(255,255,255,0.06) 1px, transparent 0, transparent 14px)",
-  },
-  {
-    id: "cyber_circuit",
-    name: "Cyber Circuit",
-    cssPattern: "linear-gradient(90deg, rgba(255,255,255,0.07) 1px, transparent 1px), linear-gradient(0deg, rgba(255,255,255,0.07) 1px, transparent 1px)",
-    bgSize: "24px 24px",
-  },
-];
-
 /**
  * Returns inline CSS properties for rendering a customized background card.
+ * Provides multi-layer glass reflection, rim glow, and depth lighting.
  */
-export function getCardThemeStyle(bgColor?: string, patternId?: string): React.CSSProperties {
+export function getCardThemeStyle(bgColor?: string): React.CSSProperties {
   const bg = bgColor || "#465B73";
-  const pattern = PRESET_PATTERNS.find((p) => p.id === patternId) || PRESET_PATTERNS[0];
-
   const isGradient = bg.includes("gradient") || bg.includes("linear") || bg.includes("radial");
 
   const style: React.CSSProperties = {
-    boxShadow: `0 14px 35px -10px rgba(0,0,0,0.65), inset 0 1px 0 0 rgba(255,255,255,0.2)`,
+    boxShadow: `0 20px 45px -12px rgba(0,0,0,0.75), inset 0 1px 1.5px 0 rgba(255,255,255,0.35), inset 0 -2px 10px 0 rgba(0,0,0,0.45)`,
+    backdropFilter: "blur(12px)",
   };
 
   if (isGradient) {
     style.background = bg;
-    style.borderColor = "rgba(255, 255, 255, 0.25)";
+    style.borderColor = "rgba(255, 255, 255, 0.28)";
   } else {
     style.backgroundColor = bg;
-    style.borderColor = `${bg}A0`;
+    style.borderColor = `${bg}C0`;
   }
 
-  const ambientGradient = `radial-gradient(ellipse at 50% 0%, rgba(255,255,255,0.16) 0%, rgba(0,0,0,0.38) 100%)`;
+  // Multi-layered volumetric light overlay for high-end glass refraction
+  const ambientGradient = `radial-gradient(ellipse at 50% -10%, rgba(255, 255, 255, 0.28) 0%, rgba(255, 255, 255, 0.05) 45%, rgba(0, 0, 0, 0.55) 100%), linear-gradient(180deg, rgba(255,255,255,0.08) 0%, rgba(0,0,0,0.3) 100%)`;
 
-  if (pattern.id !== "none") {
-    if (isGradient) {
-      style.backgroundImage = `${pattern.cssPattern}, ${ambientGradient}, ${bg}`;
-    } else {
-      style.backgroundImage = `${pattern.cssPattern}, ${ambientGradient}`;
-    }
-    if (pattern.bgSize) {
-      style.backgroundSize = isGradient ? `${pattern.bgSize}, 100% 100%, 100% 100%` : `${pattern.bgSize}, 100% 100%`;
-    }
+  if (isGradient) {
+    style.backgroundImage = `${ambientGradient}, ${bg}`;
   } else {
-    if (isGradient) {
-      style.backgroundImage = `${ambientGradient}, ${bg}`;
-    } else {
-      style.backgroundImage = ambientGradient;
-    }
+    style.backgroundImage = ambientGradient;
   }
 
   return style;
 }
+
+

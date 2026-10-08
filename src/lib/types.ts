@@ -25,7 +25,6 @@ export interface JunctionParticipant {
   avatar: string;
   color: string;
   cardBgColor?: string;
-  cardPattern?: string;
   role: ParticipantRole;
   isMuted?: boolean;
   isMutedByMod?: boolean;
@@ -41,7 +40,6 @@ export interface GuestUser {
   avatar: string;
   color: string;
   cardBgColor?: string;
-  cardPattern?: string;
   profileChangesLeft?: number;
 }
 

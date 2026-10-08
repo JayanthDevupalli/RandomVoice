@@ -28,7 +28,6 @@ interface ParticipantRow {
   avatar: string;
   color: string;
   card_bg_color?: string;
-  card_pattern?: string;
   role: string;
   is_muted: boolean;
   is_muted_by_mod: boolean;
@@ -58,29 +57,26 @@ function rowToJunction(row: JunctionRow, participants: ParticipantRow[]): Juncti
   };
 }
 
-function encodeParticipantColor(color?: string, cardBgColor?: string, cardPattern?: string): string {
+function encodeParticipantColor(color?: string, cardBgColor?: string): string {
   const c = color || "#6366F1";
   const bg = cardBgColor || "#465B73";
-  const p = cardPattern || "none";
-  return `${c}|${bg}|${p}`;
+  return `${c}|${bg}`;
 }
 
-function decodeParticipantColor(rawColor?: string): { color: string; cardBgColor: string; cardPattern: string } {
+function decodeParticipantColor(rawColor?: string): { color: string; cardBgColor: string } {
   if (!rawColor) {
-    return { color: "#6366F1", cardBgColor: "#465B73", cardPattern: "none" };
+    return { color: "#6366F1", cardBgColor: "#465B73" };
   }
   if (rawColor.includes("|")) {
     const parts = rawColor.split("|");
     return {
       color: parts[0] || "#6366F1",
       cardBgColor: parts[1] || "#465B73",
-      cardPattern: parts[2] || "none",
     };
   }
   return {
     color: rawColor,
     cardBgColor: "#465B73",
-    cardPattern: "none",
   };
 }
 
@@ -89,9 +85,6 @@ function rowToParticipant(row: ParticipantRow): JunctionParticipant {
   const cardBgColor = (row.card_bg_color && row.card_bg_color !== "#465B73")
     ? row.card_bg_color
     : (decoded.cardBgColor && decoded.cardBgColor !== "#465B73" ? decoded.cardBgColor : (row.card_bg_color || decoded.cardBgColor || "#465B73"));
-  const cardPattern = (row.card_pattern && row.card_pattern !== "none")
-    ? row.card_pattern
-    : (decoded.cardPattern && decoded.cardPattern !== "none" ? decoded.cardPattern : (row.card_pattern || decoded.cardPattern || "none"));
 
   return {
     id: row.id,
@@ -100,7 +93,6 @@ function rowToParticipant(row: ParticipantRow): JunctionParticipant {
     avatar: row.avatar,
     color: decoded.color,
     cardBgColor,
-    cardPattern,
     role: row.role as JunctionParticipant["role"],
     isMuted: row.is_muted,
     isMutedByMod: row.is_muted_by_mod,
@@ -290,15 +282,14 @@ export async function addParticipantToJunction(
     isMod = true;
   }
 
-  // Determine cardBgColor & cardPattern from participant or look up registered user profile
+  // Determine cardBgColor from participant or look up registered user profile
   let cardBgColor = participant.cardBgColor;
-  let cardPattern = participant.cardPattern;
 
   if (!cardBgColor || cardBgColor === "#465B73") {
     try {
       const { data: prof } = await supabase
         .from("profiles")
-        .select("card_bg_color, card_pattern, social_links")
+        .select("card_bg_color, social_links")
         .or(`username.eq.${participant.identity},id.eq.${participant.id || participant.identity}`)
         .maybeSingle();
 
@@ -308,11 +299,6 @@ export async function addParticipantToJunction(
         } else if (prof.social_links?.card_bg_color) {
           cardBgColor = prof.social_links.card_bg_color;
         }
-        if (prof.card_pattern && prof.card_pattern !== "none") {
-          cardPattern = prof.card_pattern;
-        } else if (prof.social_links?.card_pattern) {
-          cardPattern = prof.social_links.card_pattern;
-        }
       }
     } catch (e) {
       console.error("Error fetching user profile card theme:", e);
@@ -320,15 +306,13 @@ export async function addParticipantToJunction(
   }
 
   const finalBgColor = cardBgColor || "#465B73";
-  const finalPattern = cardPattern || "none";
 
   if (!isAlreadyPresent) {
     // Insert new participant securely
     const shouldModMute = Boolean(participant.isMutedByMod);
     const encodedColor = encodeParticipantColor(
       participant.color,
-      finalBgColor,
-      finalPattern
+      finalBgColor
     );
 
     const { error: insertError } = await supabase.from("junction_participants").insert({
@@ -366,8 +350,7 @@ export async function addParticipantToJunction(
     const shouldKeepModMute = Boolean(existing?.isMutedByMod || participant.isMutedByMod);
     const encodedColor = encodeParticipantColor(
       participant.color || existing?.color,
-      finalBgColor !== "#465B73" ? finalBgColor : existing?.cardBgColor,
-      finalPattern !== "none" ? finalPattern : existing?.cardPattern
+      finalBgColor !== "#465B73" ? finalBgColor : existing?.cardBgColor
     );
 
     const { error: updateError } = await supabase

@@ -11,7 +11,6 @@ export interface HybridUser {
   avatar: string;
   color: string;
   cardBgColor?: string;
-  cardPattern?: string;
   bio: string;
   isRegistered: boolean;
 }
@@ -39,9 +38,6 @@ export function useUser() {
           const cardBg = (profile.card_bg_color && profile.card_bg_color !== "#465B73")
             ? profile.card_bg_color
             : (profile.social_links?.card_bg_color || profile.card_bg_color || "#465B73");
-          const cardPattern = (profile.card_pattern && profile.card_pattern !== "none")
-            ? profile.card_pattern
-            : (profile.social_links?.card_pattern || profile.card_pattern || "none");
 
           setUser({
             id: profile.id,
@@ -49,7 +45,6 @@ export function useUser() {
             avatar: profile.avatar,
             color: "#6366F1",
             cardBgColor: cardBg,
-            cardPattern: cardPattern,
             bio: profile.bio || "",
             isRegistered: true,
           });
@@ -73,9 +68,6 @@ export function useUser() {
           const cardBg = (profile.card_bg_color && profile.card_bg_color !== "#465B73")
             ? profile.card_bg_color
             : (profile.social_links?.card_bg_color || profile.card_bg_color || "#465B73");
-          const cardPattern = (profile.card_pattern && profile.card_pattern !== "none")
-            ? profile.card_pattern
-            : (profile.social_links?.card_pattern || profile.card_pattern || "none");
 
           setUser({
             id: profile.id,
@@ -83,7 +75,6 @@ export function useUser() {
             avatar: profile.avatar,
             color: "#6366F1",
             cardBgColor: cardBg,
-            cardPattern: cardPattern,
             bio: profile.bio || "",
             isRegistered: true,
           });
@@ -108,7 +99,6 @@ export function useUser() {
     avatar: guest.avatar,
     color: guest.color,
     cardBgColor: guest.cardBgColor || "#465B73",
-    cardPattern: guest.cardPattern || "none",
     bio: "",
     isRegistered: false,
   } : null);
