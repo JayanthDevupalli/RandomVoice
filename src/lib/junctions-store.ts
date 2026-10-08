@@ -86,14 +86,21 @@ function decodeParticipantColor(rawColor?: string): { color: string; cardBgColor
 
 function rowToParticipant(row: ParticipantRow): JunctionParticipant {
   const decoded = decodeParticipantColor(row.color);
+  const cardBgColor = (row.card_bg_color && row.card_bg_color !== "#465B73")
+    ? row.card_bg_color
+    : (decoded.cardBgColor && decoded.cardBgColor !== "#465B73" ? decoded.cardBgColor : (row.card_bg_color || decoded.cardBgColor || "#465B73"));
+  const cardPattern = (row.card_pattern && row.card_pattern !== "none")
+    ? row.card_pattern
+    : (decoded.cardPattern && decoded.cardPattern !== "none" ? decoded.cardPattern : (row.card_pattern || decoded.cardPattern || "none"));
+
   return {
     id: row.id,
     identity: row.identity,
     name: row.name,
     avatar: row.avatar,
     color: decoded.color,
-    cardBgColor: row.card_bg_color || decoded.cardBgColor,
-    cardPattern: row.card_pattern || decoded.cardPattern,
+    cardBgColor,
+    cardPattern,
     role: row.role as JunctionParticipant["role"],
     isMuted: row.is_muted,
     isMutedByMod: row.is_muted_by_mod,
@@ -283,13 +290,45 @@ export async function addParticipantToJunction(
     isMod = true;
   }
 
+  // Determine cardBgColor & cardPattern from participant or look up registered user profile
+  let cardBgColor = participant.cardBgColor;
+  let cardPattern = participant.cardPattern;
+
+  if (!cardBgColor || cardBgColor === "#465B73") {
+    try {
+      const { data: prof } = await supabase
+        .from("profiles")
+        .select("card_bg_color, card_pattern, social_links")
+        .or(`username.eq.${participant.identity},id.eq.${participant.id || participant.identity}`)
+        .maybeSingle();
+
+      if (prof) {
+        if (prof.card_bg_color && prof.card_bg_color !== "#465B73") {
+          cardBgColor = prof.card_bg_color;
+        } else if (prof.social_links?.card_bg_color) {
+          cardBgColor = prof.social_links.card_bg_color;
+        }
+        if (prof.card_pattern && prof.card_pattern !== "none") {
+          cardPattern = prof.card_pattern;
+        } else if (prof.social_links?.card_pattern) {
+          cardPattern = prof.social_links.card_pattern;
+        }
+      }
+    } catch (e) {
+      console.error("Error fetching user profile card theme:", e);
+    }
+  }
+
+  const finalBgColor = cardBgColor || "#465B73";
+  const finalPattern = cardPattern || "none";
+
   if (!isAlreadyPresent) {
     // Insert new participant securely
     const shouldModMute = Boolean(participant.isMutedByMod);
     const encodedColor = encodeParticipantColor(
       participant.color,
-      participant.cardBgColor,
-      participant.cardPattern
+      finalBgColor,
+      finalPattern
     );
 
     const { error: insertError } = await supabase.from("junction_participants").insert({
@@ -327,8 +366,8 @@ export async function addParticipantToJunction(
     const shouldKeepModMute = Boolean(existing?.isMutedByMod || participant.isMutedByMod);
     const encodedColor = encodeParticipantColor(
       participant.color || existing?.color,
-      participant.cardBgColor || existing?.cardBgColor,
-      participant.cardPattern || existing?.cardPattern
+      finalBgColor !== "#465B73" ? finalBgColor : existing?.cardBgColor,
+      finalPattern !== "none" ? finalPattern : existing?.cardPattern
     );
 
     const { error: updateError } = await supabase

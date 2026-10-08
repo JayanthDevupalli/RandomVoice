@@ -661,6 +661,8 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
               name: guest.name,
               avatar: guest.avatar || "zap",
               color: guest.color || "#6366F1",
+              cardBgColor: user?.cardBgColor || guest.cardBgColor || "#465B73",
+              cardPattern: user?.cardPattern || guest.cardPattern || "none",
               role: storedRole || "speaker", // Backend preserves moderator if already host
               isMuted: true, // Always start MUTED by default
               isMutedByMod: storedModMuted,
@@ -1389,46 +1391,63 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
                   <div
                     key={participant.id || participant.identity || index}
                     style={cardThemeStyle}
-                    className={`relative p-3 sm:p-5 rounded-[1.5rem] flex flex-col justify-between items-center text-center transition-all duration-300 border shadow-lg ${SEAT_SLOTS.length <= 2 ? "min-h-[180px] sm:min-h-[300px]" :
-                      SEAT_SLOTS.length <= 4 ? "min-h-[160px] sm:min-h-[260px]" :
-                        "min-h-[140px] sm:min-h-[215px]"
-                      } ${isParticipantMod ? "ring-2 ring-amber-500/50" : ""}`}
+                    className={`relative p-2.5 sm:p-4.5 rounded-2xl sm:rounded-[1.5rem] flex flex-col justify-between items-center text-center transition-all duration-300 border overflow-hidden ${
+                      SEAT_SLOTS.length <= 2
+                        ? "min-h-[165px] sm:min-h-[290px]"
+                        : SEAT_SLOTS.length <= 4
+                        ? "min-h-[145px] sm:min-h-[250px]"
+                        : "min-h-[130px] sm:min-h-[210px]"
+                    } ${
+                      isParticipantMod
+                        ? "ring-2 ring-amber-400/80 shadow-[0_0_25px_rgba(245,158,11,0.3)]"
+                        : speaking
+                        ? "ring-2 ring-emerald-400/80 shadow-[0_0_25px_rgba(52,211,153,0.35)]"
+                        : "hover:border-white/30"
+                    }`}
                   >
+                    {/* Glass Reflective Top Highlight */}
+                    <div className="absolute inset-0 bg-gradient-to-b from-white/12 via-transparent to-black/40 pointer-events-none rounded-2xl sm:rounded-[1.5rem]" />
+
                     {/* Top Card Header */}
-                    <div className="w-full flex items-start sm:items-center justify-between gap-1">
-                      <span className="px-1.5 sm:px-2 py-0.5 rounded-md bg-white/5 border border-white/10 text-[9px] sm:text-[10px] font-mono font-semibold text-slate-400 shrink-0">
-                        SEAT #{index + 1}
+                    <div className="w-full flex items-center justify-between gap-1 z-10 min-h-[20px]">
+                      <span className="px-1.5 sm:px-2.5 py-0.5 rounded-full bg-black/40 backdrop-blur-md border border-white/15 text-[8px] sm:text-[10px] font-mono font-bold text-slate-200 shadow-inner flex items-center gap-1 shrink-0">
+                        <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
+                        <span className="hidden xs:inline">SEAT </span>#{index + 1}
                       </span>
 
-                      <div className="flex items-center gap-1 shrink-0 flex-wrap justify-end">
+                      <div className="flex items-center gap-1 shrink-0 justify-end">
                         {isParticipantMod && (
-                          <span className="flex items-center justify-center p-0.5 sm:p-1 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 shadow-sm shrink-0" title="Moderator">
-                            <Crown size={10} className="fill-amber-400 sm:w-3 sm:h-3" />
+                          <span
+                            className="flex items-center gap-0.5 px-1.5 sm:px-2 py-0.5 rounded-full bg-gradient-to-r from-amber-500/30 via-amber-400/20 to-amber-500/10 text-amber-300 border border-amber-500/40 shadow-sm shrink-0 backdrop-blur-md text-[8px] sm:text-[9px] font-bold"
+                            title="Room Moderator"
+                          >
+                            <Crown size={10} className="fill-amber-400" />
+                            <span className="hidden xs:inline">HOST</span>
                           </span>
                         )}
                         {isLocal && (
-                          <span className="px-1 sm:px-1.5 py-0.5 rounded-md bg-indigo-600/25 text-indigo-300 text-[8px] sm:text-[9px] font-bold border border-indigo-500/40 shrink-0">
+                          <span className="px-1.5 sm:px-2 py-0.5 rounded-full bg-indigo-600/40 text-indigo-200 text-[8px] sm:text-[9px] font-extrabold border border-indigo-400/50 shrink-0 backdrop-blur-md shadow-sm">
                             YOU
                           </span>
                         )}
 
                         {/* Action Trigger for Participants */}
                         {!isLocal && (
-                          <div className="relative">
+                          <div className="relative shrink-0">
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
                                 setActiveModMenuParticipant(isMenuOpen ? null : participant.identity);
                               }}
-                              className="p-1 rounded-md text-slate-500 dark:text-slate-400 hover:text-white hover:bg-slate-200 dark:bg-slate-800 transition-colors cursor-pointer"
+                              className="p-0.5 sm:p-1 rounded-md text-slate-300 hover:text-white bg-black/40 hover:bg-black/60 border border-white/10 backdrop-blur-md transition-colors cursor-pointer"
                               title="Participant Actions"
                             >
-                              <MoreVertical size={13} />
+                              <MoreVertical size={12} className="sm:w-3.5 sm:h-3.5" />
                             </button>
 
                             {/* Action Dropdown */}
                             {isMenuOpen && (
-                              <div className="absolute top-6 right-0 w-36 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 shadow-2xl p-1 z-30 flex flex-col gap-0.5 text-left animate-fadeIn">
+                              <div className="absolute top-6 right-0 w-36 rounded-xl bg-slate-900/95 border border-white/15 shadow-2xl p-1 z-30 flex flex-col gap-0.5 text-left animate-fadeIn backdrop-blur-xl">
                                 {isCurrentModerator && (
                                   <>
                                     <button
@@ -1438,7 +1457,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
                                           participant.isMutedByMod ? "unmute" : "mute"
                                         )
                                       }
-                                      className="px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-slate-800 dark:text-slate-200 hover:bg-slate-200 dark:bg-slate-800 flex items-center gap-1.5 transition-colors cursor-pointer"
+                                      className="px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-slate-200 hover:bg-white/10 flex items-center gap-1.5 transition-colors cursor-pointer"
                                     >
                                       {participant.isMutedByMod ? <Mic size={12} /> : <MicOff size={12} className="text-rose-400" />}
                                       <span>{participant.isMutedByMod ? "Unmute" : "Force Mute"}</span>
@@ -1471,7 +1490,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
                                 )}
                                 <button
                                   onClick={() => handleReportParticipant(participant.identity)}
-                                  className="px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-rose-500 hover:bg-rose-950/60 flex items-center gap-1.5 transition-colors cursor-pointer"
+                                  className="px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-rose-400 hover:bg-rose-950/60 flex items-center gap-1.5 transition-colors cursor-pointer"
                                 >
                                   <AlertCircle size={12} />
                                   <span>Report User</span>
@@ -1483,9 +1502,13 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
                       </div>
                     </div>
 
-                    {/* Center Vector Avatar */}
+                    {/* Center Premium Avatar */}
                     <div
-                      className="relative my-2 cursor-pointer transition-transform hover:scale-105 active:scale-95"
+                      className={`relative my-1 sm:my-2 cursor-pointer transition-all duration-300 hover:scale-105 active:scale-95 group rounded-2xl ${
+                        speaking
+                          ? "ring-2 ring-emerald-400 shadow-[0_0_25px_rgba(52,211,153,0.5)] animate-pulse"
+                          : "ring-1 ring-white/20 shadow-xl"
+                      }`}
                       onClick={() => setPreviewParticipant(participant)}
                     >
                       <UserAvatar
@@ -1497,45 +1520,45 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
 
                       {/* Mute Badge Overlay */}
                       {muted && (
-                        <div className="absolute -bottom-1 -right-1 p-1 rounded-full bg-rose-600 border-2 border-[#111622] text-white shadow-sm">
-                          <MicOff size={11} />
+                        <div className="absolute -bottom-1 -right-1 p-1 sm:p-1.5 rounded-full bg-gradient-to-br from-rose-500 to-rose-700 border-2 border-[#12131A] text-white shadow-lg backdrop-blur-xs">
+                          <MicOff size={10} className="sm:w-3 sm:h-3" />
                         </div>
                       )}
                     </div>
 
                     {/* Name & Audio Wave Status */}
-                    <div className="w-full flex flex-col items-center gap-1">
-                      <div className="font-bold text-xs sm:text-sm text-white truncate max-w-[110px] sm:max-w-[140px]">
+                    <div className="w-full flex flex-col items-center gap-1 z-10">
+                      <div className="font-extrabold text-[11px] sm:text-sm text-white drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)] tracking-tight truncate max-w-[95px] xs:max-w-[115px] sm:max-w-[140px]">
                         {participant.name}
                       </div>
 
-                      {/* Fixed Height Soundwave Bar or Status */}
+                      {/* Fixed Height Soundwave Bar or Status Pill */}
                       <div className="h-5 flex items-center justify-center">
                         {speaking ? (
-                          <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-950/80 border border-emerald-500/40">
-                            <div className="flex items-center gap-0.5 h-3">
-                              <span className="w-0.5 bg-emerald-400 rounded-full soundwave-bar-1" />
-                              <span className="w-0.5 bg-emerald-400 rounded-full soundwave-bar-2" />
-                              <span className="w-0.5 bg-emerald-400 rounded-full soundwave-bar-3" />
-                              <span className="w-0.5 bg-emerald-400 rounded-full soundwave-bar-4" />
+                          <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/25 border border-emerald-400/50 backdrop-blur-md shadow-sm">
+                            <div className="flex items-center gap-0.5 h-2.5">
+                              <span className="w-0.5 bg-emerald-300 rounded-full soundwave-bar-1" />
+                              <span className="w-0.5 bg-emerald-300 rounded-full soundwave-bar-2" />
+                              <span className="w-0.5 bg-emerald-300 rounded-full soundwave-bar-3" />
+                              <span className="w-0.5 bg-emerald-300 rounded-full soundwave-bar-4" />
                             </div>
-                            <span className="text-[10px] text-emerald-400 font-semibold leading-none">
+                            <span className="text-[9px] sm:text-[10px] text-emerald-300 font-bold leading-none">
                               Speaking
                             </span>
                           </div>
                         ) : participant.isMutedByMod ? (
-                          <span className="text-[10px] text-rose-400 font-semibold">Mod Muted</span>
+                          <span className="px-2 py-0.5 rounded-full bg-rose-950/80 border border-rose-500/40 text-[9px] sm:text-[10px] text-rose-300 font-semibold backdrop-blur-md shadow-xs">Mod Muted</span>
                         ) : muted ? (
-                          <span className="text-[10px] text-rose-400/80 font-medium">Muted</span>
+                          <span className="px-2 py-0.5 rounded-full bg-black/40 border border-white/10 text-[9px] sm:text-[10px] text-rose-300/90 font-medium backdrop-blur-md shadow-xs">Muted</span>
                         ) : (
-                          <span className="text-[10px] text-slate-500 font-medium">Listening</span>
+                          <span className="px-2 py-0.5 rounded-full bg-black/30 border border-white/10 text-[9px] sm:text-[10px] text-slate-300/80 font-medium backdrop-blur-md shadow-xs">Listening</span>
                         )}
                       </div>
 
                       {/* Volume Slider for Remote Participants */}
                       {!isLocal && (
-                        <div className="w-full mt-1 pt-1.5 border-t border-slate-200 dark:border-slate-800/80 flex items-center gap-1.5">
-                          <Volume1 size={11} className="text-slate-500" />
+                        <div className="w-full mt-1 pt-1 border-t border-white/10 flex items-center gap-1">
+                          <Volume1 size={10} className="text-slate-300 shrink-0" />
                           <input
                             type="range"
                             min="0"
@@ -1544,10 +1567,10 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
                             onChange={(e) =>
                               handleVolumeChange(participant.identity, Number(e.target.value))
                             }
-                            className="w-full h-1 bg-slate-200 dark:bg-slate-800 rounded appearance-none cursor-pointer accent-indigo-500"
+                            className="w-full h-1 bg-white/20 rounded appearance-none cursor-pointer accent-indigo-400"
                             title={`Volume for ${participant.name}`}
                           />
-                          <span className="text-[9px] text-slate-500 dark:text-slate-400 font-mono w-5 text-right">
+                          <span className="text-[8px] sm:text-[9px] text-slate-300 font-mono w-4 sm:w-5 text-right shrink-0">
                             {Math.min(100, Math.max(0, volume))}%
                           </span>
                         </div>
@@ -1562,32 +1585,35 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
                 <div
                   key={`vacant-${index}`}
                   onClick={handleCopyLink}
-                  className={`relative p-3 sm:p-5 rounded-[1.5rem] border border-dashed border-white/20 hover:border-indigo-500/50 bg-white/5 hover:bg-white/10 backdrop-blur-md flex flex-col justify-between items-center text-center group cursor-pointer transition-all active:scale-95 ${SEAT_SLOTS.length <= 2 ? "min-h-[180px] sm:min-h-[300px]" :
-                    SEAT_SLOTS.length <= 4 ? "min-h-[160px] sm:min-h-[260px]" :
-                      "min-h-[140px] sm:min-h-[215px]"
-                    }`}
+                  className={`relative p-3 sm:p-5 rounded-[1.5rem] border border-dashed border-white/20 hover:border-indigo-400/60 bg-gradient-to-b from-white/[0.04] to-black/30 hover:from-indigo-600/15 hover:to-black/50 backdrop-blur-md flex flex-col justify-between items-center text-center group cursor-pointer transition-all active:scale-95 shadow-md hover:shadow-[0_0_25px_rgba(99,102,241,0.2)] ${
+                    SEAT_SLOTS.length <= 2
+                      ? "min-h-[180px] sm:min-h-[300px]"
+                      : SEAT_SLOTS.length <= 4
+                      ? "min-h-[160px] sm:min-h-[260px]"
+                      : "min-h-[140px] sm:min-h-[215px]"
+                  }`}
                 >
                   {/* Top Header */}
                   <div className="w-full flex items-center justify-between">
-                    <span className="px-1.5 sm:px-2 py-0.5 rounded-md bg-white/5 border border-white/10 text-[9px] sm:text-[10px] font-mono font-semibold text-slate-400">
+                    <span className="px-2 py-0.5 rounded-full bg-black/40 border border-white/10 text-[9px] sm:text-[10px] font-mono font-semibold text-slate-400">
                       SEAT #{index + 1}
                     </span>
-                    <span className="text-[8px] sm:text-[9px] text-slate-500 font-medium uppercase">
+                    <span className="text-[8px] sm:text-[9px] text-slate-400 font-bold uppercase tracking-wider">
                       Vacant
                     </span>
                   </div>
 
                   {/* Center Icon */}
-                  <div className="w-10 h-10 sm:w-14 sm:h-14 rounded-xl sm:rounded-2xl border border-dashed border-white/20 group-hover:border-indigo-500/50 group-hover:bg-indigo-600/10 flex items-center justify-center text-slate-500 group-hover:text-indigo-400 transition-all my-1 sm:my-2">
+                  <div className="w-10 h-10 sm:w-14 sm:h-14 rounded-xl sm:rounded-2xl border border-dashed border-white/20 group-hover:border-indigo-400/60 group-hover:bg-indigo-500/15 flex items-center justify-center text-slate-400 group-hover:text-indigo-300 transition-all my-1 sm:my-2 shadow-inner">
                     <UserPlus size={18} className="sm:w-5 sm:h-5" />
                   </div>
 
                   {/* Bottom Prompt */}
                   <div className="flex flex-col items-center">
-                    <span className="text-xs font-bold text-slate-500 dark:text-slate-400 group-hover:text-indigo-300 transition-colors">
+                    <span className="text-xs font-bold text-slate-300 group-hover:text-white transition-colors">
                       Open Seat
                     </span>
-                    <span className="text-[9px] text-slate-600 group-hover:text-slate-500 dark:text-slate-400 transition-colors">
+                    <span className="text-[9px] text-slate-400 group-hover:text-slate-300 transition-colors">
                       Tap to invite
                     </span>
                   </div>

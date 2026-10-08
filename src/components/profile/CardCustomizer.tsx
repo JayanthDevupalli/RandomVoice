@@ -86,43 +86,48 @@ export function CardCustomizer({
 
           <div
             style={cardStyle}
-            className="relative p-5 sm:p-6 rounded-[1.5rem] border flex flex-col justify-between items-center text-center shadow-2xl transition-all duration-300 min-h-[230px]"
+            className="relative p-5 sm:p-6 rounded-[1.5rem] border flex flex-col justify-between items-center text-center shadow-2xl transition-all duration-300 min-h-[230px] overflow-hidden border-white/20"
           >
+            {/* Glass Reflective Top Highlight */}
+            <div className="absolute inset-0 bg-gradient-to-b from-white/12 via-transparent to-black/40 pointer-events-none rounded-[1.5rem]" />
+
             {/* Top Card Header */}
-            <div className="w-full flex items-center justify-between">
-              <span className="px-2.5 py-0.5 rounded-md bg-black/40 border border-white/10 text-[10px] font-mono font-semibold text-slate-300">
+            <div className="w-full flex items-center justify-between z-10">
+              <span className="px-2.5 py-1 rounded-full bg-black/40 backdrop-blur-md border border-white/15 text-[10px] font-mono font-bold text-slate-200 shadow-inner flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
                 SEAT #1
               </span>
               <div className="flex items-center gap-1.5">
-                <span className="p-1 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 shadow-sm" title="Moderator">
-                  <Crown size={12} className="fill-amber-400" />
+                <span className="flex items-center gap-1 px-2 py-1 rounded-full bg-gradient-to-r from-amber-500/30 via-amber-400/20 to-amber-500/10 text-amber-300 border border-amber-500/40 shadow-sm backdrop-blur-md text-[9px] font-bold tracking-wider" title="Moderator">
+                  <Crown size={11} className="fill-amber-400" />
+                  <span>HOST</span>
                 </span>
-                <span className="px-1.5 py-0.5 rounded-md bg-indigo-600/40 text-indigo-200 text-[9px] font-bold border border-indigo-400/50">
+                <span className="px-2 py-1 rounded-full bg-indigo-600/40 text-indigo-200 text-[9px] font-extrabold border border-indigo-400/50 backdrop-blur-md shadow-sm">
                   YOU
                 </span>
               </div>
             </div>
 
             {/* Avatar with Mute Overlay */}
-            <div className="relative my-3">
-              <div className="w-18 h-18 sm:w-20 sm:h-20 rounded-2xl overflow-hidden border-2 border-white/20 bg-black/40 flex items-center justify-center shadow-xl">
+            <div className="relative my-3 rounded-2xl ring-1 ring-white/20 shadow-xl">
+              <div className="w-18 h-18 sm:w-20 sm:h-20 rounded-2xl overflow-hidden bg-black/40 flex items-center justify-center">
                 {avatar?.includes("http") ? (
                   <img src={avatar} alt={username} className="w-full h-full object-cover" />
                 ) : (
                   <UserAvatar avatar={avatar || "zap"} color="#6366F1" size="lg" className="!rounded-2xl !w-full !h-full" />
                 )}
               </div>
-              <div className="absolute -bottom-1 -right-1 p-1.5 rounded-full bg-rose-600 border-2 border-[#111622] text-white shadow-md">
+              <div className="absolute -bottom-1 -right-1 p-1.5 rounded-full bg-gradient-to-br from-rose-500 to-rose-700 border-2 border-[#12131A] text-white shadow-lg backdrop-blur-xs">
                 <MicOff size={12} />
               </div>
             </div>
 
             {/* User Details */}
-            <div className="flex flex-col items-center">
-              <span className="font-bold text-sm sm:text-base text-white drop-shadow">
+            <div className="flex flex-col items-center gap-1 z-10">
+              <span className="font-extrabold text-sm sm:text-base text-white drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)] tracking-tight">
                 {username}
               </span>
-              <span className="text-[11px] font-medium text-rose-300/90 mt-0.5">
+              <span className="px-2.5 py-0.5 rounded-full bg-black/40 border border-white/10 text-[10px] text-rose-300 font-medium backdrop-blur-md shadow-xs">
                 Muted
               </span>
             </div>
@@ -172,25 +177,29 @@ export function CardCustomizer({
           />
         </div>
 
-        {/* 24 Preset Colors Grid (6 columns desktop, 4 columns tablet, 2 columns mobile) */}
+        {/* Preset Colors Grid (6 columns desktop, 4 columns tablet, 2 columns mobile) */}
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2.5">
           {PRESET_COLORS.map((preset) => {
-            const isSelected = selectedColor.toLowerCase() === preset.hex.toLowerCase();
+            const isSelected = selectedColor === preset.hex;
+            const isGradient = preset.hex.includes("gradient");
+
             return (
               <button
                 key={preset.id}
                 type="button"
                 onClick={() => setSelectedColor(preset.hex)}
-                style={{ backgroundColor: preset.hex }}
-                className={`h-11 rounded-xl flex items-center justify-center px-2 text-xs font-semibold text-white shadow-md transition-all relative overflow-hidden cursor-pointer ${
+                style={isGradient ? { background: preset.hex } : { backgroundColor: preset.hex }}
+                className={`h-11 rounded-xl flex items-center justify-center px-2 text-xs font-bold text-white shadow-md transition-all relative overflow-hidden cursor-pointer ${
                   isSelected
-                    ? "ring-2 ring-cyan-400 border-2 border-cyan-400 scale-[1.03] shadow-cyan-500/30 z-10"
-                    : "hover:scale-[1.02] hover:opacity-90 border border-white/10"
+                    ? "ring-2 ring-cyan-400 border-2 border-cyan-400 scale-[1.03] shadow-[0_0_18px_rgba(34,211,238,0.45)] z-10"
+                    : "hover:scale-[1.02] hover:opacity-90 border border-white/15"
                 }`}
               >
-                <span className="drop-shadow-md text-center truncate w-full px-1">{preset.name}</span>
+                <span className="drop-shadow-[0_1px_3px_rgba(0,0,0,0.8)] text-center truncate w-full px-1">
+                  {preset.name}
+                </span>
                 {isSelected && (
-                  <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-cyan-400 shadow-sm" />
+                  <span className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-cyan-400 border border-black/40 shadow-md animate-pulse" />
                 )}
               </button>
             );

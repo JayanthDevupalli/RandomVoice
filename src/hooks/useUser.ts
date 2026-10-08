@@ -36,13 +36,20 @@ export function useUser() {
           .single();
 
         if (profile && mounted) {
+          const cardBg = (profile.card_bg_color && profile.card_bg_color !== "#465B73")
+            ? profile.card_bg_color
+            : (profile.social_links?.card_bg_color || profile.card_bg_color || "#465B73");
+          const cardPattern = (profile.card_pattern && profile.card_pattern !== "none")
+            ? profile.card_pattern
+            : (profile.social_links?.card_pattern || profile.card_pattern || "none");
+
           setUser({
             id: profile.id,
             name: profile.username,
             avatar: profile.avatar,
-            color: "#6366F1", // Default color for registered users
-            cardBgColor: profile.card_bg_color || profile.social_links?.card_bg_color || "#465B73",
-            cardPattern: profile.card_pattern || profile.social_links?.card_pattern || "none",
+            color: "#6366F1",
+            cardBgColor: cardBg,
+            cardPattern: cardPattern,
             bio: profile.bio || "",
             isRegistered: true,
           });
@@ -63,13 +70,20 @@ export function useUser() {
           .single();
 
         if (profile && mounted) {
+          const cardBg = (profile.card_bg_color && profile.card_bg_color !== "#465B73")
+            ? profile.card_bg_color
+            : (profile.social_links?.card_bg_color || profile.card_bg_color || "#465B73");
+          const cardPattern = (profile.card_pattern && profile.card_pattern !== "none")
+            ? profile.card_pattern
+            : (profile.social_links?.card_pattern || profile.card_pattern || "none");
+
           setUser({
             id: profile.id,
             name: profile.username,
             avatar: profile.avatar,
             color: "#6366F1",
-            cardBgColor: profile.card_bg_color || profile.social_links?.card_bg_color || "#465B73",
-            cardPattern: profile.card_pattern || profile.social_links?.card_pattern || "none",
+            cardBgColor: cardBg,
+            cardPattern: cardPattern,
             bio: profile.bio || "",
             isRegistered: true,
           });

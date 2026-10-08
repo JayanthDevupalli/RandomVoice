@@ -104,7 +104,18 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
         .single();
 
       if (data) {
-        setProfile(data);
+        const cardBg = (data.card_bg_color && data.card_bg_color !== "#465B73")
+          ? data.card_bg_color
+          : (data.social_links?.card_bg_color || data.card_bg_color || "#465B73");
+        const cardPattern = (data.card_pattern && data.card_pattern !== "none")
+          ? data.card_pattern
+          : (data.social_links?.card_pattern || data.card_pattern || "none");
+
+        setProfile({
+          ...data,
+          card_bg_color: cardBg,
+          card_pattern: cardPattern,
+        });
         setBio(data.bio || "");
 
         const { count: followers } = await supabase
@@ -443,6 +454,17 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
           social_links: updatedSocialLinks,
         })
         .eq("id", profile.id);
+
+      // Best effort update to standalone columns if present in schema
+      try {
+        await supabase
+          .from("profiles")
+          .update({
+            card_bg_color: cardBgColor,
+            card_pattern: cardPattern,
+          })
+          .eq("id", profile.id);
+      } catch (e) {}
 
       if (!error) {
         setProfile({
