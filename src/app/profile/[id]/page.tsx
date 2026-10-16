@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { useRouter, useParams, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { useUser } from "@/hooks/useUser";
@@ -26,6 +26,11 @@ import {
   Quote,
   Users,
   UserCheck,
+  MoreVertical,
+  Ban,
+  Unlock,
+  Copy,
+  CheckCheck,
 } from "lucide-react";
 import { ConnectionsModal } from "@/components/profile/ConnectionsModal";
 import { DeleteAccountModal } from "@/components/profile/DeleteAccountModal";
@@ -34,6 +39,7 @@ import { ImageCropModal } from "@/components/profile/ImageCropModal";
 import { AccountSecurityCard } from "@/components/profile/AccountSecurityCard";
 import { CardCustomizer } from "@/components/profile/CardCustomizer";
 import { getCardThemeStyle } from "@/lib/card-themes";
+import { socialService } from "@/lib/social-service";
 
 type SettingsTab = "profile" | "theme" | "security";
 
@@ -60,7 +66,14 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
   // Connection status with target user if not owner
   const [isFollowing, setIsFollowing] = useState(false);
   const [followsMe, setFollowsMe] = useState(false);
+  const [isBlockedByMe, setIsBlockedByMe] = useState(false);
+  const [hasBlockedMe, setHasBlockedMe] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [isBlockModalOpen, setIsBlockModalOpen] = useState(false);
+  const [isBlockingAction, setIsBlockingAction] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
+  const visitorMenuRef = useRef<HTMLDivElement>(null);
 
   // Edit mode state
   const [isEditing, setIsEditing] = useState(false);
@@ -76,6 +89,48 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
   // Determine if the current user is viewing their own profile
   const isOwner = targetId === "me" || (currentUser && targetId === currentUser.id);
   const profileIdToFetch = targetId === "me" && currentUser ? currentUser.id : targetId;
+
+  const fetchProfile = useCallback(async (isInitial = false) => {
+    if (!profileIdToFetch) return;
+    if (isInitial) setIsLoading(true);
+
+    try {
+      const { data } = await supabase
+        .from("profiles")
+        .select("*")
+        .eq("id", profileIdToFetch)
+        .single();
+
+      if (data) {
+        const cardBg = (data.card_bg_color && data.card_bg_color !== "#465B73")
+          ? data.card_bg_color
+          : (data.social_links?.card_bg_color || data.card_bg_color || "#465B73");
+
+        setProfile({
+          ...data,
+          card_bg_color: cardBg,
+        });
+        setBio(data.bio || "");
+
+        // Accurate follow & following counts via socialService
+        const counts = await socialService.getFollowCounts(profileIdToFetch);
+        setFollowersCount(counts.followersCount);
+        setFollowingCount(counts.followingCount);
+
+        if (currentUser && currentUser.id !== profileIdToFetch) {
+          const rel = await socialService.getRelationship(currentUser.id, profileIdToFetch);
+          setIsFollowing(rel.isFollowing);
+          setFollowsMe(rel.followsMe);
+          setIsBlockedByMe(rel.isBlockedByMe);
+          setHasBlockedMe(rel.hasBlockedMe);
+        }
+      }
+    } catch (err) {
+      console.error("Error fetching profile:", err);
+    } finally {
+      if (isInitial) setIsLoading(false);
+    }
+  }, [profileIdToFetch, currentUser?.id]);
 
   useEffect(() => {
     if (!isAuthLoaded) return;
@@ -97,67 +152,12 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
       return;
     }
 
-    async function fetchProfile() {
-      if (!profileIdToFetch) return;
-      setIsLoading(true);
+    fetchProfile(true);
 
-      const { data } = await supabase
-        .from("profiles")
-        .select("*")
-        .eq("id", profileIdToFetch)
-        .single();
-
-      if (data) {
-        const cardBg = (data.card_bg_color && data.card_bg_color !== "#465B73")
-          ? data.card_bg_color
-          : (data.social_links?.card_bg_color || data.card_bg_color || "#465B73");
-
-        setProfile({
-          ...data,
-          card_bg_color: cardBg,
-        });
-        setBio(data.bio || "");
-
-        const { count: followers } = await supabase
-          .from("connections")
-          .select("*", { count: "exact", head: true })
-          .eq("receiver_id", profileIdToFetch)
-          .eq("status", "accepted");
-
-        const { count: following } = await supabase
-          .from("connections")
-          .select("*", { count: "exact", head: true })
-          .eq("requester_id", profileIdToFetch)
-          .eq("status", "accepted");
-
-        if (followers !== null) setFollowersCount(followers);
-        if (following !== null) setFollowingCount(following);
-
-        if (currentUser && currentUser.id !== profileIdToFetch) {
-          const { data: iFollowData } = await supabase
-            .from("connections")
-            .select("id")
-            .eq("requester_id", currentUser.id)
-            .eq("receiver_id", profileIdToFetch)
-            .eq("status", "accepted")
-            .maybeSingle();
-
-          const { data: followsMeData } = await supabase
-            .from("connections")
-            .select("id")
-            .eq("requester_id", profileIdToFetch)
-            .eq("receiver_id", currentUser.id)
-            .eq("status", "accepted")
-            .maybeSingle();
-
-          setIsFollowing(Boolean(iFollowData));
-          setFollowsMe(Boolean(followsMeData));
-        }
-      }
-      setIsLoading(false);
-    }
-
-    fetchProfile();
+    const handleSocialEvent = () => {
+      fetchProfile(false);
+    };
+    window.addEventListener("yapclub_social_updated", handleSocialEvent);
 
     const channelId = `profile_live_${profileIdToFetch}_${Math.random().toString(36).substring(2, 7)}`;
     const channel = supabase
@@ -170,15 +170,16 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
           table: "connections",
         },
         () => {
-          fetchProfile();
+          fetchProfile(false);
         }
       )
       .subscribe();
 
     return () => {
       supabase.removeChannel(channel);
+      window.removeEventListener("yapclub_social_updated", handleSocialEvent);
     };
-  }, [profileIdToFetch, isAuthLoaded, currentUser, isRegistered, router, targetId, guest]);
+  }, [profileIdToFetch, isAuthLoaded, currentUser?.id, isRegistered, router, targetId, guest, fetchProfile]);
 
   const handleFollowToggle = async () => {
     if (!currentUser || !profile) return;
@@ -186,27 +187,19 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
     try {
       if (isFollowing) {
         // Unfollow
-        const { error } = await supabase
-          .from("connections")
-          .delete()
-          .eq("requester_id", currentUser.id)
-          .eq("receiver_id", profile.id);
-
-        if (!error) {
+        const res = await socialService.unfollowUser(currentUser.id, profile.id);
+        if (res.success) {
           setIsFollowing(false);
           setFollowersCount((prev) => Math.max(0, prev - 1));
         }
       } else {
-        // Instant Follow (Instagram style)
-        const { error } = await supabase.from("connections").insert({
-          requester_id: currentUser.id,
-          receiver_id: profile.id,
-          status: "accepted",
-        });
-
-        if (!error) {
+        // Follow (Instagram style)
+        const res = await socialService.followUser(currentUser.id, profile.id);
+        if (res.success) {
           setIsFollowing(true);
           setFollowersCount((prev) => prev + 1);
+        } else if (res.error) {
+          alert(res.error);
         }
       }
     } catch (e) {
@@ -216,8 +209,70 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
     }
   };
 
+  const handleBlockUser = async () => {
+    if (!currentUser || !profile) return;
+    setIsBlockingAction(true);
+    try {
+      const res = await socialService.blockUser(currentUser.id, profile.id);
+      if (res.success) {
+        setIsBlockedByMe(true);
+        setIsFollowing(false);
+        setFollowsMe(false);
+        setIsBlockModalOpen(false);
+        setIsMenuOpen(false);
+        const counts = await socialService.getFollowCounts(profile.id);
+        setFollowersCount(counts.followersCount);
+        setFollowingCount(counts.followingCount);
+      } else if (res.error) {
+        alert(res.error);
+      }
+    } catch (e) {
+      console.error("Failed to block user:", e);
+    } finally {
+      setIsBlockingAction(false);
+    }
+  };
+
+  const handleUnblockUser = async () => {
+    if (!currentUser || !profile) return;
+    setIsBlockingAction(true);
+    try {
+      const res = await socialService.unblockUser(currentUser.id, profile.id);
+      if (res.success) {
+        setIsBlockedByMe(false);
+        setIsMenuOpen(false);
+        const counts = await socialService.getFollowCounts(profile.id);
+        setFollowersCount(counts.followersCount);
+        setFollowingCount(counts.followingCount);
+      } else if (res.error) {
+        alert(res.error);
+      }
+    } catch (e) {
+      console.error("Failed to unblock user:", e);
+    } finally {
+      setIsBlockingAction(false);
+    }
+  };
+
+  const handleCopyProfileLink = () => {
+    if (typeof window !== "undefined") {
+      navigator.clipboard.writeText(window.location.href);
+      setCopiedLink(true);
+      setTimeout(() => setCopiedLink(false), 2000);
+      setIsMenuOpen(false);
+    }
+  };
+
   const handleStartMessage = async () => {
     if (!currentUser || !profile) return;
+    if (isBlockedByMe) {
+      alert("You have blocked this user. Unblock them to send messages.");
+      return;
+    }
+    if (hasBlockedMe) {
+      alert("This account is unavailable.");
+      return;
+    }
     setIsConnecting(true);
     try {
       const { data: myConvs } = await supabase
@@ -476,6 +531,54 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
             <span className="text-[11px] sm:text-xs font-semibold px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-300">
               {isOwner ? "My Dashboard" : `${profile.username}'s Profile`}
             </span>
+
+            {/* Visitor 3-Dot Options Dropdown */}
+            {!isOwner && currentUser && (
+              <div className="relative" ref={visitorMenuRef}>
+                <button
+                  onClick={() => setIsMenuOpen(!isMenuOpen)}
+                  className="p-1.5 sm:p-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white border border-white/5 transition-all active:scale-95 cursor-pointer"
+                  title="Profile Options"
+                  aria-label="Profile Options"
+                >
+                  <MoreVertical size={16} />
+                </button>
+
+                {isMenuOpen && (
+                  <div className="absolute right-0 top-full mt-2 w-48 rounded-2xl bg-[#12131A] border border-white/10 shadow-2xl py-1.5 z-50 backdrop-blur-2xl animate-in fade-in zoom-in-95 duration-150">
+                    <button
+                      onClick={handleCopyProfileLink}
+                      className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/5 transition-colors text-left cursor-pointer"
+                    >
+                      {copiedLink ? <CheckCheck size={15} className="text-emerald-400" /> : <Copy size={15} className="text-indigo-400" />}
+                      <span>{copiedLink ? "Link Copied!" : "Copy Profile Link"}</span>
+                    </button>
+
+                    {isBlockedByMe ? (
+                      <button
+                        onClick={handleUnblockUser}
+                        disabled={isBlockingAction}
+                        className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-emerald-400 hover:bg-emerald-500/10 transition-colors text-left cursor-pointer"
+                      >
+                        <Unlock size={15} />
+                        <span>Unblock @{profile.username}</span>
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => {
+                          setIsMenuOpen(false);
+                          setIsBlockModalOpen(true);
+                        }}
+                        className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-rose-400 hover:bg-rose-500/10 transition-colors text-left cursor-pointer"
+                      >
+                        <Ban size={15} />
+                        <span>Block @{profile.username}</span>
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
@@ -500,6 +603,14 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
 
               {/* Profile Details Container */}
               <div className="px-5 sm:px-6 pb-6 relative flex flex-col items-center text-center -mt-14">
+
+                {/* Blocked by viewer alert banner */}
+                {isBlockedByMe && (
+                  <div className="w-full mb-3 px-3.5 py-2 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs font-semibold flex items-center justify-center gap-2 animate-in fade-in">
+                    <ShieldAlert size={14} className="text-amber-400 shrink-0" />
+                    <span>You have blocked @{profile.username}</span>
+                  </div>
+                )}
 
                 {/* Avatar with Ring */}
                 <div className="relative mb-3">
@@ -537,34 +648,60 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
                   {profile.username}
                 </h1>
                 <div className="flex items-center gap-1.5 mb-4">
-                  <span className="text-[11px] font-semibold text-slate-300 bg-white/5 border border-white/10 px-3 py-1 rounded-full flex items-center gap-1">
-                    <ShieldCheck size={12} className={isRegistered ? "text-indigo-400" : "text-amber-400"} />
-                    {isRegistered ? "Registered Member" : "Guest Handle"}
-                  </span>
+                  {hasBlockedMe ? (
+                    <span className="text-[11px] font-semibold text-rose-300 bg-rose-500/10 border border-rose-500/20 px-3 py-1 rounded-full flex items-center gap-1">
+                      <ShieldAlert size={12} className="text-rose-400" />
+                      Account Unavailable
+                    </span>
+                  ) : (
+                    <span className="text-[11px] font-semibold text-slate-300 bg-white/5 border border-white/10 px-3 py-1 rounded-full flex items-center gap-1">
+                      <ShieldCheck size={12} className={isRegistered ? "text-indigo-400" : "text-amber-400"} />
+                      {isRegistered ? "Registered Member" : "Guest Handle"}
+                    </span>
+                  )}
                 </div>
 
                 {/* Stats Row */}
                 <div className="w-full grid grid-cols-2 gap-2 p-2.5 rounded-2xl bg-black/40 border border-white/5 mb-4">
-                  <button
-                    onClick={() => setConnectionsModalMode("followers")}
-                    className="flex flex-col items-center py-1.5 rounded-xl hover:bg-white/5 transition-all cursor-pointer"
-                  >
-                    <span className="font-extrabold text-white text-base sm:text-lg">{followersCount}</span>
-                    <span className="text-slate-400 text-xs font-medium">Followers</span>
-                  </button>
+                  {hasBlockedMe ? (
+                    <>
+                      <div className="flex flex-col items-center py-1.5 rounded-xl opacity-60">
+                        <span className="font-extrabold text-white text-base sm:text-lg">--</span>
+                        <span className="text-slate-400 text-xs font-medium">Followers</span>
+                      </div>
+                      <div className="flex flex-col items-center py-1.5 rounded-xl opacity-60">
+                        <span className="font-extrabold text-white text-base sm:text-lg">--</span>
+                        <span className="text-slate-400 text-xs font-medium">Following</span>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        onClick={() => setConnectionsModalMode("followers")}
+                        className="flex flex-col items-center py-1.5 rounded-xl hover:bg-white/5 transition-all cursor-pointer"
+                      >
+                        <span className="font-extrabold text-white text-base sm:text-lg">{followersCount}</span>
+                        <span className="text-slate-400 text-xs font-medium">Followers</span>
+                      </button>
 
-                  <button
-                    onClick={() => setConnectionsModalMode("following")}
-                    className="flex flex-col items-center py-1.5 rounded-xl hover:bg-white/5 transition-all cursor-pointer"
-                  >
-                    <span className="font-extrabold text-white text-base sm:text-lg">{followingCount}</span>
-                    <span className="text-slate-400 text-xs font-medium">Following</span>
-                  </button>
+                      <button
+                        onClick={() => setConnectionsModalMode("following")}
+                        className="flex flex-col items-center py-1.5 rounded-xl hover:bg-white/5 transition-all cursor-pointer"
+                      >
+                        <span className="font-extrabold text-white text-base sm:text-lg">{followingCount}</span>
+                        <span className="text-slate-400 text-xs font-medium">Following</span>
+                      </button>
+                    </>
+                  )}
                 </div>
 
                 {/* Bio Box */}
                 <div className="w-full">
-                  {isEditing ? (
+                  {hasBlockedMe ? (
+                    <div className="p-3.5 rounded-2xl bg-black/30 border border-white/5 text-center w-full">
+                      <p className="text-slate-500 text-xs italic">This account is unavailable.</p>
+                    </div>
+                  ) : isEditing ? (
                     <div className="flex flex-col gap-2">
                       <textarea
                         value={bio}
@@ -619,40 +756,56 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
                 {/* Visitor / Connection Action Buttons */}
                 {!isOwner && (
                   <div className="w-full mt-4">
-                    <div className="flex items-center justify-center gap-2.5 w-full">
+                    {hasBlockedMe ? (
+                      <div className="w-full py-2.5 px-4 rounded-xl bg-white/5 border border-white/10 text-slate-400 text-xs font-semibold flex items-center justify-center gap-2">
+                        <ShieldAlert size={15} className="text-slate-500" />
+                        <span>Account Unavailable</span>
+                      </div>
+                    ) : isBlockedByMe ? (
                       <button
-                        onClick={handleFollowToggle}
-                        disabled={isConnecting}
-                        className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 px-4 rounded-xl text-xs font-semibold transition-all shadow-md active:scale-95 cursor-pointer ${
-                          isFollowing
-                            ? "bg-white/10 hover:bg-rose-500/20 text-white hover:text-rose-300 border border-white/10 hover:border-rose-500/30"
-                            : "bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-600/25"
-                        }`}
+                        onClick={handleUnblockUser}
+                        disabled={isBlockingAction}
+                        className="w-full flex items-center justify-center gap-1.5 py-2.5 px-4 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs transition-all shadow-md active:scale-95 cursor-pointer"
                       >
-                        {isConnecting ? (
-                          <Loader2 size={15} className="animate-spin" />
-                        ) : isFollowing ? (
-                          <>
-                            <UserCheck size={15} className="text-emerald-400" />
-                            <span>Following</span>
-                          </>
-                        ) : (
-                          <>
-                            <UserPlus size={15} />
-                            <span>{followsMe ? "Follow Back" : "Follow"}</span>
-                          </>
-                        )}
+                        {isBlockingAction ? <Loader2 size={15} className="animate-spin" /> : <Unlock size={15} />}
+                        <span>Unblock</span>
                       </button>
+                    ) : (
+                      <div className="flex items-center justify-center gap-2.5 w-full">
+                        <button
+                          onClick={handleFollowToggle}
+                          disabled={isConnecting}
+                          className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 px-4 rounded-xl text-xs font-semibold transition-all shadow-md active:scale-95 cursor-pointer ${
+                            isFollowing
+                              ? "bg-white/10 hover:bg-rose-500/20 text-white hover:text-rose-300 border border-white/10 hover:border-rose-500/30"
+                              : "bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-600/25"
+                          }`}
+                        >
+                          {isConnecting ? (
+                            <Loader2 size={15} className="animate-spin" />
+                          ) : isFollowing ? (
+                            <>
+                              <UserCheck size={15} className="text-emerald-400" />
+                              <span>Following</span>
+                            </>
+                          ) : (
+                            <>
+                              <UserPlus size={15} />
+                              <span>{followsMe ? "Follow Back" : "Follow"}</span>
+                            </>
+                          )}
+                        </button>
 
-                      <button
-                        onClick={handleStartMessage}
-                        disabled={isConnecting}
-                        className="flex-1 flex items-center justify-center gap-1.5 py-2.5 px-4 rounded-xl bg-white/5 hover:bg-white/10 text-white border border-white/10 font-semibold text-xs transition-all shadow-md active:scale-95 cursor-pointer"
-                      >
-                        {isConnecting ? <Loader2 size={15} className="animate-spin" /> : <MessageSquare size={15} />}
-                        <span>Message</span>
-                      </button>
-                    </div>
+                        <button
+                          onClick={handleStartMessage}
+                          disabled={isConnecting}
+                          className="flex-1 flex items-center justify-center gap-1.5 py-2.5 px-4 rounded-xl bg-white/5 hover:bg-white/10 text-white border border-white/10 font-semibold text-xs transition-all shadow-md active:scale-95 cursor-pointer"
+                        >
+                          {isConnecting ? <Loader2 size={15} className="animate-spin" /> : <MessageSquare size={15} />}
+                          <span>Message</span>
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -853,7 +1006,42 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
           targetUsername={profile.username}
           currentUserId={currentUser?.id}
           initialMode={connectionsModalMode}
+          onCountsChanged={() => fetchProfile(false)}
         />
+      )}
+
+      {/* Block User Confirmation Modal */}
+      {isBlockModalOpen && profile && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={() => setIsBlockModalOpen(false)} />
+          <div className="relative w-full max-w-sm bg-[#12131A] border border-white/10 rounded-3xl p-6 shadow-2xl z-10 text-center space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="w-12 h-12 rounded-2xl bg-rose-500/10 text-rose-400 border border-rose-500/20 flex items-center justify-center mx-auto">
+              <Ban size={22} />
+            </div>
+            <div>
+              <h3 className="text-base font-bold text-white mb-1">Block @{profile.username}?</h3>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                They won't be able to message you, view your profile, or see your activity in voice rooms. YapClub won't notify them that you blocked them.
+              </p>
+            </div>
+            <div className="flex flex-col gap-2 pt-2">
+              <button
+                onClick={handleBlockUser}
+                disabled={isBlockingAction}
+                className="w-full py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 active:scale-95 text-white text-xs font-bold transition-all shadow-lg shadow-rose-600/30 cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                {isBlockingAction ? <Loader2 size={14} className="animate-spin" /> : <Ban size={14} />}
+                <span>Block User</span>
+              </button>
+              <button
+                onClick={() => setIsBlockModalOpen(false)}
+                className="w-full py-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 text-xs font-semibold transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {isOwner && (

@@ -1,8 +1,18 @@
+export interface RoomInviteData {
+  junctionId: string;
+  junctionName: string;
+  description?: string;
+  participantCount?: number;
+  maxParticipants?: number;
+  inviterName?: string;
+}
+
 export interface ParsedMessage {
-  type: "text" | "voice";
+  type: "text" | "voice" | "room_invite";
   text?: string;
   audioUrl?: string;
   duration?: number;
+  roomInvite?: RoomInviteData;
   replyTo?: {
     id: string;
     sender: string;
@@ -21,6 +31,22 @@ export function parseMessageContent(raw: string): ParsedMessage {
   if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
     try {
       const parsed = JSON.parse(trimmed);
+      if (parsed.type === "room_invite" && (parsed.roomInvite || parsed.junctionId)) {
+        const invite: RoomInviteData = parsed.roomInvite || {
+          junctionId: parsed.junctionId,
+          junctionName: parsed.junctionName || "Voice Room",
+          description: parsed.description,
+          participantCount: parsed.participantCount,
+          maxParticipants: parsed.maxParticipants,
+          inviterName: parsed.inviterName,
+        };
+        return {
+          type: "room_invite",
+          roomInvite: invite,
+          text: parsed.text || `🎙️ Joined "${invite.junctionName}"! Tap to join the hangout.`,
+          replyTo: parsed.replyTo || null,
+        };
+      }
       if (parsed.type === "voice") {
         return {
           type: "voice",
@@ -74,3 +100,16 @@ export function serializeVoiceMessage(
     replyTo: replyTo || null,
   });
 }
+
+export function serializeRoomInvite(
+  invite: RoomInviteData,
+  replyTo?: ParsedMessage["replyTo"]
+): string {
+  return JSON.stringify({
+    type: "room_invite",
+    roomInvite: invite,
+    text: `🎙️ Invited you to "${invite.junctionName}"! Tap to join the voice hangout.`,
+    replyTo: replyTo || null,
+  });
+}
+

@@ -39,6 +39,8 @@ import {
   serializeVoiceMessage,
   ParsedMessage 
 } from "@/lib/chat-utils";
+import { socialService } from "@/lib/social-service";
+import { RoomInviteCard } from "@/components/chat/RoomInviteCard";
 
 export default function MessagesPage() {
   const { user, isRegistered, isLoaded } = useUser();
@@ -61,8 +63,9 @@ export default function MessagesPage() {
   const [isNicknameModalOpen, setIsNicknameModalOpen] = useState(false);
   const [nicknameInput, setNicknameInput] = useState("");
 
-  // --- Feature 3: Block ---
-  const [blockedUsers, setBlockedUsers] = useState<string[]>([]);
+  // --- Feature 3: Block (Bidirectional) ---
+  const [blockedUsers, setBlockedUsers] = useState<string[]>([]); // Users current user has blocked
+  const [blockedMeUsers, setBlockedMeUsers] = useState<string[]>([]); // Users who have blocked current user
 
   // --- Feature 4: Delete Chat ---
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
@@ -443,26 +446,23 @@ export default function MessagesPage() {
     }
   };
 
-  // Load and sync blocked users
+  // Load and sync blocked users (both directions)
   useEffect(() => {
     if (!user?.id || !isRegistered) return;
-    try {
-      const saved = localStorage.getItem(`yapclub_blocked_${user.id}`);
-      if (saved) setBlockedUsers(JSON.parse(saved));
-    } catch (e) {}
 
-    const fetchBlocked = async () => {
-      const { data } = await supabase
-        .from("connections")
-        .select("receiver_id")
-        .eq("requester_id", user.id)
-        .eq("status", "blocked");
-      if (data) {
-        const ids = data.map((d: any) => d.receiver_id);
-        setBlockedUsers(prev => Array.from(new Set([...prev, ...ids])));
-      }
+    const fetchBlocks = async () => {
+      const { blockedByMeIds, blockedMeIds } = await socialService.getBlockLists(user.id);
+      setBlockedUsers(blockedByMeIds);
+      setBlockedMeUsers(blockedMeIds);
     };
-    fetchBlocked();
+
+    fetchBlocks();
+
+    const handleSocialUpdate = () => {
+      fetchBlocks();
+    };
+    window.addEventListener("yapclub_social_updated", handleSocialUpdate);
+    return () => window.removeEventListener("yapclub_social_updated", handleSocialUpdate);
   }, [user?.id, isRegistered]);
 
   const handleToggleBlock = async (targetUserId: string) => {
@@ -470,29 +470,11 @@ export default function MessagesPage() {
     const isCurrentlyBlocked = blockedUsers.includes(targetUserId);
 
     if (isCurrentlyBlocked) {
-      const next = blockedUsers.filter(id => id !== targetUserId);
-      setBlockedUsers(next);
-      try {
-        localStorage.setItem(`yapclub_blocked_${user.id}`, JSON.stringify(next));
-      } catch (e) {}
-
-      await supabase
-        .from("connections")
-        .update({ status: "accepted" })
-        .match({ requester_id: user.id, receiver_id: targetUserId, status: "blocked" });
+      setBlockedUsers((prev) => prev.filter((id) => id !== targetUserId));
+      await socialService.unblockUser(user.id, targetUserId);
     } else {
-      const next = [...blockedUsers, targetUserId];
-      setBlockedUsers(next);
-      try {
-        localStorage.setItem(`yapclub_blocked_${user.id}`, JSON.stringify(next));
-      } catch (e) {}
-
-      await supabase
-        .from("connections")
-        .upsert(
-          { requester_id: user.id, receiver_id: targetUserId, status: "blocked" },
-          { onConflict: "requester_id,receiver_id" }
-        );
+      setBlockedUsers((prev) => [...prev, targetUserId]);
+      await socialService.blockUser(user.id, targetUserId);
     }
     setIsHeaderMenuOpen(false);
   };
@@ -615,6 +597,13 @@ export default function MessagesPage() {
       setRecordingDuration(0);
 
       if (audioBlob.size === 0) return;
+
+      // Block check
+      const targetUserId = activeConversation?.other_user?.id;
+      if (targetUserId && (blockedUsers.includes(targetUserId) || blockedMeUsers.includes(targetUserId))) {
+        alert("Cannot send voice notes in this conversation.");
+        return;
+      }
 
       const reader = new FileReader();
       reader.onloadend = async () => {
@@ -839,6 +828,13 @@ export default function MessagesPage() {
       return;
     }
 
+    // Block guard
+    const targetUserId = activeConversation?.other_user?.id;
+    if (targetUserId && (blockedUsers.includes(targetUserId) || blockedMeUsers.includes(targetUserId))) {
+      alert("Cannot send messages in this conversation.");
+      return;
+    }
+
     const text = inputMessage.trim();
     const content = serializeTextMessage(text, replyingTo);
     setInputMessage("");
@@ -965,6 +961,7 @@ export default function MessagesPage() {
                   : (customNickname || conv.other_user?.username || "Unknown");
                 const avatarUrl = isGroup ? null : conv.other_user?.avatar;
                 const isBlocked = otherUserId ? blockedUsers.includes(otherUserId) : false;
+                const isBlockedByOther = otherUserId ? blockedMeUsers.includes(otherUserId) : false;
                 const isUserOnline = otherUserId ? onlineUserIds.has(otherUserId) : false;
 
                 return (
@@ -995,11 +992,16 @@ export default function MessagesPage() {
                       <div className="flex items-center justify-between gap-1 mb-1">
                         <div className="flex items-center gap-1.5 min-w-0">
                           <h4 className="text-sm font-semibold text-white truncate">
-                            {title}
+                            {isBlockedByOther ? `${conv.other_user?.username || "User"} (Unavailable)` : title}
                           </h4>
                           {isBlocked && (
                             <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/30 shrink-0">
                               Blocked
+                            </span>
+                          )}
+                          {isBlockedByOther && !isBlocked && (
+                            <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-white/10 text-slate-400 border border-white/10 shrink-0">
+                              Unavailable
                             </span>
                           )}
                         </div>
@@ -1060,10 +1062,13 @@ export default function MessagesPage() {
                 const isGroup = activeConversation?.type === "group";
                 const otherUserId = activeConversation?.other_user?.id;
                 const customNickname = otherUserId ? nicknames[otherUserId] : null;
+                const isBlocked = otherUserId ? blockedUsers.includes(otherUserId) : false;
+                const isBlockedByOther = otherUserId ? blockedMeUsers.includes(otherUserId) : false;
                 const headerTitle = isGroup 
                   ? (activeConversation.name || "Group Chat") 
-                  : (customNickname || activeConversation?.other_user?.username || "Chat");
-                const isBlocked = otherUserId ? blockedUsers.includes(otherUserId) : false;
+                  : isBlockedByOther
+                    ? `${activeConversation?.other_user?.username || "User"} (Unavailable)`
+                    : (customNickname || activeConversation?.other_user?.username || "Chat");
 
                 return (
                   <div className="relative z-30 h-16 border-b border-white/5 flex items-center justify-between px-3 sm:px-6 shrink-0 bg-[#090A0F]/90 backdrop-blur-xl shadow-sm">
@@ -1101,7 +1106,7 @@ export default function MessagesPage() {
                           )}
                         </div>
 
-                        {/* Status Subtitle: Online / Offline / Typing / Blocked */}
+                        {/* Status Subtitle: Online / Offline / Typing / Blocked / Unavailable */}
                         {isGroup ? (
                           <p className="text-[11px] text-slate-400 flex items-center gap-1">
                             <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
@@ -1111,6 +1116,11 @@ export default function MessagesPage() {
                           <p className="text-[11px] text-rose-400 flex items-center gap-1 font-medium">
                             <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
                             Contact Blocked
+                          </p>
+                        ) : isBlockedByOther ? (
+                          <p className="text-[11px] text-slate-400 flex items-center gap-1 font-medium">
+                            <span className="w-1.5 h-1.5 rounded-full bg-slate-500" />
+                            Account Unavailable
                           </p>
                         ) : isOtherUserTyping ? (
                           <p className="text-[11px] text-indigo-400 font-medium flex items-center gap-1.5 animate-pulse">
@@ -1144,6 +1154,10 @@ export default function MessagesPage() {
                               alert("Cannot call a blocked contact.");
                               return;
                             }
+                            if (isBlockedByOther) {
+                              alert("This account is unavailable.");
+                              return;
+                            }
                             const peerUsername = customNickname || activeConversation?.other_user?.username || "Unknown";
                             const peerAvatar = activeConversation?.other_user?.avatar;
                             startCall(activeConversationId, {
@@ -1152,15 +1166,17 @@ export default function MessagesPage() {
                               avatar: peerAvatar,
                             });
                           }}
-                          disabled={callState !== "idle"}
+                          disabled={callState !== "idle" || isBlocked || isBlockedByOther}
                           className={`px-3 py-1.5 rounded-xl flex items-center gap-1.5 transition-all active:scale-95 text-xs font-semibold shadow-sm ${
                             callState !== "idle" && activeCall?.conversationId === activeConversationId
                               ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 animate-pulse"
+                              : isBlocked || isBlockedByOther
+                              ? "opacity-50 cursor-not-allowed bg-white/5 text-slate-500 border border-white/5"
                               : "text-slate-200 hover:text-white bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/30"
                           }`}
-                          title="Start Voice Call"
+                          title={isBlocked ? "Cannot call blocked contact" : isBlockedByOther ? "User is unavailable" : "Start Voice Call"}
                         >
-                          <PhoneCall size={15} className="text-indigo-400" />
+                          <PhoneCall size={15} className={isBlocked || isBlockedByOther ? "text-slate-500" : "text-indigo-400"} />
                           <span className="hidden sm:inline">Voice Call</span>
                         </button>
                       )}
@@ -1293,7 +1309,7 @@ export default function MessagesPage() {
                                 onClick={() => setReplyingTo({
                                   id: msg.id,
                                   sender: senderName,
-                                  text: parsed.type === "voice" ? "Voice Note" : parsed.text || "",
+                                  text: parsed.type === "voice" ? "Voice Note" : parsed.type === "room_invite" ? "Voice Hangout Invite" : parsed.text || "",
                                   isVoice: parsed.type === "voice",
                                 })}
                                 className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
@@ -1303,7 +1319,7 @@ export default function MessagesPage() {
                                 <Reply size={13} />
                               </button>
 
-                              {parsed.type !== "voice" && (
+                              {parsed.type !== "voice" && parsed.type !== "room_invite" && (
                                 <button
                                   type="button"
                                   onClick={() => startEditingMessage(msg.id, msg.content)}
@@ -1362,8 +1378,10 @@ export default function MessagesPage() {
                                 </div>
                               )}
 
-                              {/* Voice Note or Text */}
-                              {parsed.type === "voice" ? (
+                              {/* Voice Note, Room Invite, or Text */}
+                              {parsed.type === "room_invite" && parsed.roomInvite ? (
+                                <RoomInviteCard invite={parsed.roomInvite} isMe={isMe} />
+                              ) : parsed.type === "voice" ? (
                                 <VoiceNotePlayer
                                   audioUrl={parsed.audioUrl || ""}
                                   duration={parsed.duration}
@@ -1471,6 +1489,18 @@ export default function MessagesPage() {
                 const isBlocked = otherUserId && activeConversation?.type !== "group" 
                   ? blockedUsers.includes(otherUserId) 
                   : false;
+                const isBlockedByOther = otherUserId && activeConversation?.type !== "group"
+                  ? blockedMeUsers.includes(otherUserId)
+                  : false;
+
+                if (isBlockedByOther) {
+                  return (
+                    <div className="p-4 border-t border-white/5 bg-black/40 backdrop-blur-md flex items-center justify-center gap-2 text-slate-400 text-xs sm:text-sm shrink-0">
+                      <ShieldAlert size={16} className="text-slate-500" />
+                      <span>You can't message this account.</span>
+                    </div>
+                  );
+                }
 
                 if (isBlocked) {
                   return (

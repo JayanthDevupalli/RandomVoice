@@ -7,6 +7,8 @@ import { UserAvatar } from "@/components/ui/UserAvatar";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 
+import { socialService } from "@/lib/social-service";
+
 interface ConnectionsModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -14,6 +16,7 @@ interface ConnectionsModalProps {
   targetUsername: string;
   currentUserId?: string;
   initialMode?: "followers" | "following" | "requests";
+  onCountsChanged?: () => void;
 }
 
 export function ConnectionsModal({
@@ -23,6 +26,7 @@ export function ConnectionsModal({
   targetUsername,
   currentUserId,
   initialMode = "followers",
+  onCountsChanged,
 }: ConnectionsModalProps) {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState<"followers" | "following">(
@@ -45,13 +49,18 @@ export function ConnectionsModal({
     setActiveTab(initialMode === "following" ? "following" : "followers");
   }, [initialMode]);
 
-  const loadData = async () => {
+  const loadData = async (isInitial = false) => {
     if (!isOpen || !targetUserId) return;
-    setIsLoading(true);
+    if (isInitial) setIsLoading(true);
 
     try {
-      // 1. Fetch logged-in user's active follows & followers for instant Follow/Following state
+      // 1. Fetch blocked user IDs to filter out of lists (Instagram Architecture)
+      let blockedSet = new Set<string>();
       if (currentUserId) {
+        const { blockedByMeIds, blockedMeIds } = await socialService.getBlockLists(currentUserId);
+        blockedSet = new Set([...blockedByMeIds, ...blockedMeIds]);
+
+        // 2. Fetch logged-in user's active follows & followers for instant Follow/Following state
         const { data: myFollowingData } = await supabase
           .from("connections")
           .select("receiver_id")
@@ -72,7 +81,7 @@ export function ConnectionsModal({
         }
       }
 
-      // 2. Fetch target user's Followers (who follows targetUserId)
+      // 3. Fetch target user's Followers (who follows targetUserId)
       const { data: followersData } = await supabase
         .from("connections")
         .select(`
@@ -88,11 +97,11 @@ export function ConnectionsModal({
             const p = Array.isArray(c.requester) ? c.requester[0] : c.requester;
             return p ? { connectionId: c.id, ...p } : null;
           })
-          .filter(Boolean);
+          .filter((p: any) => p && !blockedSet.has(p.id));
         setFollowers(parsed);
       }
 
-      // 3. Fetch target user's Following (who targetUserId follows)
+      // 4. Fetch target user's Following (who targetUserId follows)
       const { data: followingData } = await supabase
         .from("connections")
         .select(`
@@ -108,18 +117,26 @@ export function ConnectionsModal({
             const p = Array.isArray(c.receiver) ? c.receiver[0] : c.receiver;
             return p ? { connectionId: c.id, ...p } : null;
           })
-          .filter(Boolean);
+          .filter((p: any) => p && !blockedSet.has(p.id));
         setFollowing(parsed);
       }
     } catch (err) {
       console.error("Error loading connections:", err);
     } finally {
-      setIsLoading(false);
+      if (isInitial) setIsLoading(false);
     }
   };
 
   useEffect(() => {
-    loadData();
+    if (isOpen) {
+      loadData(true);
+    }
+
+    const handleUpdate = () => {
+      loadData(false);
+    };
+    window.addEventListener("yapclub_social_updated", handleUpdate);
+    return () => window.removeEventListener("yapclub_social_updated", handleUpdate);
   }, [isOpen, targetUserId, currentUserId]);
 
   const handleFollow = async (userToFollowId: string) => {
@@ -129,14 +146,12 @@ export function ConnectionsModal({
     }
     setProcessingId(userToFollowId);
     try {
-      const { error } = await supabase.from("connections").insert({
-        requester_id: currentUserId,
-        receiver_id: userToFollowId,
-        status: "accepted",
-      });
-
-      if (!error) {
+      const res = await socialService.followUser(currentUserId, userToFollowId);
+      if (res.success) {
         setMyFollowingSet((prev) => new Set(prev).add(userToFollowId));
+        onCountsChanged?.();
+      } else if (res.error) {
+        alert(res.error);
       }
     } catch (e) {
       console.error("Failed to follow:", e);
@@ -149,13 +164,8 @@ export function ConnectionsModal({
     if (!currentUserId) return;
     setProcessingId(userToUnfollowId);
     try {
-      const { error } = await supabase
-        .from("connections")
-        .delete()
-        .eq("requester_id", currentUserId)
-        .eq("receiver_id", userToUnfollowId);
-
-      if (!error) {
+      const res = await socialService.unfollowUser(currentUserId, userToUnfollowId);
+      if (res.success) {
         setMyFollowingSet((prev) => {
           const next = new Set(prev);
           next.delete(userToUnfollowId);
@@ -166,6 +176,8 @@ export function ConnectionsModal({
         if (targetUserId === currentUserId && activeTab === "following") {
           setFollowing((prev) => prev.filter((u) => u.id !== userToUnfollowId));
         }
+
+        onCountsChanged?.();
       }
     } catch (e) {
       console.error("Failed to unfollow:", e);
@@ -178,19 +190,15 @@ export function ConnectionsModal({
     if (!currentUserId || targetUserId !== currentUserId) return;
     setProcessingId(followerId);
     try {
-      const { error } = await supabase
-        .from("connections")
-        .delete()
-        .eq("requester_id", followerId)
-        .eq("receiver_id", currentUserId);
-
-      if (!error) {
+      const res = await socialService.removeFollower(currentUserId, followerId);
+      if (res.success) {
         setFollowers((prev) => prev.filter((u) => u.id !== followerId));
         setMyFollowersSet((prev) => {
           const next = new Set(prev);
           next.delete(followerId);
           return next;
         });
+        onCountsChanged?.();
       }
     } catch (e) {
       console.error("Failed to remove follower:", e);
@@ -227,6 +235,7 @@ export function ConnectionsModal({
         <div className="flex items-center justify-between gap-3 mb-4 shrink-0 pb-3 border-b border-white/10">
           <div className="flex items-center gap-1.5 bg-black/40 p-1 rounded-xl border border-white/5">
             <button
+              type="button"
               onClick={() => setActiveTab("followers")}
               className={`text-xs sm:text-sm font-bold px-3.5 py-1.5 rounded-lg transition-all cursor-pointer ${
                 activeTab === "followers"
@@ -237,6 +246,7 @@ export function ConnectionsModal({
               Followers <span className="text-[11px] opacity-75 font-mono ml-1">({followers.length})</span>
             </button>
             <button
+              type="button"
               onClick={() => setActiveTab("following")}
               className={`text-xs sm:text-sm font-bold px-3.5 py-1.5 rounded-lg transition-all cursor-pointer ${
                 activeTab === "following"
@@ -249,6 +259,7 @@ export function ConnectionsModal({
           </div>
 
           <button
+            type="button"
             onClick={onClose}
             className="p-2 rounded-full bg-white/5 text-slate-400 hover:text-white hover:bg-white/10 active:scale-95 transition-colors cursor-pointer"
           >
@@ -334,6 +345,7 @@ export function ConnectionsModal({
                         <>
                           {isFollowingThem ? (
                             <button
+                              type="button"
                               onClick={() => handleUnfollow(u.id)}
                               disabled={processingId === u.id}
                               className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-rose-500/20 text-slate-200 hover:text-rose-300 border border-white/10 hover:border-rose-500/30 text-xs font-semibold transition-all active:scale-95 disabled:opacity-50 cursor-pointer flex items-center gap-1"
@@ -349,6 +361,7 @@ export function ConnectionsModal({
                             </button>
                           ) : (
                             <button
+                              type="button"
                               onClick={() => handleFollow(u.id)}
                               disabled={processingId === u.id}
                               className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-md active:scale-95 transition-all disabled:opacity-50 cursor-pointer flex items-center gap-1"
@@ -367,6 +380,7 @@ export function ConnectionsModal({
                           {/* Remove button if viewing own followers tab */}
                           {isMyOwnProfile && activeTab === "followers" && (
                             <button
+                              type="button"
                               onClick={() => handleRemoveFollower(u.id)}
                               disabled={processingId === u.id}
                               className="p-1.5 rounded-xl bg-white/5 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 border border-white/5 transition-all cursor-pointer"

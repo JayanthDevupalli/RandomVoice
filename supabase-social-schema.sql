@@ -95,19 +95,45 @@ CREATE POLICY "Users can insert own profile" ON profiles
 CREATE POLICY "Users can delete own profile" ON profiles
   FOR DELETE USING (auth.uid() = id);
 
--- CONNECTIONS
--- Users can view connections if they are the requester or receiver
-CREATE POLICY "Users can view their own connections" ON connections
-  FOR SELECT USING (auth.uid() = requester_id OR auth.uid() = receiver_id);
+-- CONNECTIONS (Instagram-Style Social Graph & Blocking)
+-- Drop old policies to avoid conflicts
+DROP POLICY IF EXISTS "Users can view their own connections" ON connections;
+DROP POLICY IF EXISTS "connections_select_policy" ON connections;
+DROP POLICY IF EXISTS "Users can create connection requests" ON connections;
+DROP POLICY IF EXISTS "connections_insert_policy" ON connections;
+DROP POLICY IF EXISTS "Users can update connections they are involved in" ON connections;
+DROP POLICY IF EXISTS "connections_update_policy" ON connections;
+DROP POLICY IF EXISTS "connections_delete_policy" ON connections;
 
--- Users can insert a connection if they are the requester
-CREATE POLICY "Users can create connection requests" ON connections
-  FOR INSERT WITH CHECK (auth.uid() = requester_id);
+-- 1. SELECT: Anyone can view accepted connections (so followers/following lists and counts work like Instagram)
+-- Pending and blocked connections are strictly visible only to the participants involved
+CREATE POLICY "connections_select_policy" ON connections
+  FOR SELECT USING (
+    status = 'accepted' 
+    OR auth.uid() = requester_id 
+    OR auth.uid() = receiver_id
+  );
 
--- Users can update a connection if they are the receiver (to accept/block)
--- OR if they are the requester (to cancel a pending request)
-CREATE POLICY "Users can update connections they are involved in" ON connections
+-- 2. INSERT: Users can create connections if they are the requester AND neither user has blocked the other
+CREATE POLICY "connections_insert_policy" ON connections
+  FOR INSERT WITH CHECK (
+    auth.uid() = requester_id
+    AND NOT EXISTS (
+      SELECT 1 FROM connections c 
+      WHERE (
+        (c.requester_id = connections.receiver_id AND c.receiver_id = auth.uid() AND c.status = 'blocked')
+        OR (c.requester_id = auth.uid() AND c.receiver_id = connections.receiver_id AND c.status = 'blocked')
+      )
+    )
+  );
+
+-- 3. UPDATE: Users can update a connection they are involved in
+CREATE POLICY "connections_update_policy" ON connections
   FOR UPDATE USING (auth.uid() = receiver_id OR auth.uid() = requester_id);
+
+-- 4. DELETE: Users can delete connections they are involved in (Unfollow, Remove Follower, or Unblock)
+CREATE POLICY "connections_delete_policy" ON connections
+  FOR DELETE USING (auth.uid() = requester_id OR auth.uid() = receiver_id);
 
 -- CONVERSATIONS & MEMBERS
 -- Drop old or conflicting policies to avoid 42710 errors
@@ -174,14 +200,27 @@ CREATE POLICY "messages_select_policy" ON messages
     )
   );
 
--- Users can insert messages in conversations they are a member of
+-- Users can insert messages in conversations they are a member of, provided neither member has blocked the other
 CREATE POLICY "messages_insert_policy" ON messages
   FOR INSERT TO authenticated
   WITH CHECK (
     EXISTS (
       SELECT 1 FROM conversation_members 
       WHERE conversation_id = messages.conversation_id AND user_id = auth.uid()
-    ) AND auth.uid() = sender_id
+    ) 
+    AND auth.uid() = sender_id
+    AND NOT EXISTS (
+      -- Guard against blocked participants sending messages in 1-on-1 chats
+      SELECT 1 
+      FROM conversation_members cm1
+      JOIN conversation_members cm2 ON cm1.conversation_id = cm2.conversation_id AND cm1.user_id != cm2.user_id
+      JOIN connections c ON (
+        (c.requester_id = cm1.user_id AND c.receiver_id = cm2.user_id AND c.status = 'blocked')
+        OR (c.requester_id = cm2.user_id AND c.receiver_id = cm1.user_id AND c.status = 'blocked')
+      )
+      WHERE cm1.conversation_id = messages.conversation_id
+        AND (cm1.user_id = auth.uid() OR cm2.user_id = auth.uid())
+    )
   );
 
 -- Users can update (edit) their own messages

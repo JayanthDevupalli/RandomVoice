@@ -1,15 +1,27 @@
 "use client";
 
+import { useEffect } from "react";
 import { useUser } from "@/hooks/useUser";
-import { Navbar } from "@/components/layout/Navbar";
-import { JunctionRoom } from "@/components/voice/JunctionRoom";
 import { Radio } from "lucide-react";
 import { useParams } from "next/navigation";
+import { useActiveJunction } from "@/components/providers/ActiveJunctionContext";
 
 export default function JunctionVoicePage({ params: propParams }: { params?: { id: string } }) {
   const { user, isLoaded } = useUser();
   const routeParams = useParams();
   const junctionId = (routeParams?.id as string) || propParams?.id || "";
+  const { activeJunctionId, setActiveJunctionId, isMinimized, setIsMinimized } = useActiveJunction();
+
+  useEffect(() => {
+    if (junctionId && isLoaded && user) {
+      if (activeJunctionId !== junctionId) {
+        setActiveJunctionId(junctionId);
+      }
+      if (isMinimized) {
+        setIsMinimized(false);
+      }
+    }
+  }, [junctionId, isLoaded, user, activeJunctionId, isMinimized, setActiveJunctionId, setIsMinimized]);
 
   if (!isLoaded || !user) {
     return (
@@ -22,12 +34,8 @@ export default function JunctionVoicePage({ params: propParams }: { params?: { i
     );
   }
 
-  return (
-    <div className="min-h-screen flex flex-col bg-background selection:bg-indigo-500 selection:text-white">
-      <main className="flex-1 flex flex-col">
-        <JunctionRoom junctionId={junctionId} guest={user as any} />
-      </main>
-    </div>
-  );
+  // The active junction room is rendered persistently by ActiveJunctionOverlay in layout.tsx!
+  return <div className="min-h-screen bg-background" />;
 }
+
 

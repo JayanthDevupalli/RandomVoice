@@ -10,6 +10,7 @@ import { ModeratorControlModal } from "./ModeratorControlModal";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import { ProfilePreviewModal } from "@/components/profile/ProfilePreviewModal";
 import { InRoomMessenger } from "./InRoomMessenger";
+import { InviteFriendsModal } from "./InviteFriendsModal";
 import confetti from "canvas-confetti";
 import { getCardThemeStyle } from "@/lib/card-themes";
 import { supabase } from "@/lib/supabase";
@@ -54,12 +55,18 @@ import {
   Bell,
   BellOff,
   Eye,
-  EyeOff
+  EyeOff,
+  Minimize2,
+  Maximize2
 } from "lucide-react";
 
 interface JunctionRoomProps {
   junctionId: string;
   guest: GuestUser;
+  isMinimized?: boolean;
+  onMinimize?: () => void;
+  onMaximize?: () => void;
+  onLeave?: () => void;
 }
 
 interface InRoomPopupMessage {
@@ -211,7 +218,14 @@ function RoomConnectionOverlay() {
   return null;
 }
 
-export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
+export function JunctionRoom({
+  junctionId,
+  guest,
+  isMinimized = false,
+  onMinimize,
+  onMaximize,
+  onLeave,
+}: JunctionRoomProps) {
   const router = useRouter();
 
   // Room & participants state
@@ -260,6 +274,7 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
   const [reactions, setReactions] = useState<VectorReaction[]>([]);
   const [isReactionsOpen, setIsReactionsOpen] = useState(false);
   const [isCopied, setIsCopied] = useState(false);
+  const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
 
   // In-Room Whisper Chat: Show msgs / Not show msgs toggle state
   const [showInRoomPopups, setShowInRoomPopups] = useState<boolean>(() => {
@@ -1118,7 +1133,19 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
       console.error("Failed to leave junction", e);
     }
 
-    router.push("/junctions");
+    if (onLeave) {
+      onLeave();
+    } else {
+      router.push("/junctions");
+    }
+  };
+
+  const handleMinimize = () => {
+    if (onMinimize) {
+      onMinimize();
+    } else {
+      router.push("/junctions");
+    }
   };
 
   const handleVolumeChange = (identity: string, vol: number) => {
@@ -1209,6 +1236,189 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
           </button>
         </div>
       </div>
+    );
+  }
+
+  // Floating PiP Mini-Player Mode (When room call is minimized to explore the website)
+  if (isMinimized) {
+    const speakingParticipant = participants.find((p) => activeSpeakers.includes(p.identity)) || participants[0];
+    const isSomeoneSpeaking = activeSpeakers.length > 0;
+    const isLocalSpeaking = activeSpeakers.includes(guest.name);
+
+    return (
+      <>
+        {/* Persistent LiveKit Audio Pipeline */}
+        {liveKitToken && liveKitUrl && (
+          <LiveKitRoom
+            token={liveKitToken}
+            serverUrl={liveKitUrl}
+            connect={true}
+            audio={!isMuted && !isMutedByMod}
+            video={false}
+            options={{
+              audioCaptureDefaults: {
+                noiseSuppression: true,
+                echoCancellation: true,
+                autoGainControl: true,
+              },
+            }}
+            style={{ display: "none" }}
+          >
+            <RoomConnectionOverlay />
+            <LiveKitDataSync
+              onMessage={onRoomMessage}
+              publishRef={liveKitPublishRef}
+              onSpeakingChange={setActiveSpeakers}
+              isMuted={isMuted}
+              isMutedByMod={isMutedByMod}
+              isDeafened={isDeafened}
+            />
+            {participants
+              .filter((p) => p.identity !== guest.name)
+              .map((p) => (
+                <ParticipantAudio
+                  key={p.identity}
+                  identity={p.identity}
+                  volume={participantVolumes[p.identity] ?? 100}
+                  isDeafened={isDeafened}
+                />
+              ))}
+          </LiveKitRoom>
+        )}
+
+        {/* Floating Picture-in-Picture Mini-Player Bar */}
+        <div className="fixed bottom-3 inset-x-3 sm:inset-x-auto sm:right-6 sm:bottom-6 z-[120] pointer-events-auto animate-in fade-in slide-in-from-bottom-5 duration-200">
+          <div
+            onClick={onMaximize}
+            className="group flex items-center justify-between gap-3 sm:gap-4 p-2.5 sm:p-3 bg-[#0B0C12]/95 hover:bg-[#12141F]/95 backdrop-blur-2xl border border-white/10 hover:border-indigo-500/40 rounded-2xl sm:rounded-3xl shadow-[0_12px_45px_rgba(0,0,0,0.85)] cursor-pointer transition-all active:scale-[0.99] select-none max-w-md"
+          >
+            {/* Left: Speaker Avatar + Halo + Soundwave */}
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="relative shrink-0">
+                <div
+                  className={`w-10 h-10 sm:w-11 sm:h-11 rounded-2xl flex items-center justify-center overflow-hidden transition-all duration-300 ${
+                    isSomeoneSpeaking
+                      ? "ring-2 ring-emerald-400 shadow-[0_0_20px_rgba(52,211,153,0.5)] animate-pulse"
+                      : "ring-1 ring-white/15"
+                  }`}
+                  style={{ backgroundColor: speakingParticipant?.color || "#6366F1" }}
+                >
+                  <UserAvatar
+                    avatar={speakingParticipant?.avatar}
+                    color={speakingParticipant?.color}
+                    size="sm"
+                    isSpeaking={isSomeoneSpeaking}
+                  />
+                </div>
+
+                {/* Live Pill Badge on Avatar */}
+                <div className="absolute -top-1 -right-1 px-1 py-0.2 bg-emerald-500 text-[8px] font-black tracking-wider text-slate-950 rounded-full border border-black shadow-xs flex items-center gap-0.5">
+                  <span className="w-1 h-1 rounded-full bg-slate-950 animate-ping" />
+                  <span>LIVE</span>
+                </div>
+
+                {/* Mic Muted indicator on local participant */}
+                {isMuted && (
+                  <div className="absolute -bottom-1 -right-1 p-1 rounded-full bg-rose-600 text-white border border-black shadow-xs">
+                    <MicOff size={8} />
+                  </div>
+                )}
+              </div>
+
+              {/* Title & Live Status */}
+              <div className="min-w-0 flex flex-col justify-center">
+                <div className="flex items-center gap-1.5">
+                  <span className="font-bold text-xs sm:text-sm text-white truncate max-w-[120px] xs:max-w-[150px] sm:max-w-[180px] group-hover:text-indigo-300 transition-colors">
+                    {junction?.name || "Voice Room"}
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-1.5 text-[10px] sm:text-xs">
+                  {isSomeoneSpeaking ? (
+                    <div className="flex items-center gap-1 text-emerald-400 font-medium">
+                      <div className="flex items-center gap-0.5 h-2">
+                        <span className="w-0.5 bg-emerald-400 rounded-full soundwave-bar-1" />
+                        <span className="w-0.5 bg-emerald-400 rounded-full soundwave-bar-2" />
+                        <span className="w-0.5 bg-emerald-400 rounded-full soundwave-bar-3" />
+                      </div>
+                      <span className="truncate max-w-[90px] xs:max-w-[120px]">
+                        {isLocalSpeaking ? "You are speaking" : `${speakingParticipant?.name} speaking`}
+                      </span>
+                    </div>
+                  ) : (
+                    <span className="text-slate-400 truncate">
+                      {participants.length}/{junction?.maxParticipants || 7} in room
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Right: Quick Controls Dock */}
+            <div className="flex items-center gap-1 sm:gap-1.5 shrink-0 ml-1">
+              {/* Mic Toggle Button */}
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleToggleMic();
+                }}
+                className={`p-2 sm:p-2.5 rounded-xl text-xs font-semibold transition-all active:scale-95 cursor-pointer flex items-center justify-center ${
+                  isMuted || isMutedByMod
+                    ? "bg-rose-500/20 text-rose-300 border border-rose-500/30 hover:bg-rose-500/30"
+                    : "bg-white/10 text-emerald-300 hover:bg-white/15 border border-white/10"
+                }`}
+                title={isMuted ? "Unmute Microphone" : "Mute Microphone"}
+              >
+                {isMuted || isMutedByMod ? <MicOff size={14} /> : <Mic size={14} />}
+              </button>
+
+              {/* Deafen Toggle Button */}
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsDeafened(!isDeafened);
+                }}
+                className={`p-2 sm:p-2.5 rounded-xl text-xs font-semibold transition-all active:scale-95 cursor-pointer flex items-center justify-center ${
+                  isDeafened
+                    ? "bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:bg-amber-500/30"
+                    : "bg-white/5 text-slate-300 hover:text-white hover:bg-white/10 border border-white/5"
+                }`}
+                title={isDeafened ? "Undeafen Audio" : "Deafen Audio"}
+              >
+                {isDeafened ? <VolumeX size={14} /> : <Volume2 size={14} />}
+              </button>
+
+              {/* Maximize Button */}
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onMaximize?.();
+                }}
+                className="p-2 sm:p-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-all shadow-md active:scale-95 cursor-pointer flex items-center justify-center"
+                title="Expand to Full Room"
+              >
+                <Maximize2 size={14} />
+              </button>
+
+              {/* Leave Room Button */}
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleLeave();
+                }}
+                className="p-2 sm:p-2.5 rounded-xl bg-white/5 hover:bg-rose-600/20 text-slate-400 hover:text-rose-400 border border-white/5 hover:border-rose-500/30 transition-all active:scale-95 cursor-pointer flex items-center justify-center"
+                title="Leave Room"
+              >
+                <PhoneOff size={14} />
+              </button>
+            </div>
+          </div>
+        </div>
+      </>
     );
   }
 
@@ -1352,12 +1562,23 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
               </div>
 
               <button
-                onClick={handleCopyLink}
-                className="flex items-center justify-center p-2 sm:px-3 sm:py-1.5 rounded-full sm:rounded-xl bg-black/40 backdrop-blur-md border border-white/10 hover:bg-white/10 text-white transition-colors cursor-pointer shadow-sm shrink-0"
-                title="Copy Room Link"
+                type="button"
+                onClick={() => setIsInviteModalOpen(true)}
+                className="flex items-center justify-center p-2 sm:px-3 sm:py-1.5 rounded-full sm:rounded-xl bg-black/40 backdrop-blur-md border border-white/10 hover:bg-white/10 text-white transition-colors cursor-pointer shadow-sm shrink-0 active:scale-95"
+                title="Invite Friends to Hangout"
               >
-                <Share2 size={13} className="sm:w-3.5 sm:h-3.5 shrink-0" />
-                <span className="hidden sm:inline ml-1.5 text-xs font-medium">{isCopied ? "Copied" : "Invite"}</span>
+                <Share2 size={13} className="sm:w-3.5 sm:h-3.5 shrink-0 text-indigo-400" />
+                <span className="hidden sm:inline ml-1.5 text-xs font-medium">Invite</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleMinimize}
+                className="flex items-center justify-center p-2 sm:px-3 sm:py-1.5 rounded-full sm:rounded-xl bg-black/40 backdrop-blur-md border border-white/10 hover:bg-white/10 text-white transition-colors cursor-pointer shadow-sm shrink-0 active:scale-95"
+                title="Minimize Room (Browse YapClub while in voice)"
+              >
+                <Minimize2 size={13} className="sm:w-3.5 sm:h-3.5 shrink-0 text-indigo-400" />
+                <span className="hidden sm:inline ml-1.5 text-xs font-medium">Minimize</span>
               </button>
             </div>
           </div>
@@ -2401,6 +2622,21 @@ export function JunctionRoom({ junctionId, guest }: JunctionRoomProps) {
 
       {/* Floating Instagram-Style Direct Messenger for Logged-In Users */}
       <InRoomMessenger isOpen={isDirectMessengerOpen} onClose={() => setIsDirectMessengerOpen(false)} />
+
+      {/* Direct Room Invite to Friends Modal */}
+      {isInviteModalOpen && junction && (
+        <InviteFriendsModal
+          isOpen={isInviteModalOpen}
+          onClose={() => setIsInviteModalOpen(false)}
+          junctionId={junctionId}
+          junctionName={junction.name}
+          description={junction.description}
+          participantCount={participants.length}
+          maxParticipants={junction.maxParticipants || 7}
+          currentUserId={user?.id}
+          currentUsername={user?.name || guest.name}
+        />
+      )}
 
       {/* Junction Switching Transition Overlay */}
       {isSwitchingRoomId && (

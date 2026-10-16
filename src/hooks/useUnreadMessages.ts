@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
 import { useUser } from "./useUser";
+import { socialService } from "@/lib/social-service";
 
 export function useUnreadMessages() {
   const { user, isRegistered } = useUser();
@@ -76,6 +77,10 @@ export function useUnreadMessages() {
 
       if (msgErr || !messages) return;
 
+      // 3. Exclude messages from blocked users
+      const { blockedByMeIds, blockedMeIds } = await socialService.getBlockLists(user.id);
+      const blockedSet = new Set([...blockedByMeIds, ...blockedMeIds]);
+
       const counts: Record<string, number> = {};
       let total = 0;
 
@@ -86,6 +91,11 @@ export function useUnreadMessages() {
           : null;
 
       for (const msg of messages) {
+        // Skip messages from blocked contacts
+        if (blockedSet.has(msg.sender_id)) {
+          continue;
+        }
+
         // If the user is currently viewing this exact conversation, it is active and read
         if (activeConvId && msg.conversation_id === activeConvId) {
           continue;

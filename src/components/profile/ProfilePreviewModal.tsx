@@ -5,10 +5,11 @@ import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { supabase } from "@/lib/supabase";
 import { useUser } from "@/hooks/useUser";
-import { X, UserPlus, ShieldAlert, Loader2, Check, MessageSquare } from "lucide-react";
+import { X, UserPlus, ShieldAlert, Loader2, Check, MessageSquare, UserCheck, Unlock } from "lucide-react";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import { JunctionParticipant } from "@/lib/types";
 import { useRouter } from "next/navigation";
+import { socialService } from "@/lib/social-service";
 
 interface ProfilePreviewModalProps {
   isOpen: boolean;
@@ -21,7 +22,7 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
   const { user: currentUser, isRegistered } = useUser();
   const [profile, setProfile] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [connectionStatus, setConnectionStatus] = useState<"none" | "pending" | "accepted">("none");
+  const [connectionStatus, setConnectionStatus] = useState<"none" | "pending" | "accepted" | "blocked_by_me" | "has_blocked_me">("none");
   const [isRequesting, setIsRequesting] = useState(false);
   const [mounted, setMounted] = useState(false);
 
@@ -45,21 +46,28 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
       if (profileData) {
         setProfile(profileData);
         
-        // 2. If we are logged in, check connection status
+        // 2. If we are logged in, check relationship
         if (isRegistered && currentUser) {
-          const { data: connData, error } = await supabase
-            .from("connections")
-            .select("*")
-            .in("requester_id", [currentUser.id, profileData.id])
-            .in("receiver_id", [currentUser.id, profileData.id])
-            .maybeSingle();
-
-          if (error) console.error("Error fetching connection status:", error);
-            
-          if (connData) {
-            setConnectionStatus(connData.status as "pending" | "accepted");
+          const rel = await socialService.getRelationship(currentUser.id, profileData.id);
+          if (rel.hasBlockedMe) {
+            setConnectionStatus("has_blocked_me");
+          } else if (rel.isBlockedByMe) {
+            setConnectionStatus("blocked_by_me");
+          } else if (rel.isFollowing) {
+            setConnectionStatus("accepted");
           } else {
-            setConnectionStatus("none");
+            const { data: connData } = await supabase
+              .from("connections")
+              .select("status")
+              .eq("requester_id", currentUser.id)
+              .eq("receiver_id", profileData.id)
+              .maybeSingle();
+
+            if (connData?.status === "pending") {
+              setConnectionStatus("pending");
+            } else {
+              setConnectionStatus("none");
+            }
           }
         }
       } else {
@@ -72,7 +80,7 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
     fetchDetails();
   }, [isOpen, participant, currentUser, isRegistered]);
 
-  const handleFollowRequest = async () => {
+  const handleFollow = async () => {
     if (!isRegistered || !currentUser || !profile) {
       alert("You need to log in to connect with users!");
       return;
@@ -81,26 +89,29 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
     setIsRequesting(true);
     
     try {
-      const { error } = await supabase
-        .from("connections")
-        .insert({
-          requester_id: currentUser.id,
-          receiver_id: profile.id,
-          status: "pending"
-        });
-        
-      if (error) {
-        if (error.code === '23505') {
-          // Already requested
-          setConnectionStatus("pending");
-        } else {
-          throw error;
-        }
-      } else {
-        setConnectionStatus("pending");
+      const res = await socialService.followUser(currentUser.id, profile.id);
+      if (res.success) {
+        setConnectionStatus("accepted");
+      } else if (res.error) {
+        alert(res.error);
       }
     } catch (err: any) {
-      alert("Failed to send request. Try again.");
+      alert("Failed to follow user. Try again.");
+    } finally {
+      setIsRequesting(false);
+    }
+  };
+
+  const handleUnblock = async () => {
+    if (!currentUser || !profile) return;
+    setIsRequesting(true);
+    try {
+      const res = await socialService.unblockUser(currentUser.id, profile.id);
+      if (res.success) {
+        setConnectionStatus("none");
+      }
+    } catch (e) {
+      console.error(e);
     } finally {
       setIsRequesting(false);
     }
@@ -165,10 +176,24 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
                 {/* Interaction Button */}
                 {currentUser?.id !== profile.id && (
                   <div className="w-full">
-                    {connectionStatus === "accepted" ? (
+                    {connectionStatus === "has_blocked_me" ? (
+                      <div className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-white/5 text-slate-400 font-medium text-sm border border-white/10 cursor-not-allowed">
+                        <ShieldAlert size={16} />
+                        Account Unavailable
+                      </div>
+                    ) : connectionStatus === "blocked_by_me" ? (
+                      <button 
+                        onClick={handleUnblock}
+                        disabled={isRequesting}
+                        className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-medium text-sm transition-colors shadow-lg shadow-rose-600/20 active:scale-95 cursor-pointer"
+                      >
+                        {isRequesting ? <Loader2 size={16} className="animate-spin" /> : <Unlock size={16} />}
+                        Unblock User
+                      </button>
+                    ) : connectionStatus === "accepted" ? (
                       <button className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-emerald-500/20 text-emerald-400 font-medium text-sm border border-emerald-500/30 cursor-default">
-                        <Check size={16} />
-                        Friends
+                        <UserCheck size={16} />
+                        Following
                       </button>
                     ) : connectionStatus === "pending" ? (
                       <button className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-slate-800 text-slate-300 font-medium text-sm border border-white/5 cursor-default">
@@ -176,12 +201,12 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
                       </button>
                     ) : (
                       <button 
-                        onClick={handleFollowRequest}
+                        onClick={handleFollow}
                         disabled={isRequesting}
-                        className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm transition-colors shadow-lg shadow-indigo-600/20"
+                        className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm transition-colors shadow-lg shadow-indigo-600/20 active:scale-95 cursor-pointer"
                       >
                         {isRequesting ? <Loader2 size={16} className="animate-spin" /> : <UserPlus size={16} />}
-                        Request to Follow
+                        Follow
                       </button>
                     )}
                   </div>

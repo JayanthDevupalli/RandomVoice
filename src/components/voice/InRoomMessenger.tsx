@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { VoiceNotePlayer } from "@/components/chat/VoiceNotePlayer";
 import { parseMessageContent } from "@/lib/chat-utils";
+import { RoomInviteCard } from "@/components/chat/RoomInviteCard";
 
 interface DirectMessage {
   id: string;
@@ -529,7 +530,9 @@ export function InRoomMessenger({ isOpen, onClose }: InRoomMessengerProps) {
                                 </div>
                               )}
 
-                              {parsed.type === "voice" ? (
+                              {parsed.type === "room_invite" && parsed.roomInvite ? (
+                                <RoomInviteCard invite={parsed.roomInvite} isMe={isMe} />
+                              ) : parsed.type === "voice" ? (
                                 <VoiceNotePlayer audioUrl={parsed.audioUrl || ""} duration={parsed.duration} isMe={isMe} />
                               ) : (
                                 <p className="whitespace-pre-wrap select-text break-words w-full overflow-hidden">{parsed.text}</p>

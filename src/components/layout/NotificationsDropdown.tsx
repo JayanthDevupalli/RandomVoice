@@ -79,36 +79,53 @@ export function NotificationsDropdown() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  const handleUpdateStatus = async (connectionId: string, status: "accepted" | "blocked") => {
-    // Find the request details before optimistic update
-    const requestDetails = requests.find(r => r.id === connectionId);
-    
-    // Optimistic UI update
-    setRequests(prev => prev.filter(req => req.id !== connectionId));
-    
-    await supabase
-      .from("connections")
-      .update({ status })
-      .eq("id", connectionId);
+  const handleAccept = async (connectionId: string) => {
+    const requestDetails = requests.find((r) => r.id === connectionId);
+    setRequests((prev) => prev.filter((req) => req.id !== connectionId));
 
-    // If accepted, create a direct conversation so they can start chatting
-    if (status === "accepted" && requestDetails) {
-      // 1. Create the conversation
-      const { data: convData } = await supabase
-        .from("conversations")
-        .insert({ type: "direct" })
-        .select("id")
-        .single();
-        
-      if (convData) {
-        // 2. Add both members
-        await supabase
-          .from("conversation_members")
-          .insert([
-            { conversation_id: convData.id, user_id: requestDetails.requester.id, role: "member" },
-            { conversation_id: convData.id, user_id: user?.id, role: "member" }
-          ]);
+    try {
+      await supabase
+        .from("connections")
+        .update({ status: "accepted" })
+        .eq("id", connectionId);
+
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("yapclub_social_updated"));
       }
+
+      // If accepted, check or create a direct conversation
+      if (requestDetails && user?.id) {
+        const { data: convData } = await supabase
+          .from("conversations")
+          .insert({ type: "direct" })
+          .select("id")
+          .single();
+
+        if (convData) {
+          await supabase.from("conversation_members").insert([
+            { conversation_id: convData.id, user_id: requestDetails.requester.id, role: "member" },
+            { conversation_id: convData.id, user_id: user.id, role: "member" },
+          ]);
+        }
+      }
+    } catch (e) {
+      console.error("Error accepting follow request:", e);
+    }
+  };
+
+  const handleDecline = async (connectionId: string) => {
+    // Optimistic UI update
+    setRequests((prev) => prev.filter((req) => req.id !== connectionId));
+
+    try {
+      // Instagram style: declining removes the pending request completely
+      await supabase.from("connections").delete().eq("id", connectionId);
+
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("yapclub_social_updated"));
+      }
+    } catch (e) {
+      console.error("Error declining follow request:", e);
     }
   };
 
@@ -173,14 +190,14 @@ export function NotificationsDropdown() {
                       </p>
                       <div className="flex items-center gap-2 mt-2">
                         <button
-                          onClick={() => handleUpdateStatus(req.id, "accepted")}
-                          className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold py-1.5 rounded-lg transition-colors shadow-sm"
+                          onClick={() => handleAccept(req.id)}
+                          className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold py-1.5 rounded-lg transition-colors shadow-sm cursor-pointer"
                         >
                           Accept
                         </button>
                         <button
-                          onClick={() => handleUpdateStatus(req.id, "blocked")}
-                          className="flex-1 bg-white/5 hover:bg-white/10 text-slate-300 text-xs font-medium py-1.5 rounded-lg transition-colors"
+                          onClick={() => handleDecline(req.id)}
+                          className="flex-1 bg-white/5 hover:bg-white/10 text-slate-300 text-xs font-medium py-1.5 rounded-lg transition-colors cursor-pointer"
                         >
                           Decline
                         </button>
