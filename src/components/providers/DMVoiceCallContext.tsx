@@ -158,6 +158,12 @@ export function DMVoiceCallProvider({ children }: { children: React.ReactNode })
     if (!user?.id || !isRegistered) return;
 
     const channelName = `user_call_signal_${user.id}`;
+    const existing = supabase.getChannels().find(
+      (c) => c.topic === `realtime:${channelName}` || c.topic === channelName
+    );
+    if (existing) {
+      supabase.removeChannel(existing);
+    }
     const channel = supabase
       .channel(channelName)
       .on("broadcast", { event: "DM_CALL_INITIATE" }, ({ payload }) => {

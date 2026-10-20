@@ -5,6 +5,8 @@ import { GlobalPresenceProvider } from "@/components/providers/GlobalPresencePro
 import { DMVoiceCallProvider } from "@/components/providers/DMVoiceCallContext";
 import { ActiveJunctionProvider } from "@/components/providers/ActiveJunctionContext";
 
+import { UserProvider } from "@/components/providers/UserProvider";
+
 const DMVoiceCallOverlay = dynamic(
   () => import("@/components/voice/DMVoiceCallOverlay").then((mod) => mod.DMVoiceCallOverlay),
   { ssr: false }
@@ -45,21 +47,23 @@ export default function RootLayout({
         />
       </head>
       <body className="bg-background text-foreground min-h-screen antialiased selection:bg-indigo-500/30 selection:text-white font-sans overflow-x-hidden relative">
-        <GlobalPresenceProvider>
-          <DMVoiceCallProvider>
-            <ActiveJunctionProvider>
-              {/* Global Background Glows - Subtle and Modern */}
-              <div className="fixed inset-0 overflow-hidden pointer-events-none -z-50">
-                <div className="absolute top-[-10%] left-[-20%] sm:top-[-20%] sm:left-[-10%] w-[80%] h-[60%] sm:w-[60%] sm:h-[60%] bg-indigo-600/10 blur-[100px] sm:blur-[120px] rounded-full mix-blend-screen" />
-                <div className="absolute bottom-[-10%] right-[-20%] sm:bottom-[-20%] sm:right-[-10%] w-[70%] h-[50%] sm:w-[50%] sm:h-[50%] bg-purple-600/10 blur-[100px] sm:blur-[120px] rounded-full mix-blend-screen" />
-              </div>
-              
-              {children}
-              <DMVoiceCallOverlay />
-              <ActiveJunctionOverlay />
-            </ActiveJunctionProvider>
-          </DMVoiceCallProvider>
-        </GlobalPresenceProvider>
+        <UserProvider>
+          <GlobalPresenceProvider>
+            <DMVoiceCallProvider>
+              <ActiveJunctionProvider>
+                {/* Global Background Glows - Subtle and Modern */}
+                <div className="fixed inset-0 overflow-hidden pointer-events-none -z-50">
+                  <div className="absolute top-[-10%] left-[-20%] sm:top-[-20%] sm:left-[-10%] w-[80%] h-[60%] sm:w-[60%] sm:h-[60%] bg-indigo-600/10 blur-[100px] sm:blur-[120px] rounded-full mix-blend-screen" />
+                  <div className="absolute bottom-[-10%] right-[-20%] sm:bottom-[-20%] sm:right-[-10%] w-[70%] h-[50%] sm:w-[50%] sm:h-[50%] bg-purple-600/10 blur-[100px] sm:blur-[120px] rounded-full mix-blend-screen" />
+                </div>
+                
+                {children}
+                <DMVoiceCallOverlay />
+                <ActiveJunctionOverlay />
+              </ActiveJunctionProvider>
+            </DMVoiceCallProvider>
+          </GlobalPresenceProvider>
+        </UserProvider>
       </body>
     </html>
   );

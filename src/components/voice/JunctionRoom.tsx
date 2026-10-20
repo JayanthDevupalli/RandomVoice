@@ -958,6 +958,12 @@ export function JunctionRoom({
     runPoll();
 
     const roomChannelId = `room_realtime_${junctionId}`;
+    const existingRoomCh = supabase.getChannels().find(
+      (c) => c.topic === `realtime:${roomChannelId}` || c.topic === roomChannelId
+    );
+    if (existingRoomCh) {
+      supabase.removeChannel(existingRoomCh);
+    }
     const roomChannel = supabase
       .channel(roomChannelId)
       .on("broadcast", { event: "room_updated" }, (msg: any) => {

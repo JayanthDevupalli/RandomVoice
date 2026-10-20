@@ -25,6 +25,12 @@ export function GlobalPresenceProvider({ children }: { children: React.ReactNode
     }
 
     const channelId = "global_user_presence";
+    const existing = supabase.getChannels().find(
+      (c) => c.topic === `realtime:${channelId}` || c.topic === channelId
+    );
+    if (existing) {
+      supabase.removeChannel(existing);
+    }
     const channel = supabase.channel(channelId, {
       config: { presence: { key: user.id } },
     });

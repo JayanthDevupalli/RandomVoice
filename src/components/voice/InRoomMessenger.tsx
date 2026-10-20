@@ -224,8 +224,9 @@ export function InRoomMessenger({ isOpen, onClose }: InRoomMessengerProps) {
     fetchMessages();
 
     // Subscribe to new incoming messages in this active conversation
+    const channelId = `in_room_dm_${activeConversationId}_${Math.random().toString(36).substring(2, 9)}`;
     const channel = supabase
-      .channel(`in_room_dm_${activeConversationId}`)
+      .channel(channelId)
       .on(
         "postgres_changes",
         {
