@@ -10,7 +10,7 @@ export interface ColorPreset {
 export const PRESET_COLORS: ColorPreset[] = [
   // ─── Luxury Metallic & Holographic Gradients ───
   { id: "diamond_obsidian", name: "Diamond Obsidian", hex: "linear-gradient(135deg, #090A0F 0%, #18181B 35%, #27272A 70%, #3F3F46 100%)", category: "gradient" },
-  { id: "liquid_gold", name: "Liquid Gold", hex: "linear-gradient(135deg, #1C1917 0%, #78350F 40%, #B45309 70%, #F59E0B 100%)", category: "gradient" },
+  { id: "liquid_gold", name: "Liquid Gold", hex: "linear-gradient(135deg, #12100E 0%, #38230D 40%, #92621C 75%, #E5A93C 100%)", category: "gradient" },
   { id: "imperial_ruby", name: "Imperial Ruby", hex: "linear-gradient(135deg, #2A040D 0%, #7F1D1D 50%, #B91C1C 100%)", category: "gradient" },
   { id: "cyber_violet", name: "Cyber Violet", hex: "linear-gradient(135deg, #3B0764 0%, #6B21A8 50%, #A21CAF 100%)", category: "gradient" },
   { id: "aurora_teal", name: "Aurora Teal", hex: "linear-gradient(135deg, #042F2E 0%, #0F766E 50%, #0369A1 100%)", category: "gradient" },
@@ -53,32 +53,28 @@ export const PRESET_COLORS: ColorPreset[] = [
 
 /**
  * Returns inline CSS properties for rendering a customized background card.
- * Provides multi-layer glass reflection, rim glow, and depth lighting.
+ * Provides a sleek, minimalist luxury dark glass foundation with elegant ambient color tones.
  */
 export function getCardThemeStyle(bgColor?: string): React.CSSProperties {
-  const bg = bgColor || "#465B73";
+  const bg = bgColor || "#181B26";
   const isGradient = bg.includes("gradient") || bg.includes("linear") || bg.includes("radial");
 
   const style: React.CSSProperties = {
-    boxShadow: `0 20px 45px -12px rgba(0,0,0,0.75), inset 0 1px 1.5px 0 rgba(255,255,255,0.35), inset 0 -2px 10px 0 rgba(0,0,0,0.45)`,
-    backdropFilter: "blur(12px)",
+    position: "relative",
+    boxShadow: "0 14px 34px -8px rgba(0, 0, 0, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.18)",
+    backdropFilter: "blur(18px)",
+    WebkitBackdropFilter: "blur(18px)",
+    borderColor: "rgba(255, 255, 255, 0.12)",
   };
 
   if (isGradient) {
-    style.background = bg;
-    style.borderColor = "rgba(255, 255, 255, 0.28)";
+    // Luxury dark glass blend that lets rich metallic accents shine while keeping clean contrast
+    style.background = `linear-gradient(180deg, rgba(14, 16, 24, 0.25) 0%, rgba(10, 11, 18, 0.78) 100%), ${bg}`;
+    style.borderColor = "rgba(255, 255, 255, 0.18)";
   } else {
-    style.backgroundColor = bg;
-    style.borderColor = `${bg}C0`;
-  }
-
-  // Multi-layered volumetric light overlay for high-end glass refraction
-  const ambientGradient = `radial-gradient(ellipse at 50% -10%, rgba(255, 255, 255, 0.28) 0%, rgba(255, 255, 255, 0.05) 45%, rgba(0, 0, 0, 0.55) 100%), linear-gradient(180deg, rgba(255,255,255,0.08) 0%, rgba(0,0,0,0.3) 100%)`;
-
-  if (isGradient) {
-    style.backgroundImage = `${ambientGradient}, ${bg}`;
-  } else {
-    style.backgroundImage = ambientGradient;
+    // Rich solid luxury tone blended smoothly with deep obsidian glass
+    style.background = `linear-gradient(180deg, ${bg}cc 0%, ${bg}77 45%, rgba(13, 14, 21, 0.94) 100%), #0D0E15`;
+    style.borderColor = `${bg}88`;
   }
 
   return style;

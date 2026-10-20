@@ -107,30 +107,16 @@ export function useUnreadMessages() {
           : 0;
 
         const lastRead = updatedLastReadMap[msg.conversation_id];
+        // Compare against stored lastRead or when user joined the conversation
+        const readTime = lastRead ? new Date(lastRead).getTime() : joinedAtMs;
 
-        if (lastRead) {
-          const readTime = new Date(lastRead).getTime();
-          // Message is unread only if created strictly after the last read timestamp (+1s clock buffer)
-          if (msgTime > readTime + 1000) {
-            counts[msg.conversation_id] = (counts[msg.conversation_id] || 0) + 1;
-            total++;
-          }
-        } else {
-          // On first load/new device where lastRead timestamp is missing:
-          // Treat all historical messages prior to initial session as read
-          // and seed the lastReadMap so ancient messages never count as unread on login.
-          const safeSeedTime = new Date(Date.now() + 5000).toISOString();
-          updatedLastReadMap[msg.conversation_id] = safeSeedTime;
-          mapChanged = true;
+        if (msgTime > readTime + 1000) {
+          counts[msg.conversation_id] = (counts[msg.conversation_id] || 0) + 1;
+          total++;
         }
       }
 
-      if (mapChanged) {
-        lastReadMapRef.current = updatedLastReadMap;
-        saveLastReadMap(updatedLastReadMap);
-      } else {
-        lastReadMapRef.current = lastReadMap;
-      }
+      lastReadMapRef.current = updatedLastReadMap;
 
       setUnreadByConversation(counts);
       setUnreadCount(total);

@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { UserAvatar } from "../ui/UserAvatar";
-import { Radio, Users, Bell, MessageSquare } from "lucide-react";
+import { Radio, Users, Bell, MessageSquare, Crown, Shield, Sparkles } from "lucide-react";
 import { useState } from "react";
 import { useUser } from "@/hooks/useUser";
 import { AuthModal } from "../auth/AuthModal";
@@ -19,11 +19,16 @@ interface NavbarProps {
 export function Navbar({ totalOnline: propTotalOnline }: NavbarProps) {
   const router = useRouter();
   const { user, isRegistered, isLoaded } = useUser();
-  const { unreadCount, markAllAsRead } = useUnreadMessages();
+  const { unreadCount } = useUnreadMessages();
   const { totalOnline: liveOnline } = useLiveStats();
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
 
   const displayOnline = typeof propTotalOnline === "number" ? propTotalOnline : liveOnline;
+  const cleanName = user?.name?.trim().toLowerCase() || "";
+  const isSuperAdmin = user?.role === "super_admin" || cleanName === "jayanthadmin" || cleanName === "jayanth";
+  const isAdmin = isSuperAdmin || user?.role === "admin";
+  const isManager = user?.role === "manager";
+  const isStaff = isAdmin || isManager;
 
   return (
     <>
@@ -38,7 +43,7 @@ export function Navbar({ totalOnline: propTotalOnline }: NavbarProps) {
           </Link>
 
           {/* Right Action Menu */}
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3">
             {/* Live Count Indicator */}
             <div className="flex items-center justify-center gap-1.5 px-3.5 h-9 rounded-full bg-white/5 border border-white/10 shadow-sm text-xs text-slate-300">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)] animate-pulse" />
@@ -48,12 +53,37 @@ export function Navbar({ totalOnline: propTotalOnline }: NavbarProps) {
             </div>
 
             {isLoaded && user && (
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2 sm:gap-3">
                 {isRegistered ? (
                   <>
+                    {/* Staff Portal Button */}
+                    {isStaff && (
+                      <Link
+                        href="/admin"
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold transition-all shadow-sm ${
+                          isSuperAdmin
+                            ? "bg-amber-500/15 border border-amber-500/40 text-amber-300 hover:bg-amber-500/25 shadow-[0_0_12px_rgba(245,158,11,0.2)]"
+                            : isAdmin
+                            ? "bg-indigo-500/15 border border-indigo-500/30 text-indigo-300 hover:bg-indigo-500/25"
+                            : "bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/25"
+                        }`}
+                        title={isSuperAdmin ? "Root Founder Admin Console" : isAdmin ? "Admin Moderation Console" : "Manager Console"}
+                      >
+                        {isSuperAdmin ? (
+                          <Crown size={13} className="text-amber-400" />
+                        ) : isAdmin ? (
+                          <Shield size={13} className="text-indigo-400" />
+                        ) : (
+                          <Sparkles size={13} className="text-emerald-400" />
+                        )}
+                        <span className="hidden sm:inline">
+                          {isSuperAdmin ? "Founder" : isAdmin ? "Admin" : "Manager"}
+                        </span>
+                      </Link>
+                    )}
+
                     <Link
                       href="/messages"
-                      onClick={() => markAllAsRead()}
                       className="relative flex items-center justify-center w-9 h-9 rounded-full bg-white/5 border border-white/10 text-slate-400 hover:text-white hover:bg-white/10 transition-all cursor-pointer shadow-sm shrink-0"
                       title="Messages"
                     >
@@ -85,13 +115,24 @@ export function Navbar({ totalOnline: propTotalOnline }: NavbarProps) {
                     </button>
                   </>
                 ) : (
-                  /* Sign Up / Log In Button for Guests */
-                  <button
-                    onClick={() => setIsAuthModalOpen(true)}
-                    className="px-4 py-1.5 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-500 rounded-full transition-colors shadow-sm"
-                  >
-                    Log In
-                  </button>
+                  /* Sign Up / Log In Button for Guests with active Guest persona badge */
+                  <div className="flex items-center gap-2">
+                    <div
+                      className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/5 border border-white/10 select-none shadow-sm"
+                      title={`Guest: ${user.name}`}
+                    >
+                      <UserAvatar avatar={user.avatar} color={user.color || "#6366F1"} size="sm" className="!w-6 !h-6 !rounded-full shrink-0" />
+                      <span className="text-xs font-medium text-slate-300 max-w-[90px] truncate">
+                        {user.name}
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => setIsAuthModalOpen(true)}
+                      className="px-3.5 py-1 text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-500 rounded-full transition-colors shadow-sm cursor-pointer"
+                    >
+                      Log In
+                    </button>
+                  </div>
                 )}
               </div>
             )}

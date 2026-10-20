@@ -3,9 +3,10 @@
 import { useState } from "react";
 import { Junction } from "@/lib/types";
 import { UserAvatar } from "../ui/UserAvatar";
-import { Users, Gamepad2, Cpu, Coffee, Music, Sparkles, Languages, Dices, Mic, ArrowRight, Lock, Trash2, Loader2, MapPin } from "lucide-react";
+import { Users, Gamepad2, Cpu, Coffee, Music, Sparkles, Languages, Dices, Mic, ArrowRight, Lock, Trash2, Loader2, MapPin, Shield } from "lucide-react";
 import Link from "next/link";
 import { useGuestUser } from "@/hooks/useGuestUser";
+import { useUser } from "@/hooks/useUser";
 
 interface JunctionCardProps {
   junction: Junction;
@@ -66,6 +67,7 @@ import React from "react";
 export const JunctionCard = React.memo(
   function JunctionCard({ junction, onDelete }: JunctionCardProps) {
     const { guest } = useGuestUser();
+    const { user } = useUser();
     const [isDeleting, setIsDeleting] = useState(false);
 
   const isPublic = !junction.isCustom && !junction.creatorId && (!junction.id.startsWith("junc_"));
@@ -158,22 +160,24 @@ export const JunctionCard = React.memo(
             {seats.map((_, index) => {
               const participant = junction.participants[index];
               const isMod = participant?.role === "moderator";
+              const userRole = participant?.userRole;
+              const badgeRole = userRole && userRole !== "user" ? userRole : isMod ? "moderator" : undefined;
+              const roleTitle = userRole === "super_admin" ? "Founder" : userRole === "admin" ? "Admin" : userRole === "manager" ? "Manager" : isMod ? "Host" : "";
+
               if (participant) {
                 return (
                   <div
                     key={participant.id || index}
                     className="relative transform hover:scale-110 transition-transform"
-                    title={`${participant.name}${isMod ? ' (Moderator)' : ''}${participant.isSpeaking ? ' (Speaking)' : ''}`}
+                    title={`${participant.name}${roleTitle ? ` (${roleTitle})` : ""}${participant.isSpeaking ? " (Speaking)" : ""}`}
                   >
                     <UserAvatar
                       avatar={participant.avatar}
                       color={participant.color}
                       size="sm"
+                      badgeRole={badgeRole}
                       isSpeaking={participant.isSpeaking}
                     />
-                    {isMod && (
-                      <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-amber-500 rounded-full border border-slate-900" />
-                    )}
                   </div>
                 );
               }
@@ -193,7 +197,15 @@ export const JunctionCard = React.memo(
 
       {/* Action Button */}
       <div>
-        {isLocked ? (
+        {user?.isBanned ? (
+          <button
+            disabled
+            className="w-full py-2.5 px-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 font-medium text-xs flex items-center justify-center gap-1.5 cursor-not-allowed"
+          >
+            <Shield size={13} />
+            <span>Account Suspended</span>
+          </button>
+        ) : isLocked ? (
           <button
             disabled
             className="w-full py-2.5 px-3 rounded-xl bg-white/5 border border-white/10 text-rose-400/80 font-medium text-xs flex items-center justify-center gap-1.5 cursor-not-allowed"

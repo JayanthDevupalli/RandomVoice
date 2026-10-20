@@ -36,7 +36,7 @@ interface LandingWelcomeProps {
 
 export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
   const router = useRouter();
-  const { guest, completeOnboarding, isLoaded } = useGuestUser();
+  const { guest, hasCompletedOnboarding, completeOnboarding, isLoaded } = useGuestUser();
   const { totalOnline, activeRooms, totalRooms } = useLiveStats();
 
   // Mode: "guest" (Instant persona) or "login" (Member auth)
@@ -71,15 +71,22 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
   useEffect(() => {
     if (isLoaded && guest && !hasInitialized.current) {
       hasInitialized.current = true;
-      setName(guest.name || "");
-      setSelectedAvatar(guest.avatar || "zap");
-      setSelectedColor(guest.color || "#818CF8");
+      if (hasCompletedOnboarding && guest.name) {
+        setName(guest.name);
+      }
+      if (guest.avatar) {
+        setSelectedAvatar(guest.avatar);
+      }
+      if (guest.color) {
+        setSelectedColor(guest.color);
+      }
     }
-  }, [guest, isLoaded]);
+  }, [guest, isLoaded, hasCompletedOnboarding]);
 
   // Guest Join Handler
   const handleJoin = () => {
-    if (!name.trim() || !isAdult || !agreedToTerms) return;
+    const cleanName = name.trim();
+    if (!cleanName || !isAdult || !agreedToTerms) return;
 
     confetti({
       particleCount: 50,
@@ -90,12 +97,14 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
     });
 
     completeOnboarding({
-      name: name.trim() || guest?.name || "Guest",
+      name: cleanName,
+      displayName: cleanName,
+      username: cleanName.toLowerCase().replace(/[^a-z0-9_]/g, ""),
       avatar: selectedAvatar,
       color: selectedColor,
     });
 
-    router.push("/junctions");
+    window.location.href = "/junctions";
   };
 
   // Member Login / Signup Handler

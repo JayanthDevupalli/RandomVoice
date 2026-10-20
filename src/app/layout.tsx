@@ -1,11 +1,19 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import dynamic from "next/dynamic";
 import { GlobalPresenceProvider } from "@/components/providers/GlobalPresenceProvider";
 import { DMVoiceCallProvider } from "@/components/providers/DMVoiceCallContext";
-import { DMVoiceCallOverlay } from "@/components/voice/DMVoiceCallOverlay";
-
 import { ActiveJunctionProvider } from "@/components/providers/ActiveJunctionContext";
-import { ActiveJunctionOverlay } from "@/components/voice/ActiveJunctionOverlay";
+
+const DMVoiceCallOverlay = dynamic(
+  () => import("@/components/voice/DMVoiceCallOverlay").then((mod) => mod.DMVoiceCallOverlay),
+  { ssr: false }
+);
+
+const ActiveJunctionOverlay = dynamic(
+  () => import("@/components/voice/ActiveJunctionOverlay").then((mod) => mod.ActiveJunctionOverlay),
+  { ssr: false }
+);
 
 export const metadata: Metadata = {
   title: "YapClub - 7-Seat Voice Hangouts | No Cap, Pure Yapping",

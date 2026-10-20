@@ -51,7 +51,18 @@ export function useLiveStats(): LiveStats {
     isMountedRef.current = true;
     fetchStats();
 
-    // Set up Supabase Realtime channel for instant live updates across the whole app
+    // Debounce realtime events to prevent request storms
+    let debounceTimer: NodeJS.Timeout | null = null;
+    const triggerDebouncedFetch = () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        if (isMountedRef.current) {
+          fetchStats();
+        }
+      }, 2000);
+    };
+
+    // Set up Supabase Realtime channel for live updates across the whole app
     const channelId = `live_stats_${Math.random().toString(36).substring(2, 9)}`;
     const channel = supabase
       .channel(channelId)
@@ -59,14 +70,14 @@ export function useLiveStats(): LiveStats {
         "postgres_changes",
         { event: "*", schema: "public", table: "junction_participants" },
         () => {
-          fetchStats();
+          triggerDebouncedFetch();
         }
       )
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "junctions" },
         () => {
-          fetchStats();
+          triggerDebouncedFetch();
         }
       )
       .subscribe();
@@ -74,19 +85,24 @@ export function useLiveStats(): LiveStats {
     // Tab focus / visibility change handler
     const handleVisibility = () => {
       if (document.visibilityState === "visible") {
-        fetchStats();
+        triggerDebouncedFetch();
       }
     };
-    window.addEventListener("focus", fetchStats);
+    window.addEventListener("focus", handleVisibility);
     document.addEventListener("visibilitychange", handleVisibility);
 
-    // Fallback polling every 8s
-    const pollInterval = setInterval(fetchStats, 8000);
+    // Fallback polling every 30s (realtime handles immediate changes)
+    const pollInterval = setInterval(() => {
+      if (document.visibilityState === "visible") {
+        fetchStats();
+      }
+    }, 30000);
 
     return () => {
       isMountedRef.current = false;
+      if (debounceTimer) clearTimeout(debounceTimer);
       clearInterval(pollInterval);
-      window.removeEventListener("focus", fetchStats);
+      window.removeEventListener("focus", handleVisibility);
       document.removeEventListener("visibilitychange", handleVisibility);
       supabase.removeChannel(channel);
     };

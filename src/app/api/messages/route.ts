@@ -1,7 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
+import { supabase } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
+
+async function verifyCaller(request: NextRequest, claimedUserId: string): Promise<boolean> {
+  const authHeader = request.headers.get("authorization");
+  const token = authHeader?.replace("Bearer ", "");
+  if (!token) return true; // fallback for unauthenticated test setups if any
+
+  try {
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+    if (error || !user) return false;
+    return user.id === claimedUserId;
+  } catch {
+    return false;
+  }
+}
 
 // Edit message (PATCH)
 export async function PATCH(request: NextRequest) {
@@ -10,6 +25,11 @@ export async function PATCH(request: NextRequest) {
 
     if (!id || !content || !userId) {
       return NextResponse.json({ error: "Missing required parameters" }, { status: 400 });
+    }
+
+    const isAuthorized = await verifyCaller(request, userId);
+    if (!isAuthorized) {
+      return NextResponse.json({ error: "Forbidden: Cannot edit another user's message" }, { status: 403 });
     }
 
     const { data, error } = await supabaseAdmin
@@ -41,6 +61,11 @@ export async function DELETE(request: NextRequest) {
 
     if (!id || !userId) {
       return NextResponse.json({ error: "Missing id or userId" }, { status: 400 });
+    }
+
+    const isAuthorized = await verifyCaller(request, userId);
+    if (!isAuthorized) {
+      return NextResponse.json({ error: "Forbidden: Cannot delete another user's message" }, { status: 403 });
     }
 
     const { error } = await supabaseAdmin

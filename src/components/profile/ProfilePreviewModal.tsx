@@ -5,8 +5,9 @@ import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { supabase } from "@/lib/supabase";
 import { useUser } from "@/hooks/useUser";
-import { X, UserPlus, ShieldAlert, Loader2, Check, MessageSquare, UserCheck, Unlock } from "lucide-react";
+import { X, UserPlus, ShieldAlert, Loader2, Check, MessageSquare, UserCheck, Unlock, Clock, LogIn } from "lucide-react";
 import { UserAvatar } from "@/components/ui/UserAvatar";
+import { RoleBadge } from "@/components/ui/RoleBadge";
 import { JunctionParticipant } from "@/lib/types";
 import { useRouter } from "next/navigation";
 import { socialService } from "@/lib/social-service";
@@ -21,8 +22,11 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
   const router = useRouter();
   const { user: currentUser, isRegistered } = useUser();
   const [profile, setProfile] = useState<any>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [connectionStatus, setConnectionStatus] = useState<"none" | "pending" | "accepted" | "blocked_by_me" | "has_blocked_me">("none");
+  const [isLoading, setIsLoading] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<
+    "none" | "pending_from_me" | "pending_from_them" | "accepted" | "blocked_by_me" | "has_blocked_me"
+  >("none");
+  const [incomingReqId, setIncomingReqId] = useState<string | undefined>(undefined);
   const [isRequesting, setIsRequesting] = useState(false);
   const [mounted, setMounted] = useState(false);
 
@@ -31,50 +35,97 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
   }, []);
 
   useEffect(() => {
-    if (!isOpen || !participant) return;
+    if (!isOpen || !participant) {
+      setProfile(null);
+      setIsLoading(false);
+      return;
+    }
+
+    // 1. Fast check: Only skip if definitely an explicit guest (temporary guest ID or guest nickname)
+    const isExplicitGuest =
+      (participant as any).isGuest === true ||
+      participant.id?.startsWith("guest_") ||
+      participant.identity?.toLowerCase().startsWith("guest_") ||
+      participant.identity?.toLowerCase().startsWith("guest ") ||
+      participant.name?.toLowerCase().startsWith("guest ");
+
+    if (isExplicitGuest) {
+      setProfile(null);
+      setIsLoading(false);
+      return;
+    }
 
     async function fetchDetails() {
       setIsLoading(true);
-      
-      // 1. Check if the participant is a registered user by looking up their username
-      const { data: profileData } = await supabase
-        .from("profiles")
-        .select("*")
-        .eq("username", participant?.identity)
-        .single();
 
-      if (profileData) {
+      const isUUID = (str?: string) =>
+        Boolean(str && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str));
+
+      const cleanIdent = (participant?.identity || "").trim();
+      const cleanUser = (participant?.username || "").trim();
+
+      try {
+        const filters: string[] = [];
+        if (isUUID(participant?.id)) {
+          filters.push(`id.eq.${participant?.id}`);
+        }
+        if (isUUID(participant?.identity)) {
+          filters.push(`id.eq.${participant?.identity}`);
+        }
+        if (cleanUser && !cleanUser.includes(" ") && !cleanUser.startsWith("guest_")) {
+          filters.push(`username.ilike.${cleanUser}`);
+        }
+        if (cleanIdent && !cleanIdent.includes(" ") && !cleanIdent.startsWith("guest_") && cleanIdent !== cleanUser) {
+          filters.push(`username.ilike.${cleanIdent}`);
+        }
+
+        if (filters.length === 0) {
+          setProfile(null);
+          return;
+        }
+
+        const { data: profileData, error } = await supabase
+          .from("profiles")
+          .select("*")
+          .or(filters.join(","))
+          .maybeSingle();
+
+        if (error || !profileData) {
+          setProfile(null);
+          return;
+        }
+
         setProfile(profileData);
-        
-        // 2. If we are logged in, check relationship
-        if (isRegistered && currentUser) {
-          const rel = await socialService.getRelationship(currentUser.id, profileData.id);
-          if (rel.hasBlockedMe) {
-            setConnectionStatus("has_blocked_me");
-          } else if (rel.isBlockedByMe) {
-            setConnectionStatus("blocked_by_me");
-          } else if (rel.isFollowing) {
-            setConnectionStatus("accepted");
-          } else {
-            const { data: connData } = await supabase
-              .from("connections")
-              .select("status")
-              .eq("requester_id", currentUser.id)
-              .eq("receiver_id", profileData.id)
-              .maybeSingle();
 
-            if (connData?.status === "pending") {
-              setConnectionStatus("pending");
+        // 2. If we are logged in, check relationship
+        if (isRegistered && currentUser && currentUser.id !== profileData.id) {
+          try {
+            const rel = await socialService.getRelationship(currentUser.id, profileData.id);
+            if (rel.hasBlockedMe) {
+              setConnectionStatus("has_blocked_me");
+            } else if (rel.isBlockedByMe) {
+              setConnectionStatus("blocked_by_me");
+            } else if (rel.isFollowing) {
+              setConnectionStatus("accepted");
+            } else if (rel.hasPendingRequestFromMe) {
+              setConnectionStatus("pending_from_me");
+            } else if (rel.hasPendingRequestFromThem) {
+              setConnectionStatus("pending_from_them");
+              setIncomingReqId(rel.incomingRequestId);
             } else {
               setConnectionStatus("none");
             }
+          } catch (relErr) {
+            console.warn("Failed to check relationship:", relErr);
+            setConnectionStatus("none");
           }
         }
-      } else {
+      } catch (err) {
+        console.error("Failed to load profile in preview modal:", err);
         setProfile(null);
+      } finally {
+        setIsLoading(false);
       }
-      
-      setIsLoading(false);
     }
 
     fetchDetails();
@@ -82,21 +133,72 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
 
   const handleFollow = async () => {
     if (!isRegistered || !currentUser || !profile) {
-      alert("You need to log in to connect with users!");
+      onClose();
+      router.push("/login");
       return;
     }
     
     setIsRequesting(true);
-    
     try {
       const res = await socialService.followUser(currentUser.id, profile.id);
+      if (res.success) {
+        setConnectionStatus("pending_from_me");
+      } else if (res.error) {
+        alert(res.error);
+      }
+    } catch (err: any) {
+      alert("Failed to send follow request. Try again.");
+    } finally {
+      setIsRequesting(false);
+    }
+  };
+
+  const handleCancelRequest = async () => {
+    if (!currentUser || !profile) return;
+    setIsRequesting(true);
+    try {
+      const res = await socialService.cancelFollowRequest(currentUser.id, profile.id);
+      if (res.success) {
+        setConnectionStatus("none");
+      } else if (res.error) {
+        alert(res.error);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsRequesting(false);
+    }
+  };
+
+  const handleAcceptRequest = async () => {
+    if (!currentUser || !profile) return;
+    setIsRequesting(true);
+    try {
+      const res = await socialService.acceptFollowRequest(currentUser.id, profile.id, incomingReqId);
       if (res.success) {
         setConnectionStatus("accepted");
       } else if (res.error) {
         alert(res.error);
       }
-    } catch (err: any) {
-      alert("Failed to follow user. Try again.");
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsRequesting(false);
+    }
+  };
+
+  const handleDeclineRequest = async () => {
+    if (!currentUser || !profile) return;
+    setIsRequesting(true);
+    try {
+      const res = await socialService.declineFollowRequest(currentUser.id, profile.id, incomingReqId);
+      if (res.success) {
+        setConnectionStatus("none");
+      } else if (res.error) {
+        alert(res.error);
+      }
+    } catch (e) {
+      console.error(e);
     } finally {
       setIsRequesting(false);
     }
@@ -152,31 +254,59 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
               <X size={18} />
             </button>
 
-            {isLoading ? (
-              <div className="py-12 flex items-center justify-center">
-                <Loader2 className="w-8 h-8 text-indigo-500 animate-spin" />
-              </div>
-            ) : profile ? (
+            {profile ? (
               // Registered User View
-              <div className="flex flex-col items-center">
-                <div className="w-24 h-24 rounded-full overflow-hidden border-4 border-[#12131A] shadow-xl bg-indigo-900/50 mb-4 cursor-pointer hover:scale-105 transition-transform" onClick={handleViewFullProfile}>
-                  {profile.avatar.includes("http") ? (
-                    <img src={profile.avatar} alt={profile.username} className="w-full h-full object-cover" />
-                  ) : (
-                    <UserAvatar avatar={profile.avatar} color="#6366F1" size="lg" className="!rounded-full !w-full !h-full" />
-                  )}
-                </div>
-                
-                <h3 className="text-xl font-bold text-white mb-1">{profile.username}</h3>
-                
-                <p className="text-sm text-slate-400 line-clamp-2 mb-6 px-4">
-                  {profile.bio || "No bio yet."}
-                </p>
+              (() => {
+                const isMain = profile.username?.trim().toLowerCase() === "jayanthadmin" || profile.username?.trim().toLowerCase() === "jayanth" || profile.role === "super_admin";
+                const modalRole = isMain ? "super_admin" : (profile.role === "admin" ? "admin" : profile.role === "manager" ? "manager" : participant.userRole || "user");
+
+                return (
+                  <div className="flex flex-col items-center">
+                    <div className="w-24 h-24 rounded-3xl overflow-hidden border-4 border-[#12131A] shadow-xl bg-indigo-900/50 mb-4 cursor-pointer hover:scale-105 transition-transform relative" onClick={handleViewFullProfile}>
+                      {profile.avatar.includes("http") ? (
+                        <img src={profile.avatar} alt={profile.username} className="w-full h-full object-cover rounded-3xl" />
+                      ) : (
+                        <UserAvatar avatar={profile.avatar} color="#6366F1" size="lg" iconSize={42} className="!rounded-3xl !w-full !h-full" badgeRole={modalRole !== "user" ? modalRole : undefined} />
+                      )}
+                    </div>
+                    
+                    <div className="flex items-center justify-center gap-1.5 mb-0.5 flex-wrap">
+                      <h3 className="text-xl font-bold text-white">
+                        {profile.display_name || profile.social_links?.display_name || profile.username}
+                      </h3>
+                      {modalRole !== "user" && (
+                        <RoleBadge role={modalRole} size="xs" />
+                      )}
+                    </div>
+
+                    <p className="text-xs font-semibold text-indigo-300/80 mb-2">
+                      @{profile.username}
+                    </p>
+                    
+                    <p className="text-sm text-slate-400 line-clamp-2 mb-6 px-4">
+                      {profile.bio || "No bio yet."}
+                    </p>
 
                 {/* Interaction Button */}
                 {currentUser?.id !== profile.id && (
                   <div className="w-full">
-                    {connectionStatus === "has_blocked_me" ? (
+                    {!isRegistered || !currentUser ? (
+                      <div className="w-full flex flex-col gap-2.5">
+                        <div className="p-3 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 text-xs text-indigo-300 text-center leading-relaxed">
+                          Want to connect with <span className="font-semibold text-white">{profile.display_name || profile.username}</span>? Log in to send follow requests and message!
+                        </div>
+                        <button
+                          onClick={() => {
+                            onClose();
+                            router.push("/login");
+                          }}
+                          className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-400 text-white font-medium text-sm transition-all shadow-lg shadow-indigo-600/25 active:scale-95 cursor-pointer"
+                        >
+                          <LogIn size={16} />
+                          Log in to Connect
+                        </button>
+                      </div>
+                    ) : connectionStatus === "has_blocked_me" ? (
                       <div className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-white/5 text-slate-400 font-medium text-sm border border-white/10 cursor-not-allowed">
                         <ShieldAlert size={16} />
                         Account Unavailable
@@ -195,9 +325,33 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
                         <UserCheck size={16} />
                         Following
                       </button>
-                    ) : connectionStatus === "pending" ? (
-                      <button className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-slate-800 text-slate-300 font-medium text-sm border border-white/5 cursor-default">
-                        Request Sent
+                    ) : connectionStatus === "pending_from_them" ? (
+                      <div className="flex items-center gap-2 w-full">
+                        <button
+                          onClick={handleAcceptRequest}
+                          disabled={isRequesting}
+                          className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-sm transition-colors shadow-lg shadow-emerald-600/20 active:scale-95 cursor-pointer"
+                        >
+                          {isRequesting ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />}
+                          Accept
+                        </button>
+                        <button
+                          onClick={handleDeclineRequest}
+                          disabled={isRequesting}
+                          className="px-3.5 py-2.5 rounded-xl bg-white/10 hover:bg-rose-500/20 text-slate-300 hover:text-rose-300 border border-white/10 hover:border-rose-500/30 font-medium text-sm transition-colors active:scale-95 cursor-pointer"
+                        >
+                          Decline
+                        </button>
+                      </div>
+                    ) : connectionStatus === "pending_from_me" ? (
+                      <button
+                        onClick={handleCancelRequest}
+                        disabled={isRequesting}
+                        className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-white/10 hover:bg-rose-500/20 text-slate-200 hover:text-rose-300 border border-white/10 hover:border-rose-500/30 font-medium text-sm transition-colors active:scale-95 cursor-pointer"
+                        title="Click to cancel follow request"
+                      >
+                        {isRequesting ? <Loader2 size={16} className="animate-spin" /> : <Clock size={16} className="text-amber-400" />}
+                        Requested (Cancel)
                       </button>
                     ) : (
                       <button 
@@ -219,29 +373,55 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
                   View Full Profile
                 </button>
               </div>
-            ) : (
-              // Guest User View
-              <div className="flex flex-col items-center py-4">
-                <div className="w-24 h-24 rounded-full overflow-hidden border-4 border-[#12131A] shadow-xl bg-slate-800 mb-4">
-                  <UserAvatar avatar={participant.avatar} color={participant.color} size="lg" className="!rounded-full !w-full !h-full" />
-                </div>
-                
-                <h3 className="text-xl font-bold text-white mb-1">{participant.name}</h3>
-                <span className="px-2.5 py-1 rounded-md bg-white/5 border border-white/10 text-[10px] font-semibold text-slate-400 uppercase tracking-widest mb-4">
-                  Guest User
-                </span>
-                
-                <p className="text-sm text-slate-500 max-w-[200px] mb-4">
-                  This user hasn't created a YapClub account yet.
-                </p>
+            );
+          })()
+        ) : (
+          // Guest User View
+          <div className="flex flex-col items-center py-4">
+            <div
+              className="w-24 h-24 rounded-3xl overflow-hidden border-4 border-[#12131A] shadow-xl mb-4 relative flex items-center justify-center"
+              style={{
+                backgroundColor: participant.color ? `${participant.color}25` : "rgba(30, 41, 59, 0.8)",
+                borderColor: participant.color ? `${participant.color}40` : "rgba(255, 255, 255, 0.1)",
+              }}
+            >
+              <UserAvatar
+                avatar={participant.avatar || "zap"}
+                color={participant.color || "#6366F1"}
+                size="xl"
+                iconSize={44}
+                className="!rounded-3xl !w-full !h-full"
+                badgeRole={participant.userRole && participant.userRole !== "user" ? participant.userRole : undefined}
+              />
+            </div>
+            
+            <div className="flex items-center justify-center gap-1.5 mb-1.5 flex-wrap">
+              <h3 className="text-xl font-bold text-white">{participant.name || "Guest User"}</h3>
+              {participant.userRole && participant.userRole !== "user" && (
+                <RoleBadge role={participant.userRole} size="xs" />
+              )}
+            </div>
 
-                {!isRegistered && (
-                  <div className="p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-xs text-indigo-300">
-                    Sign up to build your profile and connect with others!
-                  </div>
-                )}
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/5 border border-white/10 text-[11px] font-semibold text-slate-300 tracking-wide mb-4">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+              <span>Guest Account</span>
+            </div>
+            
+            <p className="text-sm text-slate-400 max-w-[220px] mb-5 leading-relaxed">
+              This user is participating in this room as a guest.
+            </p>
+
+            {!isRegistered ? (
+              <div className="w-full p-3.5 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 text-xs text-indigo-300 leading-relaxed text-center">
+                ✨ Sign up for a YapClub account to build your permanent profile and connect with others!
+              </div>
+            ) : (
+              <div className="w-full p-3 rounded-2xl bg-white/5 border border-white/10 text-xs text-slate-400 text-center">
+                Guest accounts cannot be followed or messaged directly.
               </div>
             )}
+          </div>
+        )}
           </motion.div>
         </div>
       )}

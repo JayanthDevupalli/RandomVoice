@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { PRESET_COLORS, getCardThemeStyle } from "@/lib/card-themes";
-import { UserAvatar } from "@/components/ui/UserAvatar";
+import { UserAvatar, AVATAR_ICON_MAP } from "@/components/ui/UserAvatar";
 import { Crown, MicOff, Check, Palette, Sparkles, Loader2 } from "lucide-react";
 
 interface CardCustomizerProps {
@@ -92,50 +92,67 @@ export function CardCustomizer({
 
           <div
             style={cardStyle}
-            className="relative p-4 sm:p-6 rounded-[1.5rem] border flex flex-col justify-between items-center text-center shadow-2xl transition-all duration-300 min-h-[220px] sm:min-h-[230px] overflow-hidden border-white/20"
+            className="relative p-3.5 sm:p-5 rounded-2xl sm:rounded-[1.4rem] border flex flex-col justify-between items-center text-center shadow-[0_12px_32px_-8px_rgba(0,0,0,0.6)] transition-all duration-300 min-h-[220px] sm:min-h-[235px] overflow-hidden border-white/10"
           >
-            {/* Glass Reflective Top Highlight */}
-            <div className="absolute inset-0 bg-gradient-to-b from-white/12 via-transparent to-black/40 pointer-events-none rounded-[1.5rem]" />
+            {/* Top Hairline Light Reflection */}
+            <div className="absolute inset-x-0 top-0 h-[1px] bg-gradient-to-r from-transparent via-white/25 to-transparent pointer-events-none" />
 
             {/* Top Card Header */}
-            <div className="w-full flex items-center justify-between z-10">
-              <span className="px-2.5 py-1 rounded-full bg-black/40 backdrop-blur-md border border-white/15 text-[10px] font-mono font-bold text-slate-200 shadow-inner flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
-                SEAT #1
-              </span>
+            <div className="w-full flex items-center justify-between z-10 min-h-[22px]">
+              <div className="px-2 py-0.5 rounded-full bg-black/40 backdrop-blur-md border border-white/10 text-[9px] sm:text-[10px] font-mono font-medium text-slate-300 shadow-xs flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
+                <span>#1</span>
+              </div>
               <div className="flex items-center gap-1.5">
-                <span className="flex items-center gap-1 px-2 py-1 rounded-full bg-gradient-to-r from-amber-500/30 via-amber-400/20 to-amber-500/10 text-amber-300 border border-amber-500/40 shadow-sm backdrop-blur-md text-[9px] font-bold tracking-wider">
-                  <Crown size={11} className="fill-amber-400" />
+                <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 shadow-xs backdrop-blur-md text-[9px] font-bold tracking-wider uppercase">
+                  <Crown size={10} className="fill-amber-400 text-amber-400" />
                   <span>HOST</span>
                 </span>
-                <span className="px-2 py-1 rounded-full bg-indigo-600/40 text-indigo-200 text-[9px] font-extrabold border border-indigo-400/50 backdrop-blur-md shadow-sm">
+                <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/35 text-[9px] font-extrabold tracking-wider backdrop-blur-md shadow-xs uppercase">
                   YOU
                 </span>
               </div>
             </div>
 
-            {/* Avatar with Mute Overlay */}
-            <div className="relative my-2 sm:my-3 rounded-2xl ring-1 ring-white/20 shadow-xl">
-              <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-2xl overflow-hidden bg-black/40 flex items-center justify-center">
+            {/* Squircle Avatar with Mute Overlay */}
+            <div className="relative my-2 sm:my-3 rounded-2xl sm:rounded-[1.4rem] ring-1.5 ring-white/15 shadow-xl">
+              <div
+                className="w-16 h-16 sm:w-20 sm:h-20 rounded-2xl sm:rounded-[1.4rem] overflow-hidden flex items-center justify-center transition-colors shadow-inner"
+                style={{
+                  backgroundColor: "rgba(0, 0, 0, 0.45)",
+                  border: "1.5px solid rgba(255, 255, 255, 0.12)",
+                }}
+              >
                 {avatar?.includes("http") ? (
-                  <img src={avatar} alt={username} className="w-full h-full object-cover" />
+                  <img src={avatar} alt={username} className="w-full h-full object-cover rounded-2xl sm:rounded-[1.4rem]" />
                 ) : (
-                  <UserAvatar avatar={avatar || "zap"} color="#6366F1" size="lg" className="!rounded-2xl !w-full !h-full" />
+                  (() => {
+                    const normalizedKey = avatar?.toLowerCase().replace(/[^a-z0-9]/g, "") || "zap";
+                    const IconComponent = AVATAR_ICON_MAP[normalizedKey] || AVATAR_ICON_MAP[avatar || ""] || Sparkles;
+                    return (
+                      <IconComponent
+                        className="w-8 h-8 sm:w-10 sm:h-10 transition-transform duration-300 drop-shadow-md text-indigo-400"
+                      />
+                    );
+                  })()
                 )}
               </div>
-              <div className="absolute -bottom-1 -right-1 p-1 sm:p-1.5 rounded-full bg-gradient-to-br from-rose-500 to-rose-700 border-2 border-[#12131A] text-white shadow-lg">
-                <MicOff size={11} className="sm:w-3 sm:h-3" />
+              <div className="absolute -bottom-1 -right-1 w-5 h-5 sm:w-5.5 sm:h-5.5 rounded-lg bg-gradient-to-br from-rose-500 to-rose-600 border-2 border-[#0E1017] text-white flex items-center justify-center shadow-md">
+                <MicOff size={11} />
               </div>
             </div>
 
             {/* User Details */}
-            <div className="flex flex-col items-center gap-0.5 z-10">
-              <span className="font-extrabold text-xs sm:text-base text-white drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)] tracking-tight">
+            <div className="w-full flex flex-col items-center gap-1 z-10 px-1">
+              <span className="font-bold text-xs sm:text-sm text-white tracking-tight truncate max-w-[180px]">
                 {username}
               </span>
-              <span className="px-2 py-0.5 rounded-full bg-black/40 border border-white/10 text-[9px] sm:text-[10px] text-rose-300 font-medium backdrop-blur-md">
-                Muted
-              </span>
+              <div className="h-5 flex items-center justify-center">
+                <span className="px-2 py-0.5 rounded-full bg-black/40 border border-white/10 text-[9px] text-slate-400 font-medium backdrop-blur-md flex items-center gap-1">
+                  <MicOff size={9} className="text-rose-400" />
+                  <span>Muted</span>
+                </span>
+              </div>
             </div>
           </div>
         </div>

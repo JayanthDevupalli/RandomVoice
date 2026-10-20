@@ -1,3 +1,4 @@
+export type UserRole = 'super_admin' | 'admin' | 'manager' | 'user';
 export type ParticipantRole = 'moderator' | 'speaker' | 'listener';
 
 export interface Junction {
@@ -21,11 +22,14 @@ export interface Junction {
 export interface JunctionParticipant {
   id: string;
   identity: string;
-  name: string;
+  name: string; // Shown Name (e.g. "Jay")
+  username?: string; // Unique handle (e.g. "devdallii")
+  displayName?: string;
   avatar: string;
   color: string;
   cardBgColor?: string;
   role: ParticipantRole;
+  userRole?: UserRole;
   isMuted?: boolean;
   isMutedByMod?: boolean;
   isSpeaking?: boolean;
@@ -36,7 +40,9 @@ export interface JunctionParticipant {
 
 export interface GuestUser {
   id: string;
-  name: string;
+  name: string; // Shown Name (e.g. "Jay")
+  username?: string; // Unique handle (e.g. "devdallii")
+  displayName?: string;
   avatar: string;
   color: string;
   cardBgColor?: string;

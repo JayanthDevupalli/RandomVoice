@@ -58,12 +58,16 @@ export const AVAILABLE_AVATARS = [
   { id: "star", label: "Nova", icon: Star },
 ];
 
+import { RoleAvatarDot } from "./RoleBadge";
+
 interface UserAvatarProps {
   avatar?: string;
   color?: string;
   size?: "sm" | "md" | "lg" | "xl";
   isSpeaking?: boolean;
+  badgeRole?: string;
   className?: string;
+  iconSize?: number;
 }
 
 export function UserAvatar({
@@ -71,7 +75,9 @@ export function UserAvatar({
   color = "#6366F1",
   size = "md",
   isSpeaking = false,
+  badgeRole,
   className = "",
+  iconSize,
 }: UserAvatarProps) {
   const sizeClasses = {
     sm: "w-7 h-7 rounded-lg text-xs",
@@ -87,21 +93,30 @@ export function UserAvatar({
     xl: 38,
   };
 
+  const isFullSize = className.includes("w-full");
+
   // If the avatar is an uploaded image URL, render it directly
   if (avatar?.startsWith("http")) {
     return (
-      <div
-        className={`relative flex items-center justify-center transition-all duration-200 shadow-md overflow-hidden ${
-          sizeClasses[size]
-        } ${isSpeaking ? "speaking-ring ring-emerald-400" : "border border-slate-300 dark:border-slate-700/60"} ${className}`}
-        style={{
-          borderColor: isSpeaking ? "#10B981" : `${color}60`,
-          boxShadow: isSpeaking
-            ? `0 0 20px #10B981, inset 0 0 10px #10B981`
-            : `0 4px 12px ${color}15`,
-        }}
-      >
-        <img src={avatar} alt="User Avatar" className="w-full h-full object-cover" />
+      <div className={`relative inline-flex items-center justify-center ${isFullSize ? "w-full h-full" : ""}`}>
+        <div
+          className={`relative flex items-center justify-center transition-all duration-200 shadow-md overflow-hidden ${
+            isFullSize ? "" : sizeClasses[size]
+          } ${isSpeaking ? "speaking-ring ring-emerald-400" : "border border-slate-300 dark:border-slate-700/60"} ${className}`}
+          style={{
+            borderColor: isSpeaking ? "#10B981" : `${color}60`,
+            boxShadow: isSpeaking
+              ? `0 0 20px #10B981, inset 0 0 10px #10B981`
+              : `0 4px 12px ${color}15`,
+          }}
+        >
+          <img src={avatar} alt="User Avatar" className="w-full h-full object-cover" />
+        </div>
+        {badgeRole && (
+          <span className="absolute -top-1 -right-1 z-20 pointer-events-none">
+            <RoleAvatarDot role={badgeRole} size={size === "xl" ? "md" : size === "lg" ? "sm" : "xs"} />
+          </span>
+        )}
       </div>
     );
   }
@@ -111,23 +126,30 @@ export function UserAvatar({
   const IconComponent = AVATAR_ICON_MAP[normalizedKey] || AVATAR_ICON_MAP[avatar] || User;
 
   return (
-    <div
-      className={`relative flex items-center justify-center transition-all duration-200 shadow-md ${
-        sizeClasses[size]
-      } ${isSpeaking ? "speaking-ring ring-emerald-400" : "border border-slate-300 dark:border-slate-700/60"} ${className}`}
-      style={{
-        backgroundColor: `${color}25`,
-        borderColor: isSpeaking ? "#10B981" : `${color}60`,
-        boxShadow: isSpeaking
-          ? `0 0 20px #10B981, inset 0 0 10px #10B981`
-          : `0 4px 12px ${color}15`,
-      }}
-    >
-      <IconComponent
-        size={iconSizes[size]}
-        style={{ color: isSpeaking ? "#10B981" : color }}
-        className="transition-transform group-hover:scale-110"
-      />
+    <div className={`relative inline-flex items-center justify-center ${isFullSize ? "w-full h-full" : ""}`}>
+      <div
+        className={`relative flex items-center justify-center transition-all duration-200 shadow-md ${
+          isFullSize ? "" : sizeClasses[size]
+        } ${isSpeaking ? "speaking-ring ring-emerald-400" : "border border-slate-300 dark:border-slate-700/60"} ${className}`}
+        style={{
+          backgroundColor: `${color}25`,
+          borderColor: isSpeaking ? "#10B981" : `${color}60`,
+          boxShadow: isSpeaking
+            ? `0 0 20px #10B981, inset 0 0 10px #10B981`
+            : `0 4px 12px ${color}15`,
+        }}
+      >
+        <IconComponent
+          size={iconSize || (isFullSize ? 36 : iconSizes[size])}
+          style={{ color: isSpeaking ? "#10B981" : color }}
+          className="transition-transform group-hover:scale-110"
+        />
+      </div>
+      {badgeRole && (
+        <span className="absolute -top-1 -right-1 z-20 pointer-events-none">
+          <RoleAvatarDot role={badgeRole} size={size === "xl" ? "md" : size === "lg" ? "sm" : "xs"} />
+        </span>
+      )}
     </div>
   );
 }

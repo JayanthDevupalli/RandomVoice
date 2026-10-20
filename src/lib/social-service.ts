@@ -3,6 +3,11 @@ import { supabase } from "@/lib/supabase";
 export interface RelationshipStatus {
   isFollowing: boolean;
   followsMe: boolean;
+  hasPendingRequestFromMe: boolean;
+  hasPendingRequestFromThem: boolean;
+  incomingRequestId?: string;
+  outgoingRequestId?: string;
+  isAcceptedConnection: boolean;
   isBlockedByMe: boolean;
   hasBlockedMe: boolean;
 }
@@ -21,8 +26,9 @@ export interface ConnectionUser {
 }
 
 /**
- * Social Service — Instagram-style Architecture for YAPCLUB / RandomVoice
- * Handles: Follow, Unfollow, Remove Follower, Block, Unblock, and Count Synchronization
+ * Social Service — Request & Acceptance Social Graph for YAPCLUB / RandomVoice
+ * Handles: Follow Request (Pending), Accept Request, Decline Request, Cancel Request,
+ * Unfollow, Remove Follower, Block, Unblock, and Count Synchronization
  */
 export const socialService = {
   /**
@@ -33,6 +39,9 @@ export const socialService = {
       return {
         isFollowing: false,
         followsMe: false,
+        hasPendingRequestFromMe: false,
+        hasPendingRequestFromThem: false,
+        isAcceptedConnection: false,
         isBlockedByMe: false,
         hasBlockedMe: false,
       };
@@ -51,6 +60,9 @@ export const socialService = {
         return {
           isFollowing: false,
           followsMe: false,
+          hasPendingRequestFromMe: false,
+          hasPendingRequestFromThem: false,
+          isAcceptedConnection: false,
           isBlockedByMe: false,
           hasBlockedMe: false,
         };
@@ -70,10 +82,25 @@ export const socialService = {
       const followsMe = rows.some(
         (r) => r.requester_id === targetUserId && r.receiver_id === currentUserId && r.status === "accepted"
       );
+      const outgoingPendingRow = rows.find(
+        (r) => r.requester_id === currentUserId && r.receiver_id === targetUserId && r.status === "pending"
+      );
+      const incomingPendingRow = rows.find(
+        (r) => r.requester_id === targetUserId && r.receiver_id === currentUserId && r.status === "pending"
+      );
+
+      const hasPendingRequestFromMe = Boolean(outgoingPendingRow);
+      const hasPendingRequestFromThem = Boolean(incomingPendingRow);
+      const isAcceptedConnection = isFollowing || followsMe;
 
       return {
         isFollowing,
         followsMe,
+        hasPendingRequestFromMe,
+        hasPendingRequestFromThem,
+        outgoingRequestId: outgoingPendingRow?.id,
+        incomingRequestId: incomingPendingRow?.id,
+        isAcceptedConnection,
         isBlockedByMe,
         hasBlockedMe,
       };
@@ -82,6 +109,9 @@ export const socialService = {
       return {
         isFollowing: false,
         followsMe: false,
+        hasPendingRequestFromMe: false,
+        hasPendingRequestFromThem: false,
+        isAcceptedConnection: false,
         isBlockedByMe: false,
         hasBlockedMe: false,
       };
@@ -89,7 +119,7 @@ export const socialService = {
   },
 
   /**
-   * Get accurate follower and following counts for any user
+   * Get accurate follower and following counts for any user (strictly accepted rows)
    */
   async getFollowCounts(userId: string): Promise<FollowCounts> {
     if (!userId) return { followersCount: 0, followingCount: 0 };
@@ -119,7 +149,7 @@ export const socialService = {
   },
 
   /**
-   * Follow a user (Instagram immediate follow)
+   * Send a follow request (status: 'pending')
    */
   async followUser(currentUserId: string, targetUserId: string): Promise<{ success: boolean; error?: string }> {
     if (!currentUserId || !targetUserId || currentUserId === targetUserId) {
@@ -143,22 +173,159 @@ export const socialService = {
         .eq("requester_id", currentUserId)
         .eq("receiver_id", targetUserId);
 
-      // 3. Insert accepted follow
+      // 3. Insert pending follow request
       const { error } = await supabase.from("connections").insert({
         requester_id: currentUserId,
         receiver_id: targetUserId,
-        status: "accepted",
+        status: "pending",
       });
 
       if (error) {
-        console.error("Error following user:", error);
+        console.error("Error sending follow request:", error);
         return { success: false, error: error.message };
       }
 
       this.broadcastSocialUpdate();
       return { success: true };
     } catch (err: any) {
-      console.error("Exception following user:", err);
+      console.error("Exception sending follow request:", err);
+      return { success: false, error: err.message };
+    }
+  },
+
+  /**
+   * Cancel an outgoing follow request that is still pending
+   */
+  async cancelFollowRequest(currentUserId: string, targetUserId: string): Promise<{ success: boolean; error?: string }> {
+    if (!currentUserId || !targetUserId) {
+      return { success: false, error: "Invalid user parameters" };
+    }
+
+    try {
+      const { error } = await supabase
+        .from("connections")
+        .delete()
+        .eq("requester_id", currentUserId)
+        .eq("receiver_id", targetUserId)
+        .eq("status", "pending");
+
+      if (error) {
+        console.error("Error cancelling follow request:", error);
+        return { success: false, error: error.message };
+      }
+
+      this.broadcastSocialUpdate();
+      return { success: true };
+    } catch (err: any) {
+      console.error("Exception cancelling follow request:", err);
+      return { success: false, error: err.message };
+    }
+  },
+
+  /**
+   * Accept an incoming follow request (changes status from 'pending' to 'accepted')
+   */
+  async acceptFollowRequest(currentUserId: string, requesterId: string, connectionId?: string): Promise<{ success: boolean; error?: string }> {
+    if (!currentUserId || !requesterId) {
+      return { success: false, error: "Invalid user parameters" };
+    }
+
+    try {
+      let query = supabase.from("connections").update({ status: "accepted" });
+      if (connectionId) {
+        query = query.eq("id", connectionId);
+      } else {
+        query = query
+          .eq("requester_id", requesterId)
+          .eq("receiver_id", currentUserId)
+          .eq("status", "pending");
+      }
+
+      const { error } = await query;
+
+      if (error) {
+        console.error("Error accepting follow request:", error);
+        return { success: false, error: error.message };
+      }
+
+      // Automatically ensure a direct conversation exists for the newly connected pair
+      try {
+        const { data: myConvs } = await supabase
+          .from("conversation_members")
+          .select("conversation_id, conversations!inner(type)")
+          .eq("user_id", currentUserId)
+          .eq("conversations.type", "direct");
+
+        let existingConvId = null;
+        if (myConvs && myConvs.length > 0) {
+          const convIds = myConvs.map((c: any) => c.conversation_id);
+          const { data: shared } = await supabase
+            .from("conversation_members")
+            .select("conversation_id")
+            .eq("user_id", requesterId)
+            .in("conversation_id", convIds);
+
+          if (shared && shared.length > 0) {
+            existingConvId = shared[0].conversation_id;
+          }
+        }
+
+        if (!existingConvId) {
+          const { data: newConv } = await supabase
+            .from("conversations")
+            .insert({ type: "direct" })
+            .select("id")
+            .single();
+
+          if (newConv) {
+            await supabase.from("conversation_members").insert([
+              { conversation_id: newConv.id, user_id: currentUserId, role: "member" },
+              { conversation_id: newConv.id, user_id: requesterId, role: "member" },
+            ]);
+          }
+        }
+      } catch (convErr) {
+        console.warn("Non-fatal: could not pre-seed conversation on accept:", convErr);
+      }
+
+      this.broadcastSocialUpdate();
+      return { success: true };
+    } catch (err: any) {
+      console.error("Exception accepting follow request:", err);
+      return { success: false, error: err.message };
+    }
+  },
+
+  /**
+   * Decline an incoming follow request (deletes the pending connection row)
+   */
+  async declineFollowRequest(currentUserId: string, requesterId: string, connectionId?: string): Promise<{ success: boolean; error?: string }> {
+    if (!currentUserId || !requesterId) {
+      return { success: false, error: "Invalid user parameters" };
+    }
+
+    try {
+      let query = supabase.from("connections").delete();
+      if (connectionId) {
+        query = query.eq("id", connectionId);
+      } else {
+        query = query
+          .eq("requester_id", requesterId)
+          .eq("receiver_id", currentUserId)
+          .eq("status", "pending");
+      }
+
+      const { error } = await query;
+
+      if (error) {
+        console.error("Error declining follow request:", error);
+        return { success: false, error: error.message };
+      }
+
+      this.broadcastSocialUpdate();
+      return { success: true };
+    } catch (err: any) {
+      console.error("Exception declining follow request:", err);
       return { success: false, error: err.message };
     }
   },
@@ -330,6 +497,48 @@ export const socialService = {
     } catch (err) {
       console.error("Error fetching block lists:", err);
       return { blockedByMeIds: [], blockedMeIds: [] };
+    }
+  },
+
+  /**
+   * Get all pending incoming follow requests for current user
+   */
+  async getPendingIncomingRequests(currentUserId: string): Promise<any[]> {
+    if (!currentUserId) return [];
+
+    try {
+      const { data, error } = await supabase
+        .from("connections")
+        .select(`
+          id,
+          created_at,
+          requester:profiles!connections_requester_id_fkey (
+            id,
+            username,
+            avatar,
+            bio
+          )
+        `)
+        .eq("receiver_id", currentUserId)
+        .eq("status", "pending")
+        .order("created_at", { ascending: false });
+
+      if (error) {
+        console.error("Error fetching pending requests:", error);
+        return [];
+      }
+
+      return (data || []).map((r: any) => {
+        const reqProf = Array.isArray(r.requester) ? r.requester[0] : r.requester;
+        return {
+          id: r.id,
+          created_at: r.created_at,
+          requester: reqProf,
+        };
+      });
+    } catch (err) {
+      console.error("Failed to load incoming requests:", err);
+      return [];
     }
   },
 

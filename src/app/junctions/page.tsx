@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useGuestUser } from "@/hooks/useGuestUser";
+import { useUser } from "@/hooks/useUser";
 import { Navbar } from "@/components/layout/Navbar";
 import { JunctionCard } from "@/components/lobby/JunctionCard";
 import { CreateJunctionModal } from "@/components/lobby/CreateJunctionModal";
@@ -23,7 +24,8 @@ import {
   Languages,
   Mic,
   MapPin,
-  Compass
+  Compass,
+  Shield,
 } from "lucide-react";
 
 const PUBLIC_FILTERS = [
@@ -48,6 +50,7 @@ const CATEGORY_FILTERS = [
 
 export default function JunctionsPage() {
   const router = useRouter();
+  const { user } = useUser();
   const {
     guest,
     hasCompletedOnboarding,
@@ -104,7 +107,15 @@ export default function JunctionsPage() {
 
     poll();
 
-    // Instant Realtime updates when users join/leave any room or rooms change
+    // Debounced Realtime updates when users join/leave any room or rooms change
+    let debounceTimer: NodeJS.Timeout | null = null;
+    const triggerDebouncedFetch = () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        fetchJunctions();
+      }, 1500);
+    };
+
     const channelId = `junctions_hub_${Math.random().toString(36).substring(2, 7)}`;
     const channel = supabase
       .channel(channelId)
@@ -112,25 +123,26 @@ export default function JunctionsPage() {
         "postgres_changes",
         { event: "*", schema: "public", table: "junction_participants" },
         () => {
-          fetchJunctions();
+          triggerDebouncedFetch();
         }
       )
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "junctions" },
         () => {
-          fetchJunctions();
+          triggerDebouncedFetch();
         }
       )
       .subscribe();
 
     const handleFocus = () => {
-      fetchJunctions();
+      triggerDebouncedFetch();
     };
     window.addEventListener("focus", handleFocus);
 
     return () => {
       if (abortController) abortController.abort();
+      if (debounceTimer) clearTimeout(debounceTimer);
       clearTimeout(timeoutId);
       window.removeEventListener("focus", handleFocus);
       supabase.removeChannel(channel);
@@ -193,6 +205,21 @@ export default function JunctionsPage() {
         <Navbar totalOnline={totalOnline} />
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 py-3 sm:py-6">
+        {/* Platform Suspension Banner */}
+        {user?.isBanned && (
+          <div className="mb-4 p-4 rounded-2xl bg-rose-500/10 border border-rose-500/30 flex items-center gap-3 text-rose-300">
+            <div className="w-10 h-10 rounded-xl bg-rose-500/20 text-rose-400 flex items-center justify-center shrink-0 border border-rose-500/30">
+              <Shield size={20} />
+            </div>
+            <div className="flex-1">
+              <h4 className="text-sm font-semibold text-rose-200">Account Suspended</h4>
+              <p className="text-xs text-rose-300/90 font-light mt-0.5">
+                {user.bannedReason || "Your account has been suspended by YapClub moderation. You cannot join voice rooms or create new rooms."}
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* Sleek Top Header & Action Row */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3 sm:mb-5">
           <div className="flex items-center justify-between w-full sm:w-auto">
@@ -259,8 +286,16 @@ export default function JunctionsPage() {
             </div>
             
             <button
-              onClick={() => setIsCreateModalOpen(true)}
-              className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-[13px] shadow-md shadow-indigo-600/20 transition-all flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 whitespace-nowrap"
+              onClick={() => {
+                if (user?.isBanned) return;
+                setIsCreateModalOpen(true);
+              }}
+              disabled={user?.isBanned}
+              className={`w-full sm:w-auto px-4 py-2.5 rounded-xl text-white font-semibold text-[13px] shadow-md transition-all flex items-center justify-center gap-1.5 whitespace-nowrap ${
+                user?.isBanned
+                  ? "bg-rose-500/10 border border-rose-500/20 text-rose-400 cursor-not-allowed opacity-60"
+                  : "bg-indigo-600 hover:bg-indigo-500 shadow-indigo-600/20 cursor-pointer active:scale-95"
+              }`}
             >
               <Plus size={16} />
               <span>Create Room</span>
@@ -371,7 +406,7 @@ export default function JunctionsPage() {
     </PullToRefresh>
 
     {/* Mobile FAB for Create Room */}
-    {activeTab === "private" && (
+    {activeTab === "private" && !user?.isBanned && (
       <button
         onClick={() => setIsCreateModalOpen(true)}
         className="sm:hidden fixed bottom-6 right-5 z-40 w-14 h-14 rounded-full bg-indigo-600 text-white flex items-center justify-center shadow-lg shadow-indigo-600/30 active:scale-95 transition-transform"

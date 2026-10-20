@@ -46,7 +46,7 @@ export async function POST(
 ) {
   try {
     const body = await request.json();
-    const { action, participant, identity, moderatorIdentity, targetIdentity, modAction, isLocked, updates } = body;
+    const { action, participant, identity, moderatorIdentity, moderatorUserId, requesterRole, targetIdentity, modAction, isLocked, updates } = body;
 
     if (action === "join") {
       if (!participant) {
@@ -60,10 +60,28 @@ export async function POST(
     }
 
     if (action === "leave") {
-      if (!identity) {
+      const { identity, identities, name, participantId, userId } = body;
+      const allIdentities: string[] = Array.from(
+        new Set(
+          [
+            identity,
+            name,
+            participantId,
+            userId,
+            ...(Array.isArray(identities) ? identities : []),
+          ].filter(Boolean)
+        )
+      );
+
+      if (allIdentities.length === 0) {
         return NextResponse.json({ error: "Missing identity" }, { status: 400 });
       }
-      await removeParticipantFromJunction(params.id, identity);
+      await removeParticipantFromJunction(params.id, identity || allIdentities[0], {
+        identities: allIdentities,
+        name,
+        participantId,
+        userId,
+      });
       const junction = await getJunctionById(params.id);
       return NextResponse.json({ junction });
     }
@@ -72,7 +90,14 @@ export async function POST(
       if (!moderatorIdentity || !targetIdentity || !modAction) {
         return NextResponse.json({ error: "Missing required moderation parameters" }, { status: 400 });
       }
-      const result = await moderateParticipant(params.id, moderatorIdentity, targetIdentity, modAction);
+      const result = await moderateParticipant(
+        params.id,
+        moderatorIdentity,
+        targetIdentity,
+        modAction,
+        moderatorUserId,
+        requesterRole
+      );
       if (!result.success) {
         return NextResponse.json({ error: result.error }, { status: 403 });
       }
@@ -136,8 +161,9 @@ export async function DELETE(
   try {
     const { searchParams } = new URL(request.url);
     const creatorId = searchParams.get("creatorId") || undefined;
+    const callerRole = searchParams.get("callerRole") || undefined;
 
-    const success = await deleteJunction(params.id, creatorId);
+    const success = await deleteJunction(params.id, creatorId, callerRole);
     if (!success) {
       return NextResponse.json({ error: "Junction not found or unauthorized" }, { status: 404 });
     }

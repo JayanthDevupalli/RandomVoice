@@ -47,8 +47,11 @@ export function ActiveJunctionProvider({ children }: { children: React.ReactNode
     }
   }, []);
 
+  const isMinimizingRef = React.useRef(false);
+
   // Minimize current active room and navigate to explorer or previous page
   const minimize = useCallback(() => {
+    isMinimizingRef.current = true;
     setIsMinimized(true);
     if (pathname.startsWith("/junction/")) {
       router.push("/junctions");
@@ -57,6 +60,7 @@ export function ActiveJunctionProvider({ children }: { children: React.ReactNode
 
   // Maximize room back to full-screen stage
   const maximize = useCallback(() => {
+    isMinimizingRef.current = false;
     setIsMinimized(false);
     if (activeJunctionId) {
       router.push(`/junction/${activeJunctionId}`);
@@ -65,24 +69,31 @@ export function ActiveJunctionProvider({ children }: { children: React.ReactNode
 
   // Completely leave the junction
   const leaveJunction = useCallback(() => {
+    isMinimizingRef.current = false;
     setActiveJunctionId(null);
     setIsMinimized(false);
+    if (typeof window !== "undefined") {
+      sessionStorage.removeItem("yapclub_active_junction_id");
+    }
     if (pathname.startsWith("/junction/")) {
-      router.push("/junctions");
+      router.replace("/junctions");
     }
   }, [pathname, router, setActiveJunctionId]);
 
   // Auto-sync minimization with current route:
-  // If user is on the active junction route, it must NOT be minimized.
-  // If user navigated away from the junction route while having an active call, it should be minimized.
   useEffect(() => {
     if (!activeJunctionId) return;
 
-    const isOnActiveJunctionPage = pathname === `/junction/${activeJunctionId}`;
-    if (isOnActiveJunctionPage && isMinimized) {
-      setIsMinimized(false);
-    } else if (!isOnActiveJunctionPage && !isMinimized && !pathname.startsWith("/junction/")) {
-      setIsMinimized(true);
+    if (!pathname.startsWith("/junction/")) {
+      isMinimizingRef.current = false;
+      if (!isMinimized) {
+        setIsMinimized(true);
+      }
+    } else {
+      // Whenever the user is on any junction room URL, ensure the room is un-minimized and fully visible
+      if (isMinimized && !isMinimizingRef.current) {
+        setIsMinimized(false);
+      }
     }
   }, [pathname, activeJunctionId, isMinimized]);
 

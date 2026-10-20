@@ -24,7 +24,9 @@ import {
   Reply,
   Volume2,
   ArrowDown,
-  PhoneCall
+  PhoneCall,
+  Lock,
+  UserPlus
 } from "lucide-react";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import { useRouter } from "next/navigation";
@@ -39,7 +41,7 @@ import {
   serializeVoiceMessage,
   ParsedMessage 
 } from "@/lib/chat-utils";
-import { socialService } from "@/lib/social-service";
+import { socialService, RelationshipStatus } from "@/lib/social-service";
 import { RoomInviteCard } from "@/components/chat/RoomInviteCard";
 
 export default function MessagesPage() {
@@ -53,6 +55,8 @@ export default function MessagesPage() {
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<any[]>([]);
   const [inputMessage, setInputMessage] = useState("");
+  const [targetRelationship, setTargetRelationship] = useState<RelationshipStatus | null>(null);
+  const [isRelationshipLoading, setIsRelationshipLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
@@ -224,9 +228,6 @@ export default function MessagesPage() {
           }).sort((a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime());
 
           setConversations(formattedFallback);
-          if (formattedFallback.length > 0 && typeof window !== "undefined" && window.innerWidth >= 640) {
-            setActiveConversationId(prev => prev || formattedFallback[0].id);
-          }
           setIsLoading(false);
           return;
         }
@@ -266,12 +267,6 @@ export default function MessagesPage() {
             }).sort((a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime());
 
             setConversations(formatted);
-
-            // On desktop (>= 640px), auto-select first conversation if none selected
-            // On mobile (< 640px), stay on conversation list view
-            if (formatted.length > 0 && typeof window !== "undefined" && window.innerWidth >= 640) {
-              setActiveConversationId(prev => prev || formatted[0].id);
-            }
           }
         }
       } catch (err) {
@@ -367,6 +362,43 @@ export default function MessagesPage() {
   }, [activeConversationId, markAsRead, messages]);
 
   const activeConversation = conversations.find(c => c.id === activeConversationId);
+
+  // Check relationship status for 1-on-1 direct conversations to ensure connection is accepted
+  useEffect(() => {
+    if (!activeConversation || activeConversation.type === "group" || !activeConversation.other_user?.id || !user?.id) {
+      setTargetRelationship(null);
+      return;
+    }
+
+    const otherId = activeConversation.other_user.id;
+    let isSubscribed = true;
+    setIsRelationshipLoading(true);
+
+    const checkRelationship = async () => {
+      try {
+        const rel = await socialService.getRelationship(user.id, otherId);
+        if (isSubscribed) {
+          setTargetRelationship(rel);
+        }
+      } catch (err) {
+        console.error("Failed to check DM relationship:", err);
+      } finally {
+        if (isSubscribed) setIsRelationshipLoading(false);
+      }
+    };
+
+    checkRelationship();
+
+    const handleSocialUpdate = () => {
+      checkRelationship();
+    };
+    window.addEventListener("yapclub_social_updated", handleSocialUpdate);
+
+    return () => {
+      isSubscribed = false;
+      window.removeEventListener("yapclub_social_updated", handleSocialUpdate);
+    };
+  }, [activeConversationId, activeConversation?.other_user?.id, user?.id]);
 
   // Load saved contact nicknames (local storage + Supabase user_metadata backup)
   useEffect(() => {
@@ -605,6 +637,12 @@ export default function MessagesPage() {
         return;
       }
 
+      // Connection acceptance guard
+      if (activeConversation?.type !== "group" && targetRelationship && !targetRelationship.isAcceptedConnection) {
+        alert("Messaging is locked until the follow request is accepted by both users.");
+        return;
+      }
+
       const reader = new FileReader();
       reader.onloadend = async () => {
         const base64Audio = reader.result as string;
@@ -671,9 +709,13 @@ export default function MessagesPage() {
     cancelEditing();
 
     try {
+      const { data: { session } } = await supabase.auth.getSession();
       const res = await fetch("/api/messages", {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+        },
         body: JSON.stringify({ id: messageId, content: newContent, userId: user.id }),
       });
 
@@ -695,8 +737,12 @@ export default function MessagesPage() {
     setIsDeletingMessage(false);
 
     try {
+      const { data: { session } } = await supabase.auth.getSession();
       const res = await fetch(`/api/messages?id=${targetId}&userId=${user.id}`, {
         method: "DELETE",
+        headers: {
+          ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+        },
       });
 
       if (!res.ok) {
@@ -828,10 +874,21 @@ export default function MessagesPage() {
       return;
     }
 
+    if (user?.isBanned) {
+      alert("Your account is currently suspended. Messaging is disabled.");
+      return;
+    }
+
     // Block guard
     const targetUserId = activeConversation?.other_user?.id;
     if (targetUserId && (blockedUsers.includes(targetUserId) || blockedMeUsers.includes(targetUserId))) {
       alert("Cannot send messages in this conversation.");
+      return;
+    }
+
+    // Connection acceptance guard
+    if (activeConversation?.type !== "group" && targetRelationship && !targetRelationship.isAcceptedConnection) {
+      alert("Messaging is locked until the follow request is accepted by both users.");
       return;
     }
 
@@ -1166,17 +1223,17 @@ export default function MessagesPage() {
                               avatar: peerAvatar,
                             });
                           }}
-                          disabled={callState !== "idle" || isBlocked || isBlockedByOther}
+                          disabled={callState !== "idle" || isBlocked || isBlockedByOther || Boolean(targetRelationship && !targetRelationship.isAcceptedConnection)}
                           className={`px-3 py-1.5 rounded-xl flex items-center gap-1.5 transition-all active:scale-95 text-xs font-semibold shadow-sm ${
                             callState !== "idle" && activeCall?.conversationId === activeConversationId
                               ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 animate-pulse"
-                              : isBlocked || isBlockedByOther
+                              : isBlocked || isBlockedByOther || (targetRelationship && !targetRelationship.isAcceptedConnection)
                               ? "opacity-50 cursor-not-allowed bg-white/5 text-slate-500 border border-white/5"
                               : "text-slate-200 hover:text-white bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/30"
                           }`}
-                          title={isBlocked ? "Cannot call blocked contact" : isBlockedByOther ? "User is unavailable" : "Start Voice Call"}
+                          title={isBlocked ? "Cannot call blocked contact" : isBlockedByOther ? "User is unavailable" : (targetRelationship && !targetRelationship.isAcceptedConnection) ? "Follow request must be accepted before calling" : "Start Voice Call"}
                         >
-                          <PhoneCall size={15} className={isBlocked || isBlockedByOther ? "text-slate-500" : "text-indigo-400"} />
+                          <PhoneCall size={15} className={isBlocked || isBlockedByOther || (targetRelationship && !targetRelationship.isAcceptedConnection) ? "text-slate-500" : "text-indigo-400"} />
                           <span className="hidden sm:inline">Voice Call</span>
                         </button>
                       )}
@@ -1485,13 +1542,23 @@ export default function MessagesPage() {
 
               {/* Chat Input or Blocked Notice */}
               {(() => {
+                const isGroup = activeConversation?.type === "group";
                 const otherUserId = activeConversation?.other_user?.id;
-                const isBlocked = otherUserId && activeConversation?.type !== "group" 
+                const isBlocked = otherUserId && !isGroup 
                   ? blockedUsers.includes(otherUserId) 
                   : false;
-                const isBlockedByOther = otherUserId && activeConversation?.type !== "group"
+                const isBlockedByOther = otherUserId && !isGroup
                   ? blockedMeUsers.includes(otherUserId)
                   : false;
+
+                if (user?.isBanned) {
+                  return (
+                    <div className="p-4 border-t border-white/5 bg-rose-950/30 backdrop-blur-md flex items-center justify-center gap-2 text-rose-300 text-xs sm:text-sm shrink-0">
+                      <ShieldAlert size={18} className="text-rose-400 shrink-0" />
+                      <span>Your account is suspended. Messaging is disabled.</span>
+                    </div>
+                  );
+                }
 
                 if (isBlockedByOther) {
                   return (
@@ -1515,6 +1582,89 @@ export default function MessagesPage() {
                       >
                         Unblock
                       </button>
+                    </div>
+                  );
+                }
+
+                if (!isGroup && otherUserId && targetRelationship && !targetRelationship.isAcceptedConnection) {
+                  return (
+                    <div className="p-3 sm:p-4 border-t border-white/5 bg-black/40 backdrop-blur-md flex flex-col sm:flex-row items-center justify-between gap-3 shrink-0 animate-in fade-in">
+                      <div className="flex items-center gap-2.5 text-amber-300 text-xs sm:text-sm">
+                        <Lock size={18} className="text-amber-400 shrink-0" />
+                        <span>
+                          {targetRelationship.hasPendingRequestFromMe
+                            ? "Follow request sent. Messaging is locked until they accept."
+                            : targetRelationship.hasPendingRequestFromThem
+                            ? "This user sent you a follow request. Accept to start messaging."
+                            : "Follow request must be accepted before you can send messages."}
+                        </span>
+                      </div>
+                      {targetRelationship.hasPendingRequestFromThem ? (
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              if (!user || !otherUserId) return;
+                              const res = await socialService.acceptFollowRequest(user.id, otherUserId, targetRelationship.incomingRequestId);
+                              if (res.success) {
+                                const rel = await socialService.getRelationship(user.id, otherUserId);
+                                setTargetRelationship(rel);
+                              }
+                            }}
+                            className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold active:scale-95 transition-all shadow-md shrink-0 cursor-pointer flex items-center gap-1.5"
+                          >
+                            <Check size={14} />
+                            <span>Accept Request</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              if (!user || !otherUserId) return;
+                              const res = await socialService.declineFollowRequest(user.id, otherUserId, targetRelationship.incomingRequestId);
+                              if (res.success) {
+                                const rel = await socialService.getRelationship(user.id, otherUserId);
+                                setTargetRelationship(rel);
+                              }
+                            }}
+                            className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-rose-500/20 text-slate-300 hover:text-rose-300 border border-white/10 text-xs font-semibold active:scale-95 transition-all shrink-0 cursor-pointer"
+                          >
+                            Decline
+                          </button>
+                        </div>
+                      ) : targetRelationship.hasPendingRequestFromMe ? (
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (!user || !otherUserId) return;
+                            const res = await socialService.cancelFollowRequest(user.id, otherUserId);
+                            if (res.success) {
+                              const rel = await socialService.getRelationship(user.id, otherUserId);
+                              setTargetRelationship(rel);
+                            }
+                          }}
+                          className="px-3.5 py-1.5 rounded-xl bg-white/10 hover:bg-rose-500/20 text-slate-300 hover:text-rose-300 border border-white/10 text-xs font-semibold active:scale-95 transition-all shrink-0 cursor-pointer"
+                        >
+                          Cancel Request
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (!user || !otherUserId) return;
+                            const res = await socialService.followUser(user.id, otherUserId);
+                            if (res.success) {
+                              const rel = await socialService.getRelationship(user.id, otherUserId);
+                              setTargetRelationship(rel);
+                            } else if (res.error) {
+                              alert(res.error);
+                            }
+                          }}
+                          className="px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold active:scale-95 transition-all shadow-md shrink-0 cursor-pointer flex items-center gap-1.5"
+                        >
+                          <UserPlus size={14} />
+                          <span>Send Follow Request</span>
+                        </button>
+                      )}
                     </div>
                   );
                 }

@@ -1,5 +1,26 @@
-import { supabase } from "./supabase";
-import { Junction, JunctionParticipant } from "./types";
+import { supabase as anonSupabase } from "./supabase";
+import { createClient } from "@supabase/supabase-js";
+import { Junction, JunctionParticipant, UserRole } from "./types";
+import { kickLiveKitParticipant, muteLiveKitParticipant } from "./livekit-server";
+
+const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+const supabase = (serviceKey && url)
+  ? createClient(url, serviceKey, { auth: { autoRefreshToken: false, persistSession: false } })
+  : anonSupabase;
+
+export function resolvePlatformRole(username?: string, rawRole?: string): UserRole {
+  if (username) {
+    const clean = username.trim().toLowerCase();
+    if (clean === "jayanthadmin" || clean === "jayanth") {
+      return "super_admin";
+    }
+  }
+  if (rawRole === "super_admin" || rawRole === "admin" || rawRole === "manager") {
+    return rawRole as UserRole;
+  }
+  return "user";
+}
 
 // ─── Helpers: DB row ↔ TypeScript mapping ───────────────────────────────────
 
@@ -37,7 +58,20 @@ interface ParticipantRow {
   reported_by: string[];
 }
 
-function rowToJunction(row: JunctionRow, participants: ParticipantRow[]): Junction {
+interface ParticipantProfile {
+  username: string;
+  displayName: string;
+  avatar?: string;
+  cardBgColor?: string;
+  role?: UserRole;
+}
+
+function rowToJunction(
+  row: JunctionRow,
+  participants: ParticipantRow[],
+  roleMap?: Record<string, UserRole>,
+  profileMap?: Record<string, ParticipantProfile>
+): Junction {
   return {
     id: row.id,
     name: row.name,
@@ -53,7 +87,7 @@ function rowToJunction(row: JunctionRow, participants: ParticipantRow[]): Juncti
     moderatorIdentity: row.moderator_identity,
     isLocked: row.is_locked,
     bannedIdentities: row.banned_identities || [],
-    participants: participants.map(rowToParticipant),
+    participants: participants.map((p) => rowToParticipant(p, roleMap, profileMap)),
   };
 }
 
@@ -80,20 +114,43 @@ function decodeParticipantColor(rawColor?: string): { color: string; cardBgColor
   };
 }
 
-function rowToParticipant(row: ParticipantRow): JunctionParticipant {
+function rowToParticipant(
+  row: ParticipantRow,
+  roleMap?: Record<string, UserRole>,
+  profileMap?: Record<string, ParticipantProfile>
+): JunctionParticipant {
   const decoded = decodeParticipantColor(row.color);
-  const cardBgColor = (row.card_bg_color && row.card_bg_color !== "#465B73")
-    ? row.card_bg_color
-    : (decoded.cardBgColor && decoded.cardBgColor !== "#465B73" ? decoded.cardBgColor : (row.card_bg_color || decoded.cardBgColor || "#465B73"));
+  const cleanId = (row.identity || "").toLowerCase();
+  const userProfile = profileMap?.[cleanId];
+
+  // Resolve cardBgColor: userProfile theme > row.card_bg_color > decoded cardBgColor > default
+  let cardBgColor = "#465B73";
+  if (userProfile?.cardBgColor && userProfile.cardBgColor !== "#465B73") {
+    cardBgColor = userProfile.cardBgColor;
+  } else if (row.card_bg_color && row.card_bg_color !== "#465B73") {
+    cardBgColor = row.card_bg_color;
+  } else if (decoded.cardBgColor && decoded.cardBgColor !== "#465B73") {
+    cardBgColor = decoded.cardBgColor;
+  } else {
+    cardBgColor = row.card_bg_color || decoded.cardBgColor || "#465B73";
+  }
+
+  const userRole = resolvePlatformRole(row.identity, roleMap?.[cleanId] || userProfile?.role);
+  const resolvedName = userProfile?.displayName || row.name || row.identity;
+  const resolvedUsername = userProfile?.username || row.identity;
+  const resolvedAvatar = userProfile?.avatar ? userProfile.avatar : (row.avatar || "zap");
 
   return {
     id: row.id,
     identity: row.identity,
-    name: row.name,
-    avatar: row.avatar,
+    name: resolvedName,
+    username: resolvedUsername,
+    displayName: resolvedName,
+    avatar: resolvedAvatar,
     color: decoded.color,
     cardBgColor,
     role: row.role as JunctionParticipant["role"],
+    userRole,
     isMuted: row.is_muted,
     isMutedByMod: row.is_muted_by_mod,
     isSpeaking: row.is_speaking,
@@ -120,16 +177,77 @@ async function fetchJunctionWithParticipants(junctionId: string): Promise<Juncti
     .eq("junction_id", junctionId)
     .order("joined_at", { ascending: true });
 
-  const participants = (pRows || []) as ParticipantRow[];
-  if (jRow.current_count !== participants.length) {
-    // Keep cached DB count synchronized
-    await supabase
-      .from("junctions")
-      .update({ current_count: participants.length })
-      .eq("id", junctionId);
+  const rawParticipants = (pRows || []) as ParticipantRow[];
+  const identities = Array.from(new Set(rawParticipants.map((p) => p.identity).filter(Boolean)));
+  
+  const roleMap: Record<string, UserRole> = {};
+  const profileMap: Record<string, ParticipantProfile> = {};
+  const bannedUsernames = new Set<string>();
+
+  // Fetch verified platform profiles ONLY for current participants in this junction
+  const searchIdentities = Array.from(
+    new Set(
+      identities
+        .map((id) => (id || "").trim())
+        .filter((id) => /^[a-zA-Z0-9_.-]+$/.test(id))
+        .flatMap((id) => [id, id.toLowerCase()])
+    )
+  );
+
+  if (searchIdentities.length > 0) {
+    try {
+      const { data: profs } = await supabase
+        .from("profiles")
+        .select("username, display_name, avatar, card_bg_color, role, is_banned, social_links")
+        .in("username", searchIdentities);
+
+      for (const pr of profs || []) {
+        if (pr.username) {
+          const isBanned = Boolean(pr.is_banned ?? pr.social_links?.is_banned);
+          if (isBanned) {
+            bannedUsernames.add(pr.username.toLowerCase());
+          }
+
+          const resolved = resolvePlatformRole(
+            pr.username,
+            pr.role || pr.social_links?.role
+          );
+          roleMap[pr.username.toLowerCase()] = resolved;
+          const dName = pr.display_name || pr.social_links?.display_name || pr.username;
+          const cardBg = (pr.card_bg_color && pr.card_bg_color !== "#465B73")
+            ? pr.card_bg_color
+            : (pr.social_links?.card_bg_color || pr.card_bg_color || "#465B73");
+
+          const pInfo: ParticipantProfile = {
+            username: pr.username,
+            displayName: dName,
+            avatar: pr.avatar,
+            cardBgColor: cardBg,
+            role: resolved,
+          };
+
+          profileMap[pr.username.toLowerCase()] = pInfo;
+          if (dName) {
+            roleMap[dName.toLowerCase()] = resolved;
+            profileMap[dName.toLowerCase()] = pInfo;
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Error fetching participant platform profiles:", e);
+    }
   }
 
-  return rowToJunction(jRow as JunctionRow, participants);
+  // Filter out any suspended users and purge from this room
+  const participants = rawParticipants.filter((p) => {
+    if (bannedUsernames.has(p.identity.toLowerCase())) {
+      supabase.from("junction_participants").delete().eq("id", p.id).then();
+      return false;
+    }
+    return true;
+  });
+
+  return rowToJunction(jRow as JunctionRow, participants, roleMap, profileMap);
 }
 
 // ─── Sync current_count helper ──────────────────────────────────────────────
@@ -161,28 +279,82 @@ export async function getAllJunctions(): Promise<Junction[]> {
     .select("*")
     .order("joined_at", { ascending: true });
 
+  const rawParticipants = (pRows || []) as ParticipantRow[];
+  const allIdentities = Array.from(new Set(rawParticipants.map((p: any) => p.identity).filter(Boolean))) as string[];
+  
+  const roleMap: Record<string, UserRole> = {};
+  const profileMap: Record<string, ParticipantProfile> = {};
+  const bannedUsernames = new Set<string>();
+
+  // Fetch verified platform profiles ONLY for active room participants across junctions
+  const searchIdentities = Array.from(
+    new Set(
+      allIdentities
+        .map((id) => (id || "").trim())
+        .filter((id) => /^[a-zA-Z0-9_.-]+$/.test(id))
+        .flatMap((id) => [id, id.toLowerCase()])
+    )
+  );
+
+  if (searchIdentities.length > 0) {
+    try {
+      const { data: profs } = await supabase
+        .from("profiles")
+        .select("username, display_name, avatar, card_bg_color, role, is_banned, social_links")
+        .in("username", searchIdentities);
+
+      for (const pr of profs || []) {
+        if (pr.username) {
+          const isBanned = Boolean(pr.is_banned ?? pr.social_links?.is_banned);
+          if (isBanned) {
+            bannedUsernames.add(pr.username.toLowerCase());
+          }
+
+          const resolved = resolvePlatformRole(
+            pr.username,
+            pr.role || pr.social_links?.role
+          );
+          roleMap[pr.username.toLowerCase()] = resolved;
+          const dName = pr.display_name || pr.social_links?.display_name || pr.username;
+          const cardBg = (pr.card_bg_color && pr.card_bg_color !== "#465B73")
+            ? pr.card_bg_color
+            : (pr.social_links?.card_bg_color || pr.card_bg_color || "#465B73");
+
+          const pInfo: ParticipantProfile = {
+            username: pr.username,
+            displayName: dName,
+            avatar: pr.avatar,
+            cardBgColor: cardBg,
+            role: resolved,
+          };
+
+          profileMap[pr.username.toLowerCase()] = pInfo;
+          if (dName) {
+            roleMap[dName.toLowerCase()] = resolved;
+            profileMap[dName.toLowerCase()] = pInfo;
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Error fetching lobby participant platform profiles:", e);
+    }
+  }
+
+  // Filter out any suspended users from participant rows and purge from DB
   const participantsByJunction: Record<string, ParticipantRow[]> = {};
-  for (const p of (pRows || []) as ParticipantRow[]) {
+  for (const p of rawParticipants) {
+    if (bannedUsernames.has(p.identity.toLowerCase())) {
+      supabase.from("junction_participants").delete().eq("id", p.id).then();
+      continue;
+    }
     if (!participantsByJunction[p.junction_id]) {
       participantsByJunction[p.junction_id] = [];
     }
     participantsByJunction[p.junction_id].push(p);
   }
 
-  // Synchronize any out-of-sync current_count columns in the background
-  for (const row of (jRows as JunctionRow[])) {
-    const realCount = (participantsByJunction[row.id] || []).length;
-    if (row.current_count !== realCount) {
-      supabase
-        .from("junctions")
-        .update({ current_count: realCount })
-        .eq("id", row.id)
-        .then();
-    }
-  }
-
   return (jRows as JunctionRow[]).map((row) =>
-    rowToJunction(row, participantsByJunction[row.id] || [])
+    rowToJunction(row, participantsByJunction[row.id] || [], roleMap, profileMap)
   );
 }
 
@@ -231,165 +403,229 @@ export async function createJunction(data: {
   return junction!;
 }
 
+const isUUID = (str: string) =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
+
+export async function checkPlatformSuspension(identity?: string, id?: string): Promise<boolean> {
+  const identifiers = Array.from(new Set([identity, id].filter(Boolean))) as string[];
+  if (identifiers.length === 0) return false;
+
+  for (const identifier of identifiers) {
+    try {
+      let query = supabase.from("profiles").select("*");
+      if (isUUID(identifier)) {
+        query = query.or(`id.eq.${identifier},username.ilike.${identifier}`);
+      } else {
+        query = query.ilike("username", identifier);
+      }
+      const { data: profile } = await query.maybeSingle();
+      if (profile) {
+        const isBanned = Boolean(
+          (profile as any).is_banned ?? profile.social_links?.is_banned
+        );
+        if (isBanned) return true;
+      }
+    } catch (e) {
+      console.error("Error verifying suspension status for", identifier, e);
+    }
+  }
+  return false;
+}
+
 export async function addParticipantToJunction(
   junctionId: string,
   participant: Omit<JunctionParticipant, "joinedAt">
 ): Promise<{ success: boolean; error?: string; junction?: Junction }> {
+  const cleanParticipantIdentity = (participant.identity || "").trim().toLowerCase();
+
+  // Check if participant is platform-suspended / banned by YapClub moderation
+  const isSuspended = await checkPlatformSuspension(participant.identity, participant.id);
+  if (isSuspended) {
+    return {
+      success: false,
+      error: "Your account has been suspended by YapClub moderation.",
+    };
+  }
+
   const junction = await fetchJunctionWithParticipants(junctionId);
 
   if (!junction) {
     return { success: false, error: "Junction not found" };
   }
 
-  // Check if participant is banned
-  if (junction.bannedIdentities && junction.bannedIdentities.includes(participant.identity)) {
+  // Check if participant is banned from this junction
+  if (junction.bannedIdentities && junction.bannedIdentities.some((b) => (b || "").trim().toLowerCase() === cleanParticipantIdentity)) {
     return { success: false, error: "You have been banned from this junction by the moderator." };
   }
 
   // 0% Ghosting Guarantee: PREEMPTIVELY remove this identity from ALL OTHER junctions before joining this one.
-  // This ensures that even if the browser crashes or disconnects without sending a 'leave' beacon,
-  // the user's identity is strictly limited to 1 active seat across the entire platform.
   await supabase
     .from("junction_participants")
     .delete()
     .eq("identity", participant.identity)
     .neq("junction_id", junctionId);
 
-  const isAlreadyPresent = junction.participants.some((p) => p.identity === participant.identity);
+  const existing = junction.participants.find(
+    (p) => (p.identity || "").trim().toLowerCase() === cleanParticipantIdentity
+  );
+  const isAlreadyPresent = Boolean(existing);
 
   if (junction.currentCount >= junction.maxParticipants && !isAlreadyPresent) {
     return { success: false, error: "Junction is full (Max 7 seats reached)" };
   }
 
-  const isCreator = participant.identity === junction.creatorId;
+  const isCreator = cleanParticipantIdentity === (junction.creatorId || "").trim().toLowerCase();
 
   if (junction.isLocked && !isAlreadyPresent && !isCreator) {
     return { success: false, error: "This room is locked by the moderator." };
   }
 
   // Dynamic host assignment: first person to join an empty room becomes the moderator/host.
-  // This applies whether moderator_identity is empty (new room) or the current moderator has left.
   const isRoomEmpty = junction.participants.length === 0;
   const currentModPresent = junction.participants.some((p) => p.role === "moderator");
   
-  // A participant becomes a mod if they are the creator, OR if they were already the mod, OR if there's no mod present.
   let isMod = false;
   if (isCreator) {
     isMod = true;
-  } else if (isAlreadyPresent && junction.participants.find(p => p.identity === participant.identity)?.role === "moderator") {
+  } else if (isAlreadyPresent && existing?.role === "moderator") {
     isMod = true;
   } else if (isRoomEmpty || !currentModPresent) {
     isMod = true;
   }
 
-  // Determine cardBgColor from participant or look up registered user profile
+  // Determine avatar and cardBgColor from participant or look up registered user profile
+  let resolvedAvatar = participant.avatar;
   let cardBgColor = participant.cardBgColor;
 
-  if (!cardBgColor || cardBgColor === "#465B73") {
-    try {
-      const { data: prof } = await supabase
-        .from("profiles")
-        .select("card_bg_color, social_links")
-        .or(`username.eq.${participant.identity},id.eq.${participant.id || participant.identity}`)
-        .maybeSingle();
+  try {
+    const isIdUUID = isUUID(participant.id || "");
+    const isIdentUUID = isUUID(participant.identity || "");
+    const hasValidUsername = cleanParticipantIdentity && /^[a-zA-Z0-9_.-]+$/.test(cleanParticipantIdentity);
 
+    let profQuery = supabase.from("profiles").select("*");
+    if (isIdUUID || isIdentUUID) {
+      profQuery = profQuery.eq("id", isIdUUID ? participant.id! : participant.identity!);
+    } else if (hasValidUsername) {
+      profQuery = profQuery.ilike("username", cleanParticipantIdentity);
+    } else {
+      profQuery = null as any;
+    }
+
+    if (profQuery) {
+      const { data: prof } = await profQuery.maybeSingle();
       if (prof) {
+        if (prof.avatar) {
+          resolvedAvatar = prof.avatar;
+        }
         if (prof.card_bg_color && prof.card_bg_color !== "#465B73") {
           cardBgColor = prof.card_bg_color;
         } else if (prof.social_links?.card_bg_color) {
           cardBgColor = prof.social_links.card_bg_color;
         }
       }
-    } catch (e) {
-      console.error("Error fetching user profile card theme:", e);
     }
+  } catch (e) {
+    console.error("Error fetching user profile card theme & avatar:", e);
   }
 
-  const finalBgColor = cardBgColor || "#465B73";
+  if (!resolvedAvatar) {
+    resolvedAvatar = existing?.avatar || "zap";
+  }
+  const finalBgColor = cardBgColor || existing?.cardBgColor || "#465B73";
 
-  if (!isAlreadyPresent) {
-    // Insert new participant securely
-    const shouldModMute = Boolean(participant.isMutedByMod);
-    const encodedColor = encodeParticipantColor(
-      participant.color,
-      finalBgColor
-    );
+  // Upsert participant atomically to avoid duplicate key conflicts or race conditions
+  const shouldKeepModMute = Boolean(existing?.isMutedByMod || participant.isMutedByMod);
+  const encodedColor = encodeParticipantColor(
+    participant.color || existing?.color,
+    finalBgColor !== "#465B73" ? finalBgColor : existing?.cardBgColor
+  );
 
-    const { error: insertError } = await supabase.from("junction_participants").insert({
-      id: "p_" + Date.now() + "_" + Math.random().toString(36).substr(2, 5), // Securely generate fresh session ID
+  const { error: upsertError } = await supabase.from("junction_participants").upsert(
+    {
+      id: existing?.id || ("p_" + Date.now() + "_" + Math.random().toString(36).substr(2, 5)),
       junction_id: junctionId,
       identity: participant.identity,
       name: participant.name,
-      avatar: participant.avatar || "zap",
+      avatar: resolvedAvatar,
       color: encodedColor,
-      role: isMod ? "moderator" : (participant.role || "speaker"),
-      is_muted: shouldModMute ? true : (participant.isMuted !== undefined ? participant.isMuted : true), // Default to muted on entry
-      is_muted_by_mod: shouldModMute,
+      card_bg_color: finalBgColor,
+      role: isMod ? "moderator" : (existing?.role || participant.role || "speaker"),
+      is_muted: shouldKeepModMute ? true : (existing?.isMuted !== undefined ? existing.isMuted : (participant.isMuted !== undefined ? participant.isMuted : true)),
+      is_muted_by_mod: shouldKeepModMute,
       is_speaking: false,
-      joined_at: Date.now(),
+      joined_at: existing?.joinedAt || Date.now(),
       connection_quality: participant.connectionQuality || "excellent",
-    });
+    },
+    { onConflict: "junction_id,identity" }
+  );
 
-    if (insertError) {
-      console.error("Failed to insert participant:", insertError);
-      return { success: false, error: "Database error: " + insertError.message };
-    }
+  if (upsertError) {
+    console.error("Failed to upsert participant:", upsertError);
+    return { success: false, error: "Database error: " + upsertError.message };
+  }
 
-    await syncCount(junctionId);
+  await syncCount(junctionId);
 
-    // If this participant became the host, update the junction's moderator_identity for legacy/fallback
-    if (isMod && junction.moderatorIdentity !== participant.identity) {
-      await supabase
-        .from("junctions")
-        .update({ moderator_identity: participant.identity })
-        .eq("id", junctionId);
-    }
-  } else {
-    // Update existing participant (re-joining) - preserve role and force-mute state!
-    const existing = junction.participants.find((p) => p.identity === participant.identity);
-    const shouldKeepModMute = Boolean(existing?.isMutedByMod || participant.isMutedByMod);
-    const encodedColor = encodeParticipantColor(
-      participant.color || existing?.color,
-      finalBgColor !== "#465B73" ? finalBgColor : existing?.cardBgColor
-    );
-
-    const { error: updateError } = await supabase
-      .from("junction_participants")
-      .update({
-        name: participant.name,
-        avatar: participant.avatar || existing?.avatar || "zap",
-        color: encodedColor,
-        role: isMod ? "moderator" : (existing?.role || participant.role || "speaker"),
-        is_muted_by_mod: shouldKeepModMute,
-        is_muted: shouldKeepModMute ? true : (existing?.isMuted !== undefined ? existing.isMuted : true),
-      })
-      .eq("junction_id", junctionId)
-      .eq("identity", participant.identity);
-
-    if (updateError) {
-      console.error("Failed to update participant:", updateError);
-    }
-
-    // If re-joining and should become host, update moderator_identity
-    if (isMod && junction.moderatorIdentity !== participant.identity) {
-      await supabase
-        .from("junctions")
-        .update({ moderator_identity: participant.identity })
-        .eq("id", junctionId);
-    }
+  // If this participant became the host, update the junction's moderator_identity for legacy/fallback
+  if (isMod && junction.moderatorIdentity !== participant.identity) {
+    await supabase
+      .from("junctions")
+      .update({ moderator_identity: participant.identity })
+      .eq("id", junctionId);
   }
 
   const updated = await fetchJunctionWithParticipants(junctionId);
   return { success: true, junction: updated };
 }
 
-export async function removeParticipantFromJunction(junctionId: string, identity: string) {
-  // Remove the participant
-  await supabase
+export async function removeParticipantFromJunction(
+  junctionId: string,
+  identity: string,
+  extra?: { identities?: string[]; name?: string; participantId?: string; userId?: string }
+) {
+  const targetSet = new Set<string>();
+  if (identity) targetSet.add(identity.trim());
+  if (extra?.name) targetSet.add(extra.name.trim());
+  if (extra?.participantId) targetSet.add(extra.participantId.trim());
+  if (extra?.userId) targetSet.add(extra.userId.trim());
+  if (Array.isArray(extra?.identities)) {
+    extra.identities.forEach((id) => id && targetSet.add(id.trim()));
+  }
+
+  // 1. Fetch current participants of this junction to find matches by identity, name, or id (case-insensitive)
+  const { data: currentParticipants } = await supabase
     .from("junction_participants")
-    .delete()
-    .eq("junction_id", junctionId)
-    .or(`identity.eq.${identity},id.eq.${identity}`);
+    .select("id, identity, name")
+    .eq("junction_id", junctionId);
+
+  const matchedIds = (currentParticipants || [])
+    .filter((p) => {
+      const pIdent = (p.identity || "").toLowerCase().trim();
+      const pName = (p.name || "").toLowerCase().trim();
+      const pId = (p.id || "").toLowerCase().trim();
+      return Array.from(targetSet).some((t) => {
+        const tLower = t.toLowerCase().trim();
+        return pIdent === tLower || pName === tLower || pId === tLower;
+      });
+    })
+    .map((p) => p.id);
+
+  if (matchedIds.length > 0) {
+    await supabase
+      .from("junction_participants")
+      .delete()
+      .in("id", matchedIds);
+  }
+
+  // 2. Direct fallback delete for every target candidate using ilike on identity and name
+  for (const t of Array.from(targetSet)) {
+    if (!t) continue;
+    await supabase
+      .from("junction_participants")
+      .delete()
+      .eq("junction_id", junctionId)
+      .or(`identity.eq.${t},identity.ilike.${t},name.eq.${t},name.ilike.${t},id.eq.${t}`);
+  }
 
   await syncCount(junctionId);
 
@@ -417,7 +653,9 @@ export async function moderateParticipant(
   junctionId: string,
   moderatorIdentity: string,
   targetIdentity: string,
-  action: "mute" | "unmute" | "kick" | "ban" | "promote_mod" | "demote_mod"
+  action: "mute" | "unmute" | "kick" | "ban" | "unban" | "promote_mod" | "demote_mod",
+  moderatorUserId?: string,
+  requesterRole?: UserRole
 ): Promise<{ success: boolean; error?: string; junction?: Junction }> {
   const junction = await fetchJunctionWithParticipants(junctionId);
 
@@ -425,35 +663,114 @@ export async function moderateParticipant(
     return { success: false, error: "Junction not found" };
   }
 
-  const modParticipant = junction.participants.find(p => p.identity === moderatorIdentity);
-  if (!modParticipant || modParticipant.role !== "moderator") {
-    return { success: false, error: "Unauthorized: Only Moderators can perform moderation actions" };
+  // Determine caller platform role
+  let callerRole: UserRole = resolvePlatformRole(moderatorIdentity, requesterRole);
+  if (callerRole === "user") {
+    try {
+      let query = supabase.from("profiles").select("*");
+      if (moderatorUserId && isUUID(moderatorUserId)) {
+        query = query.or(`id.eq.${moderatorUserId},username.ilike.${moderatorIdentity}`);
+      } else {
+        query = query.ilike("username", moderatorIdentity);
+      }
+      const { data: callerProf } = await query.maybeSingle();
+
+      if (callerProf) {
+        callerRole = resolvePlatformRole(callerProf.username, callerProf.role || callerProf.social_links?.role);
+      }
+    } catch (e) {
+      console.error("Error resolving caller platform role:", e);
+    }
+  }
+
+  const isCallerSuperAdmin = callerRole === "super_admin";
+  const isCallerAdmin = isCallerSuperAdmin || callerRole === "admin";
+  const isCallerManager = isCallerAdmin || callerRole === "manager";
+
+  const cleanModId = (moderatorIdentity || "").trim().toLowerCase();
+  const modParticipant = junction.participants.find(
+    (p) => (p.identity || "").trim().toLowerCase() === cleanModId
+  );
+  const isCallerRoomMod = Boolean(modParticipant && modParticipant.role === "moderator");
+
+  if (!isCallerManager && !isCallerRoomMod) {
+    return { success: false, error: "Unauthorized: Staff or Moderator privileges required" };
+  }
+
+  const cleanTargetId = (targetIdentity || "").trim().toLowerCase();
+
+  // If action is unban, target is not in active participants list
+  if (action === "unban") {
+    const currentBanned = (junction.bannedIdentities || []).filter(
+      (b) => (b || "").trim().toLowerCase() !== cleanTargetId
+    );
+    await supabase
+      .from("junctions")
+      .update({ banned_identities: currentBanned })
+      .eq("id", junctionId);
+
+    const updated = await fetchJunctionWithParticipants(junctionId);
+    return { success: true, junction: updated };
+  }
+
+  // Target role check
+  const target = junction.participants.find(
+    (p) => (p.identity || "").trim().toLowerCase() === cleanTargetId
+  );
+  if (!target) {
+    return { success: false, error: "Target participant not in junction" };
+  }
+
+  const targetRole: UserRole = target.userRole || resolvePlatformRole(target.identity);
+
+  // Hierarchy rules for moderating:
+  // 1. Only official Staff (Managers, Admins, Main Admin) can kick or ban participants. Room hosts/regular users cannot force kick.
+  if ((action === "kick" || action === "ban") && !isCallerManager) {
+    return {
+      success: false,
+      error: "Unauthorized: Only official Staff (Managers, Admins, Main Admin) can kick or ban participants.",
+    };
+  }
+
+  // 2. Super Admin cannot be kicked or muted by anyone except themselves
+  if (targetRole === "super_admin" && !isCallerSuperAdmin) {
+    return { success: false, error: "The Main Admin cannot be moderated." };
+  }
+
+  // 3. Admins cannot be moderated by Managers or regular Room Hosts
+  if (targetRole === "admin" && !isCallerSuperAdmin) {
+    return { success: false, error: "Admins cannot be moderated by Managers or Room Hosts." };
+  }
+
+  // 4. Managers cannot be moderated by regular Room Hosts
+  if (targetRole === "manager" && !isCallerAdmin && !isCallerSuperAdmin) {
+    return { success: false, error: "Managers cannot be moderated by regular Room Hosts." };
   }
 
   if (action === "mute") {
     await supabase
       .from("junction_participants")
       .update({ is_muted: true, is_muted_by_mod: true, is_speaking: false })
-      .eq("junction_id", junctionId)
-      .eq("identity", targetIdentity);
+      .eq("id", target.id);
+    await muteLiveKitParticipant(junctionId, target.identity, true);
   } else if (action === "unmute") {
+    // Only remove mod mute restriction. Do NOT auto-unmute user's microphone.
     await supabase
       .from("junction_participants")
-      .update({ is_muted_by_mod: false, is_muted: false })
-      .eq("junction_id", junctionId)
-      .eq("identity", targetIdentity);
+      .update({ is_muted_by_mod: false })
+      .eq("id", target.id);
   } else if (action === "kick") {
     await supabase
       .from("junction_participants")
       .delete()
-      .eq("junction_id", junctionId)
-      .eq("identity", targetIdentity);
+      .eq("id", target.id);
     await syncCount(junctionId);
+    await kickLiveKitParticipant(junctionId, target.identity);
   } else if (action === "ban") {
     // Add to banned list
     const currentBanned = junction.bannedIdentities || [];
-    if (!currentBanned.includes(targetIdentity)) {
-      currentBanned.push(targetIdentity);
+    if (!currentBanned.some((b) => (b || "").trim().toLowerCase() === cleanTargetId)) {
+      currentBanned.push(target.identity);
     }
     await supabase
       .from("junctions")
@@ -464,38 +781,25 @@ export async function moderateParticipant(
     await supabase
       .from("junction_participants")
       .delete()
-      .eq("junction_id", junctionId)
-      .eq("identity", targetIdentity);
+      .eq("id", target.id);
     await syncCount(junctionId);
+    await kickLiveKitParticipant(junctionId, target.identity);
   } else if (action === "promote_mod") {
-    const target = junction.participants.find((p) => p.identity === targetIdentity);
-    if (!target) {
-      return { success: false, error: "Target participant not in junction" };
-    }
-
     // Promote new co-moderator
     await supabase
       .from("junction_participants")
       .update({ role: "moderator" })
-      .eq("junction_id", junctionId)
-      .eq("identity", targetIdentity);
-      
+      .eq("id", target.id);
   } else if (action === "demote_mod") {
-    const target = junction.participants.find((p) => p.identity === targetIdentity);
-    if (!target) {
-      return { success: false, error: "Target participant not in junction" };
-    }
-
-    // Cannot demote yourself (must leave or have another mod do it to ensure 1 mod exists)
-    if (targetIdentity === moderatorIdentity) {
+    // Cannot demote yourself unless admin
+    if (cleanTargetId === cleanModId && !isCallerAdmin) {
       return { success: false, error: "Cannot demote yourself" };
     }
 
     await supabase
       .from("junction_participants")
       .update({ role: "speaker" })
-      .eq("junction_id", junctionId)
-      .eq("identity", targetIdentity);
+      .eq("id", target.id);
   }
 
   const updated = await fetchJunctionWithParticipants(junctionId);
@@ -513,7 +817,10 @@ export async function claimModeratorRole(
     return { success: false, error: "Junction not found" };
   }
 
-  const participant = junction.participants.find((p) => p.identity === identity);
+  const cleanId = (identity || "").trim().toLowerCase();
+  const participant = junction.participants.find(
+    (p) => (p.identity || "").trim().toLowerCase() === cleanId
+  );
   if (!participant) {
     return { success: false, error: "Participant not found in junction" };
   }
@@ -538,8 +845,7 @@ export async function claimModeratorRole(
   const { error: updateError } = await supabase
     .from("junction_participants")
     .update({ role: "moderator" })
-    .eq("junction_id", junctionId)
-    .eq("identity", identity);
+    .eq("id", participant.id);
 
   if (updateError) {
     console.error("Failed to promote to moderator:", updateError);
@@ -553,7 +859,7 @@ export async function claimModeratorRole(
 export async function updateParticipantProfile(
   junctionId: string,
   identity: string,
-  updates: { name?: string; avatar?: string; color?: string; isMuted?: boolean }
+  updates: { name?: string; avatar?: string; color?: string; cardBgColor?: string; isMuted?: boolean }
 ): Promise<{ success: boolean; error?: string; junction?: Junction }> {
   const junction = await fetchJunctionWithParticipants(junctionId);
 
@@ -561,7 +867,10 @@ export async function updateParticipantProfile(
     return { success: false, error: "Junction not found" };
   }
 
-  const existing = junction.participants.find((p) => p.identity === identity);
+  const cleanId = (identity || "").trim().toLowerCase();
+  const existing = junction.participants.find(
+    (p) => (p.identity || "").trim().toLowerCase() === cleanId
+  );
   if (!existing) {
     return { success: false, error: "Participant not found" };
   }
@@ -569,15 +878,19 @@ export async function updateParticipantProfile(
   const updatePayload: Record<string, any> = {};
   if (updates.name !== undefined) updatePayload.name = updates.name;
   if (updates.avatar !== undefined) updatePayload.avatar = updates.avatar;
-  if (updates.color !== undefined) updatePayload.color = updates.color;
+  if (updates.color !== undefined || updates.cardBgColor !== undefined) {
+    updatePayload.color = encodeParticipantColor(
+      updates.color || existing.color,
+      updates.cardBgColor || existing.cardBgColor
+    );
+  }
   if (updates.isMuted !== undefined) updatePayload.is_muted = updates.isMuted;
 
   if (Object.keys(updatePayload).length > 0) {
     await supabase
       .from("junction_participants")
       .update(updatePayload)
-      .eq("junction_id", junctionId)
-      .eq("identity", identity);
+      .eq("id", existing.id);
   }
 
   const updated = await fetchJunctionWithParticipants(junctionId);
@@ -640,7 +953,10 @@ export async function toggleRoomLock(
     return { success: false, error: "Junction not found" };
   }
 
-  const modParticipant = junction.participants.find(p => p.identity === moderatorIdentity);
+  const cleanModId = (moderatorIdentity || "").trim().toLowerCase();
+  const modParticipant = junction.participants.find(
+    (p) => (p.identity || "").trim().toLowerCase() === cleanModId
+  );
   if (!modParticipant || modParticipant.role !== "moderator") {
     return { success: false, error: "Unauthorized: Only Moderators can lock/unlock the room" };
   }
@@ -658,10 +974,31 @@ export async function toggleRoomLock(
   return { success: true, junction: updated };
 }
 
-export async function deleteJunction(junctionId: string, creatorId?: string): Promise<boolean> {
-  if (creatorId) {
-    const junction = await fetchJunctionWithParticipants(junctionId);
-    if (!junction) return false;
+export async function deleteJunction(
+  junctionId: string,
+  creatorId?: string,
+  callerRole?: string
+): Promise<boolean> {
+  const isStaff =
+    callerRole === "super_admin" ||
+    callerRole === "admin" ||
+    creatorId?.toLowerCase() === "jayanthadmin" ||
+    creatorId?.toLowerCase() === "jayanth";
+
+  // Prevent unauthenticated calls from deleting any rooms
+  if (!creatorId && !isStaff) {
+    return false;
+  }
+
+  const junction = await fetchJunctionWithParticipants(junctionId);
+  if (!junction) return false;
+
+  // Protect public stations from being deleted by non-staff
+  if (!junction.isCustom && !isStaff) {
+    return false;
+  }
+
+  if (creatorId && !isStaff) {
     if (junction.creatorId !== creatorId) return false;
   }
 
@@ -684,33 +1021,35 @@ export async function reportParticipant(
     return { success: false, error: "Junction not found" };
   }
 
-  const target = junction.participants.find((p) => p.identity === targetIdentity);
+  const cleanTargetId = (targetIdentity || "").trim().toLowerCase();
+  const cleanReporterId = (reporterIdentity || "").trim().toLowerCase();
+
+  const target = junction.participants.find(
+    (p) => (p.identity || "").trim().toLowerCase() === cleanTargetId
+  );
   if (!target) {
     return { success: false, error: "Target participant not in junction" };
   }
 
-  if (target.identity === reporterIdentity) {
+  if ((target.identity || "").trim().toLowerCase() === cleanReporterId) {
     return { success: false, error: "Cannot report yourself" };
   }
 
   const currentReports = target.reportedBy || [];
-  if (currentReports.includes(reporterIdentity)) {
+  if (currentReports.some((r) => (r || "").trim().toLowerCase() === cleanReporterId)) {
     return { success: false, error: "You have already reported this user" };
   }
 
   const newReports = [...currentReports, reporterIdentity];
 
   // Require majority of the room to ban (min 2 reports for small rooms)
-  // 3-4 people: 2 reports
-  // 5-6 people: 3 reports
-  // 7 people: 4 reports
   const requiredReports = Math.max(2, Math.ceil(junction.participants.length / 2));
 
   if (newReports.length >= requiredReports) {
     // Execute ban directly without requiring a specific moderator auth
     const currentBanned = junction.bannedIdentities || [];
-    if (!currentBanned.includes(targetIdentity)) {
-      currentBanned.push(targetIdentity);
+    if (!currentBanned.some((b) => (b || "").trim().toLowerCase() === cleanTargetId)) {
+      currentBanned.push(target.identity);
     }
     await supabase
       .from("junctions")
@@ -720,8 +1059,7 @@ export async function reportParticipant(
     await supabase
       .from("junction_participants")
       .delete()
-      .eq("junction_id", junctionId)
-      .eq("identity", targetIdentity);
+      .eq("id", target.id);
       
     await syncCount(junctionId);
 
@@ -731,8 +1069,7 @@ export async function reportParticipant(
     await supabase
       .from("junction_participants")
       .update({ reported_by: newReports })
-      .eq("junction_id", junctionId)
-      .eq("identity", targetIdentity);
+      .eq("id", target.id);
       
     const updated = await fetchJunctionWithParticipants(junctionId);
     return { success: true, junction: updated, banned: false };

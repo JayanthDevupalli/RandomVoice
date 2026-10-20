@@ -11,6 +11,26 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Missing required parameters" }, { status: 400 });
     }
 
+    // Authenticate the caller
+    const authHeader = request.headers.get("authorization");
+    const token = authHeader?.replace("Bearer ", "");
+
+    if (!token) {
+      return NextResponse.json({ error: "Unauthorized: Missing authentication token" }, { status: 401 });
+    }
+
+    const { data: { user: authUser }, error: authErr } = await supabase.auth.getUser(token);
+    if (authErr || !authUser) {
+      return NextResponse.json({ error: "Unauthorized: Invalid session" }, { status: 401 });
+    }
+
+    // Only allow users to delete their own account (or verified admins)
+    const cleanName = (authUser.user_metadata?.username || "").toLowerCase();
+    const isStaff = cleanName === "jayanthadmin" || cleanName === "jayanth";
+    if (authUser.id !== userId && !isStaff) {
+      return NextResponse.json({ error: "Forbidden: Cannot delete another user's account" }, { status: 403 });
+    }
+
     // 1. Delete user from any active voice rooms
     await supabase
       .from("junction_participants")

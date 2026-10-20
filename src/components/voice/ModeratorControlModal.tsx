@@ -17,7 +17,9 @@ import {
   Radio,
   CheckCircle2,
   Users,
-  Settings
+  Settings,
+  Unlock,
+  Loader2
 } from "lucide-react";
 
 interface ModeratorControlModalProps {
@@ -26,7 +28,8 @@ interface ModeratorControlModalProps {
   junction: Junction;
   participants?: JunctionParticipant[];
   currentModerator: string;
-  onModerateParticipant: (targetIdentity: string, action: "mute" | "unmute" | "kick" | "ban" | "promote_mod" | "demote_mod") => Promise<void>;
+  isStaff?: boolean;
+  onModerateParticipant: (targetIdentity: string, action: "mute" | "unmute" | "kick" | "ban" | "unban" | "promote_mod" | "demote_mod") => Promise<void>;
   onClearChat: () => void;
   onEndJunction: () => Promise<void>;
   onToggleRoomLock: (isLocked: boolean) => Promise<void>;
@@ -39,6 +42,7 @@ export function ModeratorControlModal({
   junction,
   participants,
   currentModerator,
+  isStaff = false,
   onModerateParticipant,
   onClearChat,
   onEndJunction,
@@ -66,7 +70,7 @@ export function ModeratorControlModal({
 
   const handleParticipantAction = async (
     targetIdentity: string,
-    action: "mute" | "unmute" | "kick" | "ban" | "promote_mod" | "demote_mod",
+    action: "mute" | "unmute" | "kick" | "ban" | "unban" | "promote_mod" | "demote_mod",
     label: string
   ) => {
     try {
@@ -228,7 +232,7 @@ export function ModeratorControlModal({
                           handleParticipantAction(
                             p.identity,
                             p.isMutedByMod ? "unmute" : "mute",
-                            p.isMutedByMod ? "Unmute" : "Force Mute"
+                            p.isMutedByMod ? "Allow Mic" : "Force Mute"
                           )
                         }
                         disabled={actionLoading !== null}
@@ -236,37 +240,40 @@ export function ModeratorControlModal({
                             ? "bg-slate-200 dark:bg-slate-800 hover:bg-slate-700 text-slate-700 dark:text-slate-300"
                             : "bg-rose-600/20 hover:bg-rose-600/40 text-rose-300 border border-rose-500/30"
                           }`}
-                        title={p.isMutedByMod ? "Allow unmuting" : "Force mute user mic"}
+                        title={p.isMutedByMod ? "Remove force mute (allow user to speak)" : "Force mute user mic"}
                       >
                         {p.isMutedByMod ? <Mic size={13} /> : <MicOff size={13} />}
-                        <span className="text-[10px] font-bold">{p.isMutedByMod ? "Unmute" : "Mute"}</span>
+                        <span className="text-[10px] font-bold">{p.isMutedByMod ? "Allow Mic" : "Mute"}</span>
                       </button>
 
-                      {/* Kick */}
-                      <button
-                        onClick={() =>
-                          handleParticipantAction(p.identity, "kick", "Kicked")
-                        }
-                        disabled={actionLoading !== null}
-                        className="p-1.5 px-2 rounded-lg bg-slate-200 dark:bg-slate-800 hover:bg-rose-600 hover:text-white text-slate-700 dark:text-slate-300 text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer"
-                        title="Kick from junction"
-                      >
-                        <UserX size={13} />
-                        <span className="text-[10px] font-bold">Kick</span>
-                      </button>
+                      {/* Kick & Ban: Strictly for official Staff (Managers, Admins, Main Admin) */}
+                      {isStaff && (
+                        <>
+                          <button
+                            onClick={() =>
+                              handleParticipantAction(p.identity, "kick", "Kicked")
+                            }
+                            disabled={actionLoading !== null}
+                            className="p-1.5 px-2 rounded-lg bg-slate-200 dark:bg-slate-800 hover:bg-rose-600 hover:text-white text-slate-700 dark:text-slate-300 text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer"
+                            title="Kick from junction"
+                          >
+                            <UserX size={13} />
+                            <span className="text-[10px] font-bold">Kick</span>
+                          </button>
 
-                      {/* Ban */}
-                      <button
-                        onClick={() =>
-                          handleParticipantAction(p.identity, "ban", "Banned")
-                        }
-                        disabled={actionLoading !== null}
-                        className="p-1.5 px-2 rounded-lg bg-slate-200 dark:bg-slate-800 hover:bg-rose-800 hover:text-white text-slate-700 dark:text-slate-300 text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer"
-                        title="Ban from re-joining junction"
-                      >
-                        <Ban size={13} />
-                        <span className="text-[10px] font-bold">Ban</span>
-                      </button>
+                          <button
+                            onClick={() =>
+                              handleParticipantAction(p.identity, "ban", "Banned")
+                            }
+                            disabled={actionLoading !== null}
+                            className="p-1.5 px-2 rounded-lg bg-slate-200 dark:bg-slate-800 hover:bg-rose-800 hover:text-white text-slate-700 dark:text-slate-300 text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer"
+                            title="Ban from re-joining junction"
+                          >
+                            <Ban size={13} />
+                            <span className="text-[10px] font-bold">Ban</span>
+                          </button>
+                        </>
+                      )}
 
                       {/* Co-Mod / Demote Mod */}
                       {isMod ? (
@@ -445,25 +452,46 @@ export function ModeratorControlModal({
               </div>
             )}
 
-            {/* Banned Users Summary */}
-            {junction.bannedIdentities && junction.bannedIdentities.length > 0 && (
-              <div className="p-3.5 rounded-2xl bg-slate-100 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800">
-                <div className="text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5 flex items-center gap-1.5">
+            {/* Banned Users Section */}
+            <div className="p-3.5 rounded-2xl bg-slate-100 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800">
+              <div className="text-xs font-bold text-slate-700 dark:text-slate-300 mb-2 flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
                   <Ban size={13} className="text-rose-400" />
-                  <span>Banned Users ({junction.bannedIdentities.length})</span>
+                  <span>Banned Users ({junction.bannedIdentities?.length || 0})</span>
                 </div>
-                <div className="flex flex-wrap gap-1.5">
+                {junction.bannedIdentities && junction.bannedIdentities.length > 0 && (
+                  <span className="text-[10px] text-slate-400 font-normal">Tap Unban to restore access</span>
+                )}
+              </div>
+              {junction.bannedIdentities && junction.bannedIdentities.length > 0 ? (
+                <div className="flex flex-wrap gap-2">
                   {junction.bannedIdentities.map((user) => (
-                    <span
+                    <div
                       key={user}
-                      className="px-2 py-0.5 rounded-lg bg-rose-950/60 border border-rose-500/30 text-rose-300 font-mono text-[10px]"
+                      className="flex items-center gap-1.5 pl-2.5 pr-1 py-1 rounded-xl bg-rose-950/60 border border-rose-500/30 text-rose-300 font-mono text-xs shadow-sm"
                     >
-                      {user}
-                    </span>
+                      <span className="truncate max-w-[120px]">{user}</span>
+                      <button
+                        type="button"
+                        onClick={() => handleParticipantAction(user, "unban", "Unban")}
+                        disabled={actionLoading === `unban_${user}`}
+                        className="px-2 py-0.5 rounded-lg bg-rose-500/20 hover:bg-emerald-500/25 text-rose-300 hover:text-emerald-300 border border-rose-500/30 hover:border-emerald-500/40 text-[10px] font-sans font-bold transition-all cursor-pointer flex items-center gap-1 active:scale-95"
+                        title={`Unban ${user}`}
+                      >
+                        {actionLoading === `unban_${user}` ? (
+                          <Loader2 size={10} className="animate-spin" />
+                        ) : (
+                          <Unlock size={10} />
+                        )}
+                        <span>Unban</span>
+                      </button>
+                    </div>
                   ))}
                 </div>
-              </div>
-            )}
+              ) : (
+                <p className="text-[11px] text-slate-500">No banned users in this junction.</p>
+              )}
+            </div>
 
             {/* End Junction Danger Zone */}
             {currentModerator === junction.creatorId && (

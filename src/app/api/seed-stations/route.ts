@@ -1,5 +1,86 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
+
+export const dynamic = "force-dynamic";
+
+export async function GET(request: NextRequest) {
+  return handleSeed(request);
+}
+
+export async function POST(request: NextRequest) {
+  return handleSeed(request);
+}
+
+async function handleSeed(request: NextRequest) {
+  try {
+    const { searchParams } = new URL(request.url);
+    const secret = searchParams.get("secret") || request.headers.get("x-seed-secret");
+    const force = searchParams.get("force") === "true";
+
+    const expectedSecret = process.env.ADMIN_SEED_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    // Check if stations are already present
+    const { count } = await supabase
+      .from("junctions")
+      .select("*", { count: "exact", head: true })
+      .eq("is_custom", false);
+
+    // If stations exist, only re-seed if authorized with secret and force=true
+    if ((count || 0) > 0 && !force) {
+      return NextResponse.json({
+        success: true,
+        message: "Public stations already exist. Provide force=true and secret to wipe and re-seed.",
+        count,
+      });
+    }
+
+    if (force && expectedSecret && secret !== expectedSecret) {
+      return NextResponse.json({ error: "Unauthorized: Invalid seed secret" }, { status: 403 });
+    }
+
+    // 1. Delete existing public stations if forcing or empty
+    if ((count || 0) > 0 && force) {
+      await supabase.from("junctions").delete().eq("is_custom", false);
+    }
+
+    // 2. Prepare new stations
+    const now = Date.now();
+    const records = [];
+
+    for (const st of STATIONS) {
+      for (const dist of st.districts) {
+        const famousTagline = CITY_FAMOUS_MAP[dist] || `Public voice room for ${dist}, ${st.state}.`;
+        records.push({
+          id: `station_${dist.toLowerCase().replace(/[^a-z0-9]/g, '')}`,
+          name: dist,
+          description: famousTagline,
+          category: "casual",
+          icon: "Mic",
+          tags: ["Public", st.region, st.state, dist],
+          max_participants: 7,
+          current_count: 0,
+          created_at: now,
+          is_custom: false,
+          creator_id: null,
+          moderator_identity: "",
+          is_locked: false,
+          banned_identities: [],
+        });
+      }
+    }
+
+    // 3. Upsert stations safely
+    const { error } = await supabase.from("junctions").upsert(records, { onConflict: "id" });
+
+    if (error) {
+      throw error;
+    }
+
+    return NextResponse.json({ success: true, count: records.length, message: "Public stations seeded successfully!" });
+  } catch (error: any) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+}
 
 const CITY_FAMOUS_MAP: Record<string, string> = {
   "Hyderabad": "Famous for Biryani, Charminar & Global IT Tech Hub",
@@ -46,46 +127,3 @@ const STATIONS = [
   { state: "Delhi", region: "North", districts: ["New Delhi", "Old Delhi"] }
 ];
 
-export async function GET() {
-  try {
-    // 1. Delete existing public stations
-    await supabase.from("junctions").delete().eq("is_custom", false);
-
-    // 2. Prepare new stations
-    const now = Date.now();
-    const records = [];
-
-    for (const st of STATIONS) {
-      for (const dist of st.districts) {
-        const famousTagline = CITY_FAMOUS_MAP[dist] || `Public voice room for ${dist}, ${st.state}.`;
-        records.push({
-          id: `station_${dist.toLowerCase().replace(/[^a-z0-9]/g, '')}`,
-          name: dist,
-          description: famousTagline,
-          category: "casual",
-          icon: "Mic",
-          tags: ["Public", st.region, st.state, dist],
-          max_participants: 7,
-          current_count: 0,
-          created_at: now,
-          is_custom: false,
-          creator_id: null,
-          moderator_identity: "",
-          is_locked: false,
-          banned_identities: [],
-        });
-      }
-    }
-
-    // 3. Insert them
-    const { error } = await supabase.from("junctions").insert(records);
-
-    if (error) {
-      throw error;
-    }
-
-    return NextResponse.json({ success: true, count: records.length, message: "Public stations seeded!" });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
-}
