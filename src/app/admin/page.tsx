@@ -64,6 +64,11 @@ interface AdminRoomRecord {
 export default function AdminPortalPage() {
   const router = useRouter();
   const { user, isLoaded, isRegistered } = useUser();
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   const [activeTab, setActiveTab] = useState<"users" | "rooms" | "stats">("users");
   const [users, setUsers] = useState<AdminUserRecord[]>([]);
@@ -301,8 +306,25 @@ export default function AdminPortalPage() {
   const lockedRoomsCount = rooms.filter((r) => r.isLocked).length;
   const publicRoomsCount = rooms.filter((r) => !r.isLocked).length;
 
+  // Loading screen while verifying auth & mounting
+  if (!mounted || !isLoaded) {
+    return (
+      <div className="min-h-screen bg-[#0A0B10] text-slate-100 flex flex-col font-sans">
+        <Navbar />
+        <main className="flex-1 flex items-center justify-center p-6">
+          <div className="flex flex-col items-center gap-3">
+            <div className="w-12 h-12 rounded-2xl bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
+              <RefreshCw size={22} className="animate-spin" />
+            </div>
+            <p className="text-xs text-slate-400 font-medium">Verifying Administrator Clearance...</p>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
   // Access denied screen
-  if (isLoaded && (!user || !isRegistered || !hasAdminAccess)) {
+  if (!user || !isRegistered || !hasAdminAccess) {
     return (
       <div className="min-h-screen bg-[#0A0B10] text-slate-100 flex flex-col">
         <Navbar />

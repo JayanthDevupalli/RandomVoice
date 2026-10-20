@@ -193,7 +193,7 @@ async function verifyAdminAuth(request: NextRequest): Promise<{ authorized: bool
 
     const { data: profile } = await adminClient
       .from("profiles")
-      .select("username, role, social_links")
+      .select("*")
       .eq("id", authUser.id)
       .maybeSingle();
 
@@ -226,10 +226,11 @@ export async function GET(request: NextRequest) {
 
     const { data: profiles, error } = await adminClient
       .from("profiles")
-      .select("id, username, avatar, bio, card_bg_color, created_at, role, is_banned, banned_reason, social_links")
+      .select("*")
       .order("created_at", { ascending: false });
 
     if (error) {
+      console.error("Admin users fetch error:", error);
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
@@ -241,13 +242,17 @@ export async function GET(request: NextRequest) {
       const resolvedBanned = isMain
         ? false
         : Boolean(p.is_banned ?? p.social_links?.is_banned);
+      const cardBg = (p.card_bg_color && p.card_bg_color !== "#465B73")
+        ? p.card_bg_color
+        : (p.social_links?.card_bg_color || p.card_bg_color || "#465B73");
 
       return {
         id: p.id,
         username: p.username,
+        displayName: p.display_name || p.social_links?.display_name || p.username,
         avatar: p.avatar,
         bio: p.bio,
-        card_bg_color: p.card_bg_color,
+        card_bg_color: cardBg,
         created_at: p.created_at,
         role: resolvedRole,
         is_banned: resolvedBanned,
@@ -674,7 +679,7 @@ export async function DELETE(request: NextRequest) {
       await adminClient
         .from("connections")
         .delete()
-        .or(`follower_id.eq.${targetProfile.id},following_id.eq.${targetProfile.id}`);
+        .or(`requester_id.eq.${targetProfile.id},receiver_id.eq.${targetProfile.id}`);
 
       // 4. Remove conversation memberships
       await adminClient

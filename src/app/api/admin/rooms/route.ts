@@ -40,7 +40,7 @@ async function verifyAdminAuth(request: NextRequest): Promise<{ authorized: bool
 
     const { data: profile } = await adminClient
       .from("profiles")
-      .select("username, role, social_links")
+      .select("*")
       .eq("id", authUser.id)
       .maybeSingle();
 
