@@ -156,7 +156,7 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
       .channel("user_updates_broadcast")
       .on("broadcast", { event: "profile_updated" }, (msg: any) => {
         if (!mounted || !msg?.payload) return;
-        const { targetUserId, targetUsername, newRole, isBanned } = msg.payload;
+        const { targetUserId, targetUsername, newRole, isBanned, displayName } = msg.payload;
         setUser((prev) => {
           if (!prev) return prev;
           const match = (targetUserId && prev.id === targetUserId) ||
@@ -164,6 +164,8 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
           if (!match) return prev;
           return {
             ...prev,
+            name: displayName !== undefined ? displayName : prev.name,
+            displayName: displayName !== undefined ? displayName : prev.displayName,
             role: newRole || prev.role,
             isBanned: isBanned !== undefined ? isBanned : prev.isBanned,
           };
@@ -171,9 +173,25 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
       })
       .subscribe();
 
+    const handleLocalProfileUpdate = (e: any) => {
+      const updatedDisplayName = e?.detail?.displayName;
+      if (updatedDisplayName) {
+        setUser((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            name: updatedDisplayName,
+            displayName: updatedDisplayName,
+          };
+        });
+      }
+    };
+    window.addEventListener("yapclub_profile_updated", handleLocalProfileUpdate);
+
     return () => {
       mounted = false;
       subscription.unsubscribe();
+      window.removeEventListener("yapclub_profile_updated", handleLocalProfileUpdate);
       supabase.removeChannel(broadcastChannel);
     };
   }, []);

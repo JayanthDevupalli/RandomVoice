@@ -56,7 +56,7 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
   const initialTab = (searchParams?.get("tab") as SettingsTab) || "profile";
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
 
-  const { user: currentUser, isRegistered, isLoaded: isAuthLoaded, signOut } = useUser();
+  const { user: currentUser, isRegistered, isLoaded: isAuthLoaded, signOut, refreshUser } = useUser();
   const { guest, updateGuest, clearProfile } = useGuestUser();
 
   const [profile, setProfile] = useState<any>(null);
@@ -523,6 +523,17 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
     });
     setIsEditing(false);
     setIsSaving(false);
+
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent("yapclub_profile_updated", {
+          detail: { displayName: trimmedDisplayName },
+        })
+      );
+    }
+    if (refreshUser) {
+      refreshUser();
+    }
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -816,12 +827,28 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
                       </div>
 
                       {/* Shown Name & Status Badge */}
-                      <h1 className="text-xl sm:text-2xl font-extrabold text-white tracking-tight mb-0.5 flex items-center justify-center gap-2 flex-wrap">
-                        <span>{profile.display_name || profile.username}</span>
-                        {profileRole !== "user" && (
-                          <RoleBadge role={profileRole} size="xs" showLabel={false} />
+                      <div className="flex items-center justify-center gap-2 flex-wrap mb-1">
+                        <h1 className="text-xl sm:text-2xl font-extrabold text-white tracking-tight flex items-center gap-2">
+                          <span>{profile.display_name || profile.username}</span>
+                          {profileRole !== "user" && (
+                            <RoleBadge role={profileRole} size="xs" showLabel={false} />
+                          )}
+                        </h1>
+                        {isOwner && !isEditing && (
+                          <button
+                            onClick={() => {
+                              setDisplayName(profile.display_name || profile.username || "");
+                              setBio(profile.bio || "");
+                              setIsEditing(true);
+                            }}
+                            className="flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-white/10 hover:bg-white/20 text-slate-200 border border-white/10 transition-all cursor-pointer active:scale-95 shadow-sm"
+                            title="Edit Shown Name"
+                          >
+                            <Edit3 size={12} className="text-indigo-400" />
+                            <span>Edit Name</span>
+                          </button>
                         )}
-                      </h1>
+                      </div>
                       <div className="text-xs sm:text-sm font-semibold text-indigo-300/80 mb-2">
                         @{profile.username}
                       </div>
@@ -949,9 +976,13 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
 
                       {isOwner && (
                         <button
-                          onClick={() => setIsEditing(true)}
-                          className="absolute top-2 right-2 p-1.5 rounded-lg bg-white/5 text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity hover:text-white cursor-pointer"
-                          title="Edit Bio"
+                          onClick={() => {
+                            setDisplayName(profile.display_name || profile.username || "");
+                            setBio(profile.bio || "");
+                            setIsEditing(true);
+                          }}
+                          className="absolute top-2.5 right-2.5 p-1.5 rounded-lg bg-white/10 text-slate-300 hover:text-white hover:bg-white/20 transition-all cursor-pointer"
+                          title="Edit Bio & Shown Name"
                         >
                           <Edit3 size={13} />
                         </button>

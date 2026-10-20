@@ -17,6 +17,7 @@ import {
   Clock,
   LogIn,
   Lock,
+  Edit3,
 } from "lucide-react";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import { RoleBadge } from "@/components/ui/RoleBadge";
@@ -38,6 +39,11 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
   const [relationship, setRelationship] = useState<RelationshipStatus | null>(null);
   const [isRequesting, setIsRequesting] = useState(false);
   const [mounted, setMounted] = useState(false);
+
+  // Shown name editing state
+  const [isEditingShownName, setIsEditingShownName] = useState(false);
+  const [editedShownName, setEditedShownName] = useState("");
+  const [isSavingShownName, setIsSavingShownName] = useState(false);
 
   useEffect(() => {
     setMounted(true);
@@ -310,6 +316,74 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
     }
   };
 
+  const handleSaveShownName = async () => {
+    const trimmed = editedShownName.trim();
+    if (!trimmed || !profile) return;
+    setIsSavingShownName(true);
+
+    try {
+      const isSelf = currentUser?.id === profile.id;
+      if (isSelf) {
+        const updatedSocialLinks = {
+          ...(profile.social_links || {}),
+          display_name: trimmed,
+        };
+
+        const { error } = await supabase
+          .from("profiles")
+          .update({
+            display_name: trimmed,
+            social_links: updatedSocialLinks,
+          })
+          .eq("id", profile.id);
+
+        if (error) {
+          await supabase
+            .from("profiles")
+            .update({
+              social_links: updatedSocialLinks,
+            })
+            .eq("id", profile.id);
+        }
+
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(
+            new CustomEvent("yapclub_profile_updated", {
+              detail: { displayName: trimmed },
+            })
+          );
+        }
+      } else {
+        const { data: { session } } = await supabase.auth.getSession();
+        await fetch("/api/admin/users", {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+            ...(currentUser?.name ? { "x-requester-username": currentUser.name } : {}),
+            ...(currentUser?.role ? { "x-requester-role": currentUser.role } : {}),
+          },
+          body: JSON.stringify({
+            targetUserId: profile.id,
+            action: "update_display_name",
+            displayName: trimmed,
+          }),
+        });
+      }
+
+      setProfile((prev: any) => ({
+        ...prev,
+        display_name: trimmed,
+        social_links: { ...(prev?.social_links || {}), display_name: trimmed },
+      }));
+      setIsEditingShownName(false);
+    } catch (e) {
+      console.error("Failed to save shown name:", e);
+    } finally {
+      setIsSavingShownName(false);
+    }
+  };
+
   if (!mounted) return null;
 
   return createPortal(
@@ -345,6 +419,10 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
                 const isMain = profile.username?.trim().toLowerCase() === "jayanthadmin" || profile.username?.trim().toLowerCase() === "jayanth" || profRole === "super_admin";
                 const modalRole = isMain ? "super_admin" : (profRole === "admin" ? "admin" : profRole === "manager" ? "manager" : participant.userRole || "user");
 
+                const isCallerMain = currentUser?.name?.trim().toLowerCase() === "jayanthadmin" || currentUser?.name?.trim().toLowerCase() === "jayanth" || currentUser?.role === "super_admin";
+                const isCallerStaff = isCallerMain || currentUser?.role === "admin";
+                const canEditName = Boolean(currentUser && (currentUser.id === profile.id || isCallerStaff));
+
                 return (
                   <div className="flex flex-col items-center">
                     <div className="w-24 h-24 rounded-3xl overflow-hidden border-4 border-[#12131A] shadow-xl bg-indigo-900/50 mb-4 cursor-pointer hover:scale-105 transition-transform relative" onClick={handleViewFullProfile}>
@@ -355,14 +433,58 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
                       )}
                     </div>
                     
-                    <div className="flex items-center justify-center gap-1.5 mb-0.5 flex-wrap">
-                      <h3 className="text-xl font-bold text-white">
-                        {profile.display_name || profile.social_links?.display_name || profile.username}
-                      </h3>
-                      {modalRole !== "user" && (
-                        <RoleBadge role={modalRole} size="xs" />
-                      )}
-                    </div>
+                    {isEditingShownName ? (
+                      <div className="flex items-center gap-1.5 my-1">
+                        <input
+                          type="text"
+                          value={editedShownName}
+                          onChange={(e) => setEditedShownName(e.target.value)}
+                          maxLength={32}
+                          className="px-2.5 py-1 bg-black/50 border border-white/20 rounded-xl text-white text-sm font-bold focus:outline-none focus:border-indigo-500 w-44 text-center"
+                          autoFocus
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") handleSaveShownName();
+                            if (e.key === "Escape") setIsEditingShownName(false);
+                          }}
+                        />
+                        <button
+                          onClick={handleSaveShownName}
+                          disabled={isSavingShownName || !editedShownName.trim()}
+                          className="p-1.5 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 border border-emerald-500/30 transition-colors cursor-pointer disabled:opacity-50"
+                          title="Save Shown Name"
+                        >
+                          {isSavingShownName ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+                        </button>
+                        <button
+                          onClick={() => setIsEditingShownName(false)}
+                          className="p-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white transition-colors cursor-pointer"
+                          title="Cancel"
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-center gap-1.5 mb-0.5 flex-wrap">
+                        <h3 className="text-xl font-bold text-white">
+                          {profile.display_name || profile.social_links?.display_name || profile.username}
+                        </h3>
+                        {modalRole !== "user" && (
+                          <RoleBadge role={modalRole} size="xs" />
+                        )}
+                        {canEditName && (
+                          <button
+                            onClick={() => {
+                              setEditedShownName(profile.display_name || profile.social_links?.display_name || profile.username);
+                              setIsEditingShownName(true);
+                            }}
+                            className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+                            title="Edit Shown Name"
+                          >
+                            <Edit3 size={13} />
+                          </button>
+                        )}
+                      </div>
+                    )}
 
                     <p className="text-xs font-semibold text-indigo-300/80 mb-1">
                       @{profile.username}
@@ -531,6 +653,22 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
                         </button>
                       </div>
                     )}
+                  </div>
+                )}
+
+                {/* Own Profile Quick Action */}
+                {currentUser?.id === profile.id && (
+                  <div className="w-full flex items-center gap-2 mt-2">
+                    <button
+                      onClick={() => {
+                        onClose();
+                        router.push("/profile/me");
+                      }}
+                      className="w-full py-2.5 px-3 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 font-semibold text-xs sm:text-sm transition-all flex items-center justify-center gap-2 cursor-pointer active:scale-95"
+                    >
+                      <Edit3 size={14} />
+                      <span>Edit Full Profile</span>
+                    </button>
                   </div>
                 )}
                 

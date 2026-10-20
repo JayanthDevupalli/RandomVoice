@@ -18,24 +18,45 @@ export function useUnreadMessages() {
 
   const loadLastReadMap = useCallback((): Record<string, string> => {
     const key = getStorageKey();
-    if (!key || typeof window === "undefined") return {};
-    try {
-      const data = localStorage.getItem(key);
-      return data ? JSON.parse(data) : {};
-    } catch {
-      return {};
+    let local: Record<string, string> = {};
+    if (key && typeof window !== "undefined") {
+      try {
+        const data = localStorage.getItem(key);
+        if (data) local = JSON.parse(data);
+      } catch {}
     }
+    return { ...lastReadMapRef.current, ...local };
   }, [getStorageKey]);
 
   const saveLastReadMap = useCallback((map: Record<string, string>) => {
+    lastReadMapRef.current = { ...lastReadMapRef.current, ...map };
     const key = getStorageKey();
-    if (!key || typeof window === "undefined") return;
-    try {
-      localStorage.setItem(key, JSON.stringify(map));
-    } catch (e) {
-      console.error("Failed to save last read map:", e);
+    if (key && typeof window !== "undefined") {
+      try {
+        localStorage.setItem(key, JSON.stringify(lastReadMapRef.current));
+      } catch (e) {
+        console.error("Failed to save last read map:", e);
+      }
     }
-  }, [getStorageKey]);
+    // Also sync to Supabase profile in background so it persists across incognito/devices
+    if (user?.id) {
+      Promise.resolve(
+        supabase
+          .from("profiles")
+          .select("social_links")
+          .eq("id", user.id)
+          .maybeSingle()
+      )
+        .then(({ data }: any) => {
+          const links = data?.social_links || {};
+          return supabase
+            .from("profiles")
+            .update({ social_links: { ...links, last_read_map: lastReadMapRef.current } })
+            .eq("id", user.id);
+        })
+        .catch(() => {});
+    }
+  }, [getStorageKey, user?.id]);
 
   // Recalculate unread counts
   const recalculateUnread = useCallback(async () => {
@@ -64,8 +85,7 @@ export function useUnreadMessages() {
       }
 
       const lastReadMap = loadLastReadMap();
-      const updatedLastReadMap = { ...lastReadMap };
-      let mapChanged = false;
+      const updatedLastReadMap = { ...lastReadMapRef.current, ...lastReadMap };
 
       // 2. Fetch recent messages in these conversations not sent by current user
       const { data: messages, error: msgErr } = await supabase
@@ -123,7 +143,7 @@ export function useUnreadMessages() {
     } catch (err) {
       console.error("Error calculating unread messages:", err);
     }
-  }, [user?.id, isRegistered, loadLastReadMap, saveLastReadMap]);
+  }, [user?.id, isRegistered, loadLastReadMap]);
 
   // Mark a conversation as read with clock-skew compensation
   const markAsRead = useCallback(
@@ -136,14 +156,14 @@ export function useUnreadMessages() {
         ? new Date(latestMessageTimestamp).getTime()
         : 0;
 
-      // Add a 10000ms safety buffer to ensure server clock drift or client time
+      // Add a 15000ms safety buffer to ensure server clock drift or client time
       // does not cause viewed messages to be marked as unread
-      const safeReadTimestamp = new Date(Math.max(nowMs, latestMsgMs) + 10000).toISOString();
+      const safeReadTimestamp = new Date(Math.max(nowMs, latestMsgMs) + 15000).toISOString();
       currentMap[conversationId] = safeReadTimestamp;
-      lastReadMapRef.current = currentMap;
+      lastReadMapRef.current = { ...lastReadMapRef.current, ...currentMap };
       saveLastReadMap(currentMap);
 
-      // Update state optimistically
+      // Update state optimistically and immediately zero out unread count for this conversation
       setUnreadByConversation((prev) => {
         const updated = { ...prev };
         const countForConv = updated[conversationId] || 0;
@@ -170,7 +190,28 @@ export function useUnreadMessages() {
       return;
     }
 
-    recalculateUnread();
+    // On mount, load persistent read map from profile
+    Promise.resolve(
+      supabase
+        .from("profiles")
+        .select("social_links")
+        .eq("id", user.id)
+        .maybeSingle()
+    )
+      .then(({ data }: any) => {
+        if (data?.social_links?.last_read_map) {
+          const merged = { ...data.social_links.last_read_map, ...loadLastReadMap() };
+          lastReadMapRef.current = merged;
+          const key = getStorageKey();
+          if (key && typeof window !== "undefined") {
+            try {
+              localStorage.setItem(key, JSON.stringify(merged));
+            } catch {}
+          }
+        }
+        recalculateUnread();
+      })
+      .catch(() => recalculateUnread());
 
     // Listen for custom read events from other components/pages/tabs
     const handleReadEvent = (event: Event) => {
@@ -183,10 +224,7 @@ export function useUnreadMessages() {
 
       if (readConvId) {
         if (readTimestamp) {
-          const map = loadLastReadMap();
-          map[readConvId] = readTimestamp;
-          lastReadMapRef.current = map;
-          saveLastReadMap(map);
+          lastReadMapRef.current[readConvId] = readTimestamp;
         }
 
         setUnreadByConversation((prev) => {
@@ -197,7 +235,6 @@ export function useUnreadMessages() {
           return updated;
         });
       }
-      recalculateUnread();
     };
     window.addEventListener("yapclub_messages_read", handleReadEvent);
 

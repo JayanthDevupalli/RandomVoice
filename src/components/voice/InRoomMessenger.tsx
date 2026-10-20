@@ -209,13 +209,19 @@ export function InRoomMessenger({ isOpen, onClose }: InRoomMessengerProps) {
     }
   }, [isOpen, fetchConversations]);
 
-  // Fetch messages for active conversation
+  // Fetch messages for active conversation & sync read status
   useEffect(() => {
     if (!activeConversationId || !user?.id) {
       setMessages([]);
+      if (typeof window !== "undefined") {
+        sessionStorage.removeItem("yapclub_active_conversation");
+      }
       return;
     }
 
+    if (typeof window !== "undefined") {
+      sessionStorage.setItem("yapclub_active_conversation", activeConversationId);
+    }
     markAsRead(activeConversationId);
 
     const fetchMessages = async () => {
@@ -230,6 +236,10 @@ export function InRoomMessenger({ isOpen, onClose }: InRoomMessengerProps) {
         console.error("Error fetching messages:", error);
       } else if (data) {
         setMessages(data);
+        if (data.length > 0) {
+          const latest = data[data.length - 1];
+          markAsRead(activeConversationId, latest.created_at);
+        }
       }
     };
 
@@ -253,12 +263,15 @@ export function InRoomMessenger({ isOpen, onClose }: InRoomMessengerProps) {
             if (prev.some((m) => m.id === newMsg.id)) return prev;
             return [...prev, newMsg];
           });
-          markAsRead(activeConversationId);
+          markAsRead(activeConversationId, newMsg.created_at);
         }
       )
       .subscribe();
 
     return () => {
+      if (typeof window !== "undefined") {
+        sessionStorage.removeItem("yapclub_active_conversation");
+      }
       supabase.removeChannel(channel);
     };
   }, [activeConversationId, user?.id, markAsRead]);
@@ -469,7 +482,10 @@ export function InRoomMessenger({ isOpen, onClose }: InRoomMessengerProps) {
                           <button
                             key={c.id}
                             type="button"
-                            onClick={() => setActiveConversationId(c.id)}
+                            onClick={() => {
+                              setActiveConversationId(c.id);
+                              markAsRead(c.id);
+                            }}
                             className="w-full px-3.5 py-3 flex items-center justify-between gap-3 hover:bg-white/[0.04] transition-colors text-left cursor-pointer group"
                           >
                             <div className="flex items-center gap-2.5 min-w-0">

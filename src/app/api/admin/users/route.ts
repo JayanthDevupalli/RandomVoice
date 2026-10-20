@@ -84,38 +84,30 @@ async function fetchTargetProfile(adminClient: any, targetUserId?: string, targe
 async function updateProfileRole(
   adminClient: any,
   target: { id?: string; username?: string },
-  newRole: UserRole
+  newRole: UserRole,
+  existingLinks?: any
 ) {
   const isUuid = Boolean(target.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(target.id));
   const filterVal = isUuid ? target.id! : (target.username || target.id || "");
 
-  // 1. Try native column
-  const { error: nativeErr } = await (isUuid
-    ? adminClient.from("profiles").update({ role: newRole }).eq("id", filterVal)
-    : adminClient.from("profiles").update({ role: newRole }).ilike("username", filterVal));
-
-  // 2. If column doesn't exist, store in social_links JSONB
-  if (nativeErr) {
+  let currentLinks = existingLinks;
+  if (!currentLinks || typeof currentLinks !== "object") {
     const { data: prof } = await (isUuid
       ? adminClient.from("profiles").select("social_links").eq("id", filterVal).maybeSingle()
       : adminClient.from("profiles").select("social_links").ilike("username", filterVal).maybeSingle());
+    currentLinks = prof?.social_links || {};
+  }
 
-    const currentLinks = (prof?.social_links && typeof prof.social_links === "object") ? prof.social_links : {};
-    const { error: fallbackErr } = await (isUuid
-      ? adminClient.from("profiles").update({
-          social_links: {
-            ...currentLinks,
-            role: newRole,
-          },
-        }).eq("id", filterVal)
-      : adminClient.from("profiles").update({
-          social_links: {
-            ...currentLinks,
-            role: newRole,
-          },
-        }).ilike("username", filterVal));
+  const updatedLinks = { ...currentLinks, role: newRole };
+  const { error } = await (isUuid
+    ? adminClient.from("profiles").update({ social_links: updatedLinks }).eq("id", filterVal)
+    : adminClient.from("profiles").update({ social_links: updatedLinks }).ilike("username", filterVal));
 
-    if (fallbackErr) throw fallbackErr;
+  if (error) {
+    // If update failed, try with role column fallback
+    await (isUuid
+      ? adminClient.from("profiles").update({ role: newRole, social_links: updatedLinks }).eq("id", filterVal)
+      : adminClient.from("profiles").update({ role: newRole, social_links: updatedLinks }).ilike("username", filterVal));
   }
 }
 
@@ -507,12 +499,17 @@ export async function PATCH(request: NextRequest) {
         return NextResponse.json({ error: "Invalid role specified" }, { status: 400 });
       }
 
-      await updateProfileRole(adminClient, { id: targetProfile.id, username: targetProfile.username }, role);
+      await updateProfileRole(
+        adminClient,
+        { id: targetProfile.id, username: targetProfile.username },
+        role,
+        targetProfile.social_links
+      );
 
-      // Broadcast profile role update over Supabase realtime to instantly sync active browsers
+      // Non-blocking realtime broadcast
       try {
         const ch = adminClient.channel("user_updates_broadcast");
-        await ch.send({
+        ch.send({
           type: "broadcast",
           event: "profile_updated",
           payload: {
@@ -520,7 +517,7 @@ export async function PATCH(request: NextRequest) {
             targetUsername: targetProfile.username,
             newRole: role,
           },
-        });
+        }).catch((e: any) => console.warn("Broadcast warning:", e));
       } catch (e) {
         console.warn("Failed to send broadcast in set_role", e);
       }
@@ -633,10 +630,10 @@ export async function PATCH(request: NextRequest) {
         }
       }
 
-      // Broadcast suspension change over Supabase realtime
+      // Non-blocking realtime broadcast
       try {
         const ch = adminClient.channel("user_updates_broadcast");
-        await ch.send({
+        ch.send({
           type: "broadcast",
           event: "profile_updated",
           payload: {
@@ -644,7 +641,7 @@ export async function PATCH(request: NextRequest) {
             targetUsername: targetProfile.username,
             isBanned,
           },
-        });
+        }).catch((e: any) => console.warn("Broadcast warning:", e));
       } catch (e) {
         console.warn("Failed to send broadcast in toggle_ban", e);
       }
@@ -655,6 +652,60 @@ export async function PATCH(request: NextRequest) {
           ? `User @${targetProfile.username} has been suspended.`
           : `User @${targetProfile.username} suspension has been lifted.`,
         is_banned: isBanned,
+      });
+    }
+
+    // ==========================================
+    // ACTION 3: Update Display Name (Shown Name)
+    // ==========================================
+    if (action === "update_display_name" || action === "set_display_name" || action === "set_name") {
+      const newDisplayName = (body.displayName || body.display_name || body.name || "").trim();
+      if (!newDisplayName) {
+        return NextResponse.json({ error: "Display name cannot be empty" }, { status: 400 });
+      }
+
+      // Main Admin / Admins can change anyone's display name.
+      // Users can change their own display name.
+      const callerUsername = auth.username || requesterUsername || "";
+      const isCallerSelf = callerUsername.toLowerCase() === (targetProfile.username || "").toLowerCase();
+      if (!isCallerAdmin && !isCallerSelf) {
+        return NextResponse.json({ error: "Unauthorized: Admin privileges or self-ownership required to update display name" }, { status: 403 });
+      }
+
+      const currentLinks = targetProfile.social_links || {};
+      const updatedLinks = { ...currentLinks, display_name: newDisplayName };
+
+      const isTargetUuid = Boolean(targetProfile.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(targetProfile.id));
+      const filterVal = isTargetUuid ? targetProfile.id : targetProfile.username;
+
+      const { error: updateErr } = await (isTargetUuid
+        ? adminClient.from("profiles").update({ social_links: updatedLinks, display_name: newDisplayName }).eq("id", filterVal)
+        : adminClient.from("profiles").update({ social_links: updatedLinks, display_name: newDisplayName }).ilike("username", filterVal));
+
+      if (updateErr) {
+        await (isTargetUuid
+          ? adminClient.from("profiles").update({ social_links: updatedLinks }).eq("id", filterVal)
+          : adminClient.from("profiles").update({ social_links: updatedLinks }).ilike("username", filterVal));
+      }
+
+      // Non-blocking broadcast
+      try {
+        const ch = adminClient.channel("user_updates_broadcast");
+        ch.send({
+          type: "broadcast",
+          event: "profile_updated",
+          payload: {
+            targetUserId: targetProfile.id,
+            targetUsername: targetProfile.username,
+            displayName: newDisplayName,
+          },
+        }).catch(() => {});
+      } catch (e) {}
+
+      return NextResponse.json({
+        success: true,
+        message: `Successfully updated @${targetProfile.username}'s shown name to "${newDisplayName}"`,
+        displayName: newDisplayName,
       });
     }
 

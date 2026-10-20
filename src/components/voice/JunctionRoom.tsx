@@ -581,6 +581,14 @@ export function JunctionRoom({
     chatMessagesEndRef.current?.scrollIntoView({ behavior });
   }, []);
 
+  const [lastReadChatCount, setLastReadChatCount] = useState(0);
+
+  useEffect(() => {
+    if (isChatOpen && rightPanelTab === "chat") {
+      setLastReadChatCount(chatMessages.length);
+    }
+  }, [isChatOpen, rightPanelTab, chatMessages.length]);
+
   useEffect(() => {
     if (isChatOpen) {
       scrollChatToBottom("smooth");
@@ -3317,8 +3325,8 @@ export function JunctionRoom({
             title={showInRoomPopups ? "Room Chat (Show msgs active)" : "Room Chat (Not show msgs)"}
           >
             <MessageSquare size={18} />
-            {chatMessages.length > 0 && (!isChatOpen || rightPanelTab !== "chat") && (
-              <span className="absolute 0 top-0.5 right-0.5 w-2.5 h-2.5 bg-indigo-400 rounded-full ring-2 ring-[#0E0F17] animate-pulse" />
+            {chatMessages.length > lastReadChatCount && (!isChatOpen || rightPanelTab !== "chat") && (
+              <span className="absolute top-0.5 right-0.5 w-2.5 h-2.5 bg-indigo-400 rounded-full ring-2 ring-[#0E0F17] animate-pulse" />
             )}
           </button>
 

@@ -26,12 +26,14 @@ import {
   ExternalLink,
   ChevronRight,
   Info,
+  Edit3,
 } from "lucide-react";
 import Link from "next/link";
 
 interface AdminUserRecord {
   id: string;
   username: string;
+  displayName?: string;
   avatar: string;
   bio?: string;
   card_bg_color?: string;
@@ -93,6 +95,15 @@ export default function AdminPortalPage() {
   const [isSubmittingAction, setIsSubmittingAction] = useState(false);
   const [banReasonInput, setBanReasonInput] = useState("Violation of community guidelines");
 
+  // Display Name Edit Modal
+  const [pendingNameEdit, setPendingNameEdit] = useState<{
+    targetId: string;
+    targetUsername: string;
+    currentDisplayName: string;
+  } | null>(null);
+  const [newDisplayNameInput, setNewDisplayNameInput] = useState("");
+  const [isSavingName, setIsSavingName] = useState(false);
+
   // Determine permissions
   const cleanName = user?.name?.trim().toLowerCase() || "";
   const isMainAdmin = user?.role === "super_admin" || cleanName === "jayanthadmin" || cleanName === "jayanth";
@@ -112,6 +123,9 @@ export default function AdminPortalPage() {
     return {
       "Content-Type": "application/json",
       ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+      ...(user?.name ? { "x-requester-username": user.name } : {}),
+      ...(user?.username ? { "x-requester-username": user.username } : {}),
+      ...(user?.role ? { "x-requester-role": user.role } : {}),
     };
   };
 
@@ -149,14 +163,23 @@ export default function AdminPortalPage() {
     fetchData();
   }, [isLoaded, user?.id, hasAdminAccess, isRegistered]);
 
-  // Handle Role Change
+  // Handle Role Change (Instant optimistic update + background sync)
   const handleRoleChange = async (targetUserId: string, newRole: UserRole) => {
     if (newRole === "admin" && !isMainAdmin) {
       showToast("error", "Only Main Admin (jayanthadmin) can appoint Admins.");
       return;
     }
 
-    setIsSubmittingAction(true);
+    // Dismiss confirmation modal immediately so there's zero UI waiting
+    setPendingAction(null);
+
+    const prevUsers = [...users];
+    // Optimistic UI state update
+    setUsers((prev) =>
+      prev.map((u) => (u.id === targetUserId ? { ...u, role: newRole } : u))
+    );
+    showToast("success", `Role updated to ${newRole}`);
+
     try {
       const headers = await getAuthHeaders();
       const res = await fetch("/api/admin/users", {
@@ -173,22 +196,30 @@ export default function AdminPortalPage() {
       if (!res.ok) {
         throw new Error(data.error || "Failed to update role");
       }
-
-      showToast("success", data.message || "Role updated successfully");
-      setUsers((prev) =>
-        prev.map((u) => (u.id === targetUserId ? { ...u, role: newRole } : u))
-      );
-      setPendingAction(null);
     } catch (err: any) {
-      showToast("error", err.message);
+      // Revert if failed
+      setUsers(prevUsers);
+      showToast("error", err.message || "Failed to update role");
     } finally {
       setIsSubmittingAction(false);
     }
   };
 
-  // Handle Ban / Unban
+  // Handle Ban / Unban (Instant optimistic update + background sync)
   const handleToggleBan = async (targetUserId: string, shouldBan: boolean, reason?: string) => {
-    setIsSubmittingAction(true);
+    // Dismiss confirmation modal immediately
+    setPendingAction(null);
+
+    const prevUsers = [...users];
+    setUsers((prev) =>
+      prev.map((u) =>
+        u.id === targetUserId
+          ? { ...u, is_banned: shouldBan, banned_reason: shouldBan ? reason : undefined }
+          : u
+      )
+    );
+    showToast("success", shouldBan ? "User account suspended" : "User suspension lifted");
+
     try {
       const headers = await getAuthHeaders();
       const res = await fetch("/api/admin/users", {
@@ -206,20 +237,52 @@ export default function AdminPortalPage() {
       if (!res.ok) {
         throw new Error(data.error || "Failed to toggle ban status");
       }
-
-      showToast("success", data.message || "Ban status updated");
-      setUsers((prev) =>
-        prev.map((u) =>
-          u.id === targetUserId
-            ? { ...u, is_banned: shouldBan, banned_reason: shouldBan ? reason : undefined }
-            : u
-        )
-      );
-      setPendingAction(null);
     } catch (err: any) {
-      showToast("error", err.message);
+      // Revert if failed
+      setUsers(prevUsers);
+      showToast("error", err.message || "Failed to update ban status");
     } finally {
       setIsSubmittingAction(false);
+    }
+  };
+
+  // Handle Display Name Update
+  const handleUpdateDisplayName = async (targetUserId: string, newDisplayName: string) => {
+    const trimmed = newDisplayName.trim();
+    if (!trimmed) {
+      showToast("error", "Display name cannot be empty");
+      return;
+    }
+
+    setPendingNameEdit(null);
+
+    const prevUsers = [...users];
+    setUsers((prev) =>
+      prev.map((u) => (u.id === targetUserId ? { ...u, displayName: trimmed } : u))
+    );
+    showToast("success", `Shown name updated to "${trimmed}"`);
+
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch("/api/admin/users", {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({
+          targetUserId,
+          action: "update_display_name",
+          displayName: trimmed,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to update shown name");
+      }
+    } catch (err: any) {
+      setUsers(prevUsers);
+      showToast("error", err.message || "Failed to update shown name");
+    } finally {
+      setIsSavingName(false);
     }
   };
 
@@ -278,6 +341,7 @@ export default function AdminPortalPage() {
     return users.filter((u) => {
       const matchesSearch =
         u.username.toLowerCase().includes(userSearch.toLowerCase()) ||
+        (u.displayName && u.displayName.toLowerCase().includes(userSearch.toLowerCase())) ||
         (u.bio && u.bio.toLowerCase().includes(userSearch.toLowerCase())) ||
         u.id.toLowerCase().includes(userSearch.toLowerCase());
 
@@ -602,13 +666,31 @@ export default function AdminPortalPage() {
                                   )}
                                 </div>
                                 <div className="min-w-0">
-                                  <div className="flex items-center gap-2">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="font-bold text-white truncate max-w-[140px] sm:max-w-[200px]">
+                                      {u.displayName || u.username}
+                                    </span>
+                                    <button
+                                      onClick={() => {
+                                        setPendingNameEdit({
+                                          targetId: u.id,
+                                          targetUsername: u.username,
+                                          currentDisplayName: u.displayName || u.username,
+                                        });
+                                        setNewDisplayNameInput(u.displayName || u.username);
+                                      }}
+                                      className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+                                      title="Edit Shown Name"
+                                    >
+                                      <Edit3 size={12} />
+                                    </button>
                                     <Link
                                       href={`/profile/${u.id}`}
-                                      className="font-bold text-white hover:text-indigo-300 transition-colors truncate flex items-center gap-1"
+                                      className="text-xs text-indigo-300 hover:text-indigo-200 transition-colors truncate flex items-center gap-0.5"
+                                      title="View Profile"
                                     >
                                       <span>@{u.username}</span>
-                                      <ExternalLink size={12} className="text-slate-500" />
+                                      <ExternalLink size={10} className="text-slate-500" />
                                     </Link>
                                     {isThisUserMainAdmin && (
                                       <span className="text-[10px] font-black px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
@@ -1055,6 +1137,61 @@ export default function AdminPortalPage() {
                 }`}
               >
                 {isSubmittingAction ? "Processing..." : "Confirm Action"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SHOWN NAME EDIT MODAL */}
+      {pendingNameEdit && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-[#12131A] border border-white/15 rounded-3xl max-w-sm w-full p-6 shadow-2xl animate-in zoom-in-95 duration-200">
+            <div className="w-12 h-12 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center mb-4 text-indigo-400">
+              <Edit3 size={24} />
+            </div>
+
+            <h3 className="text-lg font-bold text-white mb-1">
+              Edit Shown Name
+            </h3>
+            <p className="text-xs text-slate-400 mb-4">
+              Update the public display name for <strong className="text-slate-200">@{pendingNameEdit.targetUsername}</strong>.
+            </p>
+
+            <div className="mb-4">
+              <label className="text-[11px] font-semibold text-slate-300 block mb-1">
+                Shown Name (Display Name):
+              </label>
+              <input
+                type="text"
+                value={newDisplayNameInput}
+                onChange={(e) => setNewDisplayNameInput(e.target.value)}
+                maxLength={32}
+                placeholder="e.g. John Doe"
+                className="w-full px-3 py-2 bg-black/40 border border-white/10 rounded-xl text-xs sm:text-sm text-white focus:outline-none focus:border-indigo-500 font-medium"
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    handleUpdateDisplayName(pendingNameEdit.targetId, newDisplayNameInput);
+                  }
+                }}
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                onClick={() => setPendingNameEdit(null)}
+                className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 text-xs font-semibold cursor-pointer"
+              >
+                Cancel
+              </button>
+
+              <button
+                disabled={isSavingName || !newDisplayNameInput.trim()}
+                onClick={() => handleUpdateDisplayName(pendingNameEdit.targetId, newDisplayNameInput)}
+                className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold cursor-pointer transition-colors disabled:opacity-50"
+              >
+                {isSavingName ? "Saving..." : "Save Shown Name"}
               </button>
             </div>
           </div>
