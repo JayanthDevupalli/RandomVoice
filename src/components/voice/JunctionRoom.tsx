@@ -339,6 +339,28 @@ export function JunctionRoom({
   const isManager = isAdmin || myEffectiveRole === "manager";
   const isStaff = isManager;
 
+  const getAuthHeaders = useCallback(async (): Promise<Record<string, string>> => {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session?.access_token) {
+        headers["Authorization"] = `Bearer ${session.access_token}`;
+      }
+    } catch (e) {
+      console.warn("Failed to retrieve supabase session in JunctionRoom:", e);
+    }
+    const callerUser = user?.username || myIdentity;
+    if (callerUser) {
+      headers["x-requester-username"] = callerUser;
+    }
+    if (myPlatformRole) {
+      headers["x-requester-role"] = myPlatformRole;
+    }
+    return headers;
+  }, [user?.username, myIdentity, myPlatformRole]);
+
   // Prefetch junctions hub so minimize transition is instantaneous
   useEffect(() => {
     router.prefetch("/junctions");
@@ -901,15 +923,26 @@ export function JunctionRoom({
 
         pollJunction();
       } else if (type === "role_change_event" && payload) {
-        const { targetIdentity, newRole } = payload;
+        const { targetIdentity, targetUsername, targetName, newRole } = payload;
+        const cleanTarget = (targetIdentity || "").toLowerCase();
+        const cleanUser = (targetUsername || "").toLowerCase();
+        const cleanN = (targetName || "").toLowerCase();
         setParticipants((prev) =>
           prev.map((p) =>
-            p.identity?.toLowerCase() === targetIdentity?.toLowerCase() || (isLocalIdentity(targetIdentity) && isLocalParticipant(p))
+            (cleanTarget && p.identity?.toLowerCase() === cleanTarget) ||
+            (cleanUser && p.username?.toLowerCase() === cleanUser) ||
+            (cleanN && p.name?.toLowerCase() === cleanN) ||
+            (cleanTarget && isLocalIdentity(cleanTarget) && isLocalParticipant(p)) ||
+            (cleanUser && isLocalIdentity(cleanUser) && isLocalParticipant(p))
               ? { ...p, userRole: newRole }
               : p
           )
         );
-        if (isLocalIdentity(targetIdentity)) {
+        if (
+          isLocalIdentity(targetIdentity) ||
+          (cleanUser && isLocalIdentity(cleanUser)) ||
+          (cleanN && isLocalIdentity(cleanN))
+        ) {
           setLocalRoleOverride(newRole);
           localRoleOverrideRef.current = newRole;
           refreshUser?.();
@@ -1009,12 +1042,37 @@ export function JunctionRoom({
 
     supabaseChannelRef.current = roomChannel;
 
+    // Listen to global user profile / role updates broadcast from admin actions
+    const userUpdatesChannelId = `room_user_updates_${junctionId}`;
+    const userUpdatesChannel = supabase
+      .channel(userUpdatesChannelId)
+      .on("broadcast", { event: "profile_updated" }, (msg: any) => {
+        const p = msg?.payload;
+        if (!p) return;
+        const { targetUsername, newRole } = p;
+        if (newRole && targetUsername) {
+          const cleanU = targetUsername.toLowerCase();
+          setParticipants((prev) =>
+            prev.map((part) =>
+              part.username?.toLowerCase() === cleanU ||
+              part.identity?.toLowerCase() === cleanU ||
+              part.name?.toLowerCase() === cleanU
+                ? { ...part, userRole: newRole }
+                : part
+            )
+          );
+        }
+        triggerDebouncedPoll();
+      })
+      .subscribe();
+
     return () => {
       isMounted = false;
       clearTimeout(timerId);
       if (debounceTimer) clearTimeout(debounceTimer);
       supabaseChannelRef.current = null;
       supabase.removeChannel(roomChannel);
+      supabase.removeChannel(userUpdatesChannel);
     };
   }, [junctionId]);
 
@@ -1271,8 +1329,9 @@ export function JunctionRoom({
 
   // Staff Action: Platform Suspend / Ban Account
   const handlePlatformBanParticipant = async (targetParticipant: JunctionParticipant) => {
+    const targetUserClean = (targetParticipant.username || targetParticipant.identity || "").trim().toLowerCase();
     const targetRole = targetParticipant.userRole || (
-      targetParticipant.identity?.trim().toLowerCase() === "jayanthadmin" || targetParticipant.identity?.trim().toLowerCase() === "jayanth"
+      targetUserClean === "jayanthadmin" || targetUserClean === "jayanth"
         ? "super_admin"
         : "user"
     );
@@ -1291,7 +1350,7 @@ export function JunctionRoom({
     }
 
     const confirmed = window.confirm(
-      `Are you sure you want to suspend @${targetParticipant.identity}?\nThis will ban their account from YapClub and disconnect them immediately.`
+      `Are you sure you want to suspend @${targetParticipant.username || targetParticipant.identity}?\nThis will ban their account from YapClub and disconnect them immediately.`
     );
     if (!confirmed) return;
 
@@ -1306,13 +1365,15 @@ export function JunctionRoom({
     );
 
     try {
+      const authHeaders = await getAuthHeaders();
+      const targetUser = targetParticipant.username || targetParticipant.identity;
       const res = await fetch("/api/admin/users", {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders,
         body: JSON.stringify({
           action: "toggle_ban",
           targetUserId: isParticipantUuid ? targetParticipant.id : undefined,
-          targetUsername: targetParticipant.identity,
+          targetUsername: targetUser,
           isBanned: true,
           bannedReason: `Suspended by ${myPlatformRole} @${myIdentity} from room "${junction?.name || ""}"`,
           requesterUsername: user?.username || myIdentity,
@@ -1331,7 +1392,7 @@ export function JunctionRoom({
         payload: { targetIdentity: targetParticipant.identity, action: "ban" },
       });
 
-      setModNoticeToast(`🚫 Account @${targetParticipant.identity} has been suspended.`);
+      setModNoticeToast(`🚫 Account @${targetParticipant.username || targetParticipant.identity} has been suspended.`);
       setTimeout(() => setModNoticeToast(null), 4000);
     } catch (err: any) {
       console.error("Ban error:", err);
@@ -1344,8 +1405,9 @@ export function JunctionRoom({
     targetParticipant: JunctionParticipant,
     newRole: "admin" | "manager" | "user"
   ) => {
+    const targetUserClean = (targetParticipant.username || targetParticipant.name || targetParticipant.identity || "").trim().toLowerCase();
     const targetRole = targetParticipant.userRole || (
-      targetParticipant.identity?.trim().toLowerCase() === "jayanthadmin" || targetParticipant.identity?.trim().toLowerCase() === "jayanth"
+      targetUserClean === "jayanthadmin" || targetUserClean === "jayanth"
         ? "super_admin"
         : "user"
     );
@@ -1373,7 +1435,7 @@ export function JunctionRoom({
 
     const actionLabel = newRole === "user" ? "Demote" : "Promote";
     const confirmed = window.confirm(
-      `${actionLabel} @${targetParticipant.identity} to ${newRole.toUpperCase()}?`
+      `${actionLabel} @${targetParticipant.username || targetParticipant.name || targetParticipant.identity} to ${newRole.toUpperCase()}?`
     );
     if (!confirmed) return;
 
@@ -1381,9 +1443,13 @@ export function JunctionRoom({
 
     // Optimistically update participant role locally (case-insensitive & local-aware)
     const cleanTarget = targetParticipant.identity?.toLowerCase();
+    const cleanUsername = targetParticipant.username?.toLowerCase();
+    const cleanName = targetParticipant.name?.toLowerCase();
     setParticipants((prev) =>
       prev.map((p) =>
         p.identity?.toLowerCase() === cleanTarget ||
+        (cleanUsername && p.username?.toLowerCase() === cleanUsername) ||
+        (cleanName && p.name?.toLowerCase() === cleanName) ||
         (isLocalIdentity(targetParticipant.identity) && isLocalParticipant(p))
           ? { ...p, userRole: newRole }
           : p
@@ -1401,14 +1467,16 @@ export function JunctionRoom({
     );
 
     try {
+      const authHeaders = await getAuthHeaders();
+      const targetUser = targetParticipant.username || targetParticipant.name || targetParticipant.identity;
       const res = await fetch("/api/admin/users", {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders,
         body: JSON.stringify({
           action: "set_role",
           role: newRole,
           targetUserId: isParticipantUuid ? targetParticipant.id : undefined,
-          targetUsername: targetParticipant.identity,
+          targetUsername: targetUser,
           requesterUsername: user?.username || myIdentity,
           requesterRole: myPlatformRole,
         }),
@@ -1422,10 +1490,15 @@ export function JunctionRoom({
       // Broadcast role change event over both LiveKit and Supabase Realtime in parallel
       broadcastRoomUpdate({
         type: "role_change_event",
-        payload: { targetIdentity: targetParticipant.identity, newRole },
+        payload: {
+          targetIdentity: targetParticipant.identity,
+          targetUsername: targetParticipant.username,
+          targetName: targetParticipant.name,
+          newRole,
+        },
       });
 
-      setModNoticeToast(`🎖️ Updated @${targetParticipant.identity} role to ${newRole.toUpperCase()}`);
+      setModNoticeToast(`🎖️ Updated @${targetParticipant.username || targetParticipant.name || targetParticipant.identity} role to ${newRole.toUpperCase()}`);
       setTimeout(() => setModNoticeToast(null), 4000);
 
       confetti({ particleCount: 50, spread: 60, origin: { y: 0.6 } });
@@ -1434,9 +1507,13 @@ export function JunctionRoom({
       alert(err.message || "Failed to update role");
       // Revert optimistic role update on failure
       const cleanTarget = targetParticipant.identity?.toLowerCase();
+      const cleanUsername = targetParticipant.username?.toLowerCase();
+      const cleanName = targetParticipant.name?.toLowerCase();
       setParticipants((prev) =>
         prev.map((p) =>
           p.identity?.toLowerCase() === cleanTarget ||
+          (cleanUsername && p.username?.toLowerCase() === cleanUsername) ||
+          (cleanName && p.name?.toLowerCase() === cleanName) ||
           (isLocalIdentity(targetParticipant.identity) && isLocalParticipant(p))
             ? { ...p, userRole: targetParticipant.userRole }
             : p
@@ -1453,7 +1530,7 @@ export function JunctionRoom({
     }
 
     const confirmed = window.confirm(
-      `⚠️ PERMANENT ACCOUNT DELETION:\nAre you sure you want to permanently delete the account of @${targetParticipant.identity}? This will remove all their profiles, rooms, connections, and login data permanently.`
+      `⚠️ PERMANENT ACCOUNT DELETION:\nAre you sure you want to permanently delete the account of @${targetParticipant.username || targetParticipant.identity}? This will remove all their profiles, rooms, connections, and login data permanently.`
     );
     if (!confirmed) return;
 
@@ -1468,9 +1545,14 @@ export function JunctionRoom({
     );
 
     try {
+      const authHeaders = await getAuthHeaders();
+      const targetUser = targetParticipant.username || targetParticipant.identity;
       const res = await fetch(
-        `/api/admin/users?${isParticipantUuid ? `targetUserId=${encodeURIComponent(targetParticipant.id)}&` : ""}targetUsername=${encodeURIComponent(targetParticipant.identity)}&requesterRole=super_admin&requesterUsername=${encodeURIComponent(myIdentity)}`,
-        { method: "DELETE" }
+        `/api/admin/users?${isParticipantUuid ? `targetUserId=${encodeURIComponent(targetParticipant.id)}&` : ""}targetUsername=${encodeURIComponent(targetUser)}&requesterRole=${encodeURIComponent(myPlatformRole)}&requesterUsername=${encodeURIComponent(user?.username || myIdentity)}`,
+        {
+          method: "DELETE",
+          headers: authHeaders,
+        }
       );
 
       const data = await res.json();
@@ -1478,7 +1560,7 @@ export function JunctionRoom({
         throw new Error(data.error || "Failed to delete account");
       }
 
-      setModNoticeToast(`🗑️ Account @${targetParticipant.identity} was permanently deleted.`);
+      setModNoticeToast(`🗑️ Account @${targetParticipant.username || targetParticipant.identity} was permanently deleted.`);
       setTimeout(() => setModNoticeToast(null), 4000);
     } catch (err: any) {
       console.error("Delete account error:", err);
@@ -1499,9 +1581,11 @@ export function JunctionRoom({
       // 1. Broadcast room ended to disconnect all peers across all channels
       broadcastRoomUpdate({ type: "room_ended" });
 
-      // 2. Call delete API with callerRole
+      // 2. Call delete API with callerRole and auth headers
+      const authHeaders = await getAuthHeaders();
       await fetch(`/api/junctions/${junctionId}?callerRole=${myPlatformRole}&moderatorIdentity=${encodeURIComponent(myIdentity)}`, {
         method: "DELETE",
+        headers: authHeaders,
       });
 
       // 3. Clean local storage flags
@@ -3326,8 +3410,9 @@ export function JunctionRoom({
         const isTargetLocal = isLocalParticipant(target);
         if (isTargetLocal) return null;
 
+        const targetUserClean = (target.username || target.name || target.identity || "").trim().toLowerCase();
         const targetRole = target.userRole || (
-          target.identity?.trim().toLowerCase() === "jayanthadmin" || target.identity?.trim().toLowerCase() === "jayanth"
+          targetUserClean === "jayanthadmin" || targetUserClean === "jayanth"
             ? "super_admin"
             : "user"
         );

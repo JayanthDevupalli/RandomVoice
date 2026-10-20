@@ -121,7 +121,8 @@ function rowToParticipant(
 ): JunctionParticipant {
   const decoded = decodeParticipantColor(row.color);
   const cleanId = (row.identity || "").toLowerCase();
-  const userProfile = profileMap?.[cleanId];
+  const cleanName = (row.name || "").toLowerCase();
+  const userProfile = profileMap?.[cleanId] || profileMap?.[cleanName];
 
   // Resolve cardBgColor: userProfile theme > row.card_bg_color > decoded cardBgColor > default
   let cardBgColor = "#465B73";
@@ -135,9 +136,10 @@ function rowToParticipant(
     cardBgColor = row.card_bg_color || decoded.cardBgColor || "#465B73";
   }
 
-  const userRole = resolvePlatformRole(row.identity, roleMap?.[cleanId] || userProfile?.role);
+  const rawRole = roleMap?.[cleanId] || roleMap?.[cleanName] || userProfile?.role;
+  const userRole = resolvePlatformRole(row.name || row.identity, rawRole);
   const resolvedName = userProfile?.displayName || row.name || row.identity;
-  const resolvedUsername = userProfile?.username || row.identity;
+  const resolvedUsername = userProfile?.username || row.name || row.identity;
   const resolvedAvatar = userProfile?.avatar ? userProfile.avatar : (row.avatar || "zap");
 
   return {
@@ -178,7 +180,13 @@ async function fetchJunctionWithParticipants(junctionId: string): Promise<Juncti
     .order("joined_at", { ascending: true });
 
   const rawParticipants = (pRows || []) as ParticipantRow[];
-  const identities = Array.from(new Set(rawParticipants.map((p) => p.identity).filter(Boolean)));
+  const identities = Array.from(
+    new Set(
+      rawParticipants
+        .flatMap((p) => [p.identity, p.name])
+        .filter(Boolean)
+    )
+  );
   
   const roleMap: Record<string, UserRole> = {};
   const profileMap: Record<string, ParticipantProfile> = {};
@@ -196,12 +204,16 @@ async function fetchJunctionWithParticipants(junctionId: string): Promise<Juncti
 
   if (searchIdentities.length > 0) {
     try {
-      const { data: profs } = await supabase
+      const { data: profs, error: profError } = await supabase
         .from("profiles")
-        .select("username, display_name, avatar, card_bg_color, role, is_banned, social_links")
+        .select("*")
         .in("username", searchIdentities);
 
-      for (const pr of profs || []) {
+      if (profError) {
+        console.error("Error fetching participant platform profiles:", profError);
+      }
+
+      for (const pr of (profs as any[]) || []) {
         if (pr.username) {
           const isBanned = Boolean(pr.is_banned ?? pr.social_links?.is_banned);
           if (isBanned) {
@@ -280,7 +292,13 @@ export async function getAllJunctions(): Promise<Junction[]> {
     .order("joined_at", { ascending: true });
 
   const rawParticipants = (pRows || []) as ParticipantRow[];
-  const allIdentities = Array.from(new Set(rawParticipants.map((p: any) => p.identity).filter(Boolean))) as string[];
+  const allIdentities = Array.from(
+    new Set(
+      rawParticipants
+        .flatMap((p: any) => [p.identity, p.name])
+        .filter(Boolean)
+    )
+  ) as string[];
   
   const roleMap: Record<string, UserRole> = {};
   const profileMap: Record<string, ParticipantProfile> = {};
@@ -298,12 +316,16 @@ export async function getAllJunctions(): Promise<Junction[]> {
 
   if (searchIdentities.length > 0) {
     try {
-      const { data: profs } = await supabase
+      const { data: profs, error: profError } = await supabase
         .from("profiles")
-        .select("username, display_name, avatar, card_bg_color, role, is_banned, social_links")
+        .select("*")
         .in("username", searchIdentities);
 
-      for (const pr of profs || []) {
+      if (profError) {
+        console.error("Error fetching lobby participant platform profiles:", profError);
+      }
+
+      for (const pr of (profs as any[]) || []) {
         if (pr.username) {
           const isBanned = Boolean(pr.is_banned ?? pr.social_links?.is_banned);
           if (isBanned) {

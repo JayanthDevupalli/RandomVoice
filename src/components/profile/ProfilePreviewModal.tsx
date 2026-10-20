@@ -341,8 +341,9 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
             {profile ? (
               // Registered User View
               (() => {
-                const isMain = profile.username?.trim().toLowerCase() === "jayanthadmin" || profile.username?.trim().toLowerCase() === "jayanth" || profile.role === "super_admin";
-                const modalRole = isMain ? "super_admin" : (profile.role === "admin" ? "admin" : profile.role === "manager" ? "manager" : participant.userRole || "user");
+                const profRole = profile.role || profile.social_links?.role;
+                const isMain = profile.username?.trim().toLowerCase() === "jayanthadmin" || profile.username?.trim().toLowerCase() === "jayanth" || profRole === "super_admin";
+                const modalRole = isMain ? "super_admin" : (profRole === "admin" ? "admin" : profRole === "manager" ? "manager" : participant.userRole || "user");
 
                 return (
                   <div className="flex flex-col items-center">

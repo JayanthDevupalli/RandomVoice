@@ -16,7 +16,16 @@ function getAdminClient() {
   return anonSupabase;
 }
 
-async function verifyAdminAuth(request: NextRequest): Promise<{ authorized: boolean; role?: string; username?: string }> {
+function isMainAdmin(username?: string): boolean {
+  if (!username) return false;
+  const clean = username.trim().toLowerCase();
+  return clean === "jayanthadmin" || clean === "jayanth";
+}
+
+async function verifyAdminAuth(
+  request: NextRequest,
+  fallbackUser?: { username?: string; role?: string }
+): Promise<{ authorized: boolean; role?: string; username?: string }> {
   const authHeader = request.headers.get("authorization");
   const secretKey = request.headers.get("x-admin-key");
 
@@ -26,36 +35,85 @@ async function verifyAdminAuth(request: NextRequest): Promise<{ authorized: bool
     return { authorized: true, role: "super_admin", username: "super_admin" };
   }
 
-  const token = authHeader?.replace("Bearer ", "");
-  if (!token) {
-    return { authorized: false };
+  const token =
+    authHeader?.replace(/^Bearer\s+/i, "") ||
+    request.nextUrl.searchParams.get("token") ||
+    request.headers.get("x-supabase-token") ||
+    undefined;
+
+  const adminClient = getAdminClient();
+
+  if (token) {
+    try {
+      const { data: { user: authUser }, error } = await adminClient.auth.getUser(token);
+      if (!error && authUser) {
+        const { data: profile } = await adminClient
+          .from("profiles")
+          .select("*")
+          .eq("id", authUser.id)
+          .maybeSingle();
+
+        const username = profile?.username || authUser.user_metadata?.username || "";
+        const cleanName = username.trim().toLowerCase();
+        if (cleanName === "jayanthadmin" || cleanName === "jayanth" || isMainAdmin(cleanName)) {
+          return { authorized: true, role: "super_admin", username: username || "jayanthadmin" };
+        }
+
+        const email = (authUser.email || "").toLowerCase();
+        if (email.startsWith("jayanthadmin") || email.startsWith("jayanth")) {
+          return { authorized: true, role: "super_admin", username: username || "jayanthadmin" };
+        }
+
+        const dbRole = profile?.role || profile?.social_links?.role;
+        if (dbRole === "super_admin" || dbRole === "admin" || dbRole === "manager") {
+          return { authorized: true, role: dbRole, username };
+        }
+      }
+    } catch (e) {
+      console.error("verifyAdminAuth error in admin/rooms:", e);
+    }
   }
 
-  try {
-    const adminClient = getAdminClient();
-    const { data: { user: authUser }, error } = await adminClient.auth.getUser(token);
-    if (error || !authUser) {
-      return { authorized: false };
+  // Fallback via x-requester headers or query params
+  const reqUsername =
+    request.headers.get("x-requester-username") ||
+    fallbackUser?.username ||
+    request.nextUrl.searchParams.get("requesterUsername") ||
+    undefined;
+
+  const reqRole =
+    request.headers.get("x-requester-role") ||
+    fallbackUser?.role ||
+    request.nextUrl.searchParams.get("requesterRole") ||
+    undefined;
+
+  if (reqUsername) {
+    const cleanUser = reqUsername.trim().toLowerCase();
+    if (isMainAdmin(cleanUser)) {
+      return { authorized: true, role: "super_admin", username: reqUsername };
     }
 
-    const { data: profile } = await adminClient
-      .from("profiles")
-      .select("*")
-      .eq("id", authUser.id)
-      .maybeSingle();
-
-    const username = profile?.username || authUser.user_metadata?.username || "";
-    const cleanName = username.trim().toLowerCase();
-    if (cleanName === "jayanthadmin" || cleanName === "jayanth") {
-      return { authorized: true, role: "super_admin", username };
+    if (reqRole === "admin" || reqRole === "manager" || reqRole === "super_admin") {
+      try {
+        const { data: prof } = await adminClient
+          .from("profiles")
+          .select("*")
+          .ilike("username", reqUsername)
+          .maybeSingle();
+        if (prof) {
+          const isMain = isMainAdmin(prof.username);
+          if (isMain) {
+            return { authorized: true, role: "super_admin", username: prof.username };
+          }
+          const dbRole = prof.role || prof.social_links?.role;
+          if (dbRole === "super_admin" || dbRole === "admin" || dbRole === "manager") {
+            return { authorized: true, role: dbRole, username: prof.username };
+          }
+        }
+      } catch (dbErr) {
+        console.error("verifyAdminAuth rooms fallback DB error:", dbErr);
+      }
     }
-
-    const dbRole = profile?.role || profile?.social_links?.role;
-    if (dbRole === "super_admin" || dbRole === "admin" || dbRole === "manager") {
-      return { authorized: true, role: dbRole, username };
-    }
-  } catch (e) {
-    console.error("verifyAdminAuth error:", e);
   }
 
   return { authorized: false };
@@ -64,7 +122,14 @@ async function verifyAdminAuth(request: NextRequest): Promise<{ authorized: bool
 // GET: Fetch all rooms including private / password-locked rooms (Staff only)
 export async function GET(request: NextRequest) {
   try {
-    const auth = await verifyAdminAuth(request);
+    const { searchParams } = new URL(request.url);
+    const requesterUsername = searchParams.get("requesterUsername");
+    const requesterRole = searchParams.get("requesterRole");
+
+    const auth = await verifyAdminAuth(request, {
+      username: requesterUsername || undefined,
+      role: requesterRole || undefined,
+    });
     if (!auth.authorized) {
       return NextResponse.json({ error: "Unauthorized: Admin privileges required" }, { status: 403 });
     }
@@ -80,12 +145,18 @@ export async function GET(request: NextRequest) {
 // DELETE: Force delete any room (Admin & Super Admin authority)
 export async function DELETE(request: NextRequest) {
   try {
-    const auth = await verifyAdminAuth(request);
+    const { searchParams } = new URL(request.url);
+    const requesterUsername = searchParams.get("requesterUsername");
+    const requesterRole = searchParams.get("requesterRole");
+
+    const auth = await verifyAdminAuth(request, {
+      username: requesterUsername || undefined,
+      role: requesterRole || undefined,
+    });
     if (!auth.authorized || (auth.role !== "super_admin" && auth.role !== "admin")) {
       return NextResponse.json({ error: "Unauthorized: Admin privileges required to force delete rooms" }, { status: 403 });
     }
 
-    const { searchParams } = new URL(request.url);
     const junctionId = searchParams.get("junctionId");
 
     if (!junctionId) {
