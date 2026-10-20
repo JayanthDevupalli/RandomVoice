@@ -92,8 +92,20 @@ export function InRoomMessenger({ isOpen, onClose }: InRoomMessengerProps) {
       }
     };
     window.addEventListener("yapclub_nicknames_updated", handleNicknameUpdateEvent);
+
+    const handleOpenDmEvent = (e: Event) => {
+      const customEvent = e as CustomEvent<{ conversationId?: string }>;
+      if (customEvent.detail?.conversationId) {
+        setActiveConversationId(customEvent.detail.conversationId);
+        setIsMinimized(false);
+        fetchConversations();
+      }
+    };
+    window.addEventListener("yapclub_open_inroom_dm", handleOpenDmEvent);
+
     return () => {
       window.removeEventListener("yapclub_nicknames_updated", handleNicknameUpdateEvent);
+      window.removeEventListener("yapclub_open_inroom_dm", handleOpenDmEvent);
     };
   }, [user?.id, isRegistered]);
 

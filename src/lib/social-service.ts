@@ -173,11 +173,15 @@ export const socialService = {
         .eq("requester_id", currentUserId)
         .eq("receiver_id", targetUserId);
 
-      // 3. Insert pending follow request
+      // If target user already follows current user (or sent an accepted connection),
+      // following back should immediately be 'accepted' instead of 'pending'!
+      const newStatus = rel.followsMe ? "accepted" : "pending";
+
+      // 3. Insert pending or accepted follow
       const { error } = await supabase.from("connections").insert({
         requester_id: currentUserId,
         receiver_id: targetUserId,
-        status: "pending",
+        status: newStatus,
       });
 
       if (error) {
@@ -185,11 +189,66 @@ export const socialService = {
         return { success: false, error: error.message };
       }
 
+      // If immediately accepted, pre-seed direct conversation
+      if (newStatus === "accepted") {
+        await this.ensureDirectConversation(currentUserId, targetUserId);
+      }
+
       this.broadcastSocialUpdate();
       return { success: true };
     } catch (err: any) {
       console.error("Exception sending follow request:", err);
       return { success: false, error: err.message };
+    }
+  },
+
+  /**
+   * Automatically ensure a direct conversation exists for the connected pair and return conversation ID
+   */
+  async ensureDirectConversation(userId1: string, userId2: string): Promise<string | null> {
+    if (!userId1 || !userId2 || userId1 === userId2) return null;
+
+    try {
+      const { data: myConvs } = await supabase
+        .from("conversation_members")
+        .select("conversation_id, conversations!inner(type)")
+        .eq("user_id", userId1)
+        .eq("conversations.type", "direct");
+
+      let existingConvId: string | null = null;
+      if (myConvs && myConvs.length > 0) {
+        const convIds = myConvs.map((c: any) => c.conversation_id);
+        const { data: shared } = await supabase
+          .from("conversation_members")
+          .select("conversation_id")
+          .eq("user_id", userId2)
+          .in("conversation_id", convIds);
+
+        if (shared && shared.length > 0) {
+          existingConvId = shared[0].conversation_id;
+        }
+      }
+
+      if (!existingConvId) {
+        const { data: newConv } = await supabase
+          .from("conversations")
+          .insert({ type: "direct" })
+          .select("id")
+          .single();
+
+        if (newConv) {
+          await supabase.from("conversation_members").insert([
+            { conversation_id: newConv.id, user_id: userId1, role: "member" },
+            { conversation_id: newConv.id, user_id: userId2, role: "member" },
+          ]);
+          existingConvId = newConv.id;
+        }
+      }
+
+      return existingConvId;
+    } catch (convErr) {
+      console.warn("Non-fatal: could not ensure conversation:", convErr);
+      return null;
     }
   },
 
@@ -223,7 +282,7 @@ export const socialService = {
   },
 
   /**
-   * Accept an incoming follow request (changes status from 'pending' to 'accepted')
+   * Accept an incoming follow request (changes status from 'pending' to 'accepted' and establishes mutual connection)
    */
   async acceptFollowRequest(currentUserId: string, requesterId: string, connectionId?: string): Promise<{ success: boolean; error?: string }> {
     if (!currentUserId || !requesterId) {
@@ -248,45 +307,22 @@ export const socialService = {
         return { success: false, error: error.message };
       }
 
-      // Automatically ensure a direct conversation exists for the newly connected pair
+      // Automatically ensure mutual connection upon acceptance so both users are connected
       try {
-        const { data: myConvs } = await supabase
-          .from("conversation_members")
-          .select("conversation_id, conversations!inner(type)")
-          .eq("user_id", currentUserId)
-          .eq("conversations.type", "direct");
-
-        let existingConvId = null;
-        if (myConvs && myConvs.length > 0) {
-          const convIds = myConvs.map((c: any) => c.conversation_id);
-          const { data: shared } = await supabase
-            .from("conversation_members")
-            .select("conversation_id")
-            .eq("user_id", requesterId)
-            .in("conversation_id", convIds);
-
-          if (shared && shared.length > 0) {
-            existingConvId = shared[0].conversation_id;
-          }
-        }
-
-        if (!existingConvId) {
-          const { data: newConv } = await supabase
-            .from("conversations")
-            .insert({ type: "direct" })
-            .select("id")
-            .single();
-
-          if (newConv) {
-            await supabase.from("conversation_members").insert([
-              { conversation_id: newConv.id, user_id: currentUserId, role: "member" },
-              { conversation_id: newConv.id, user_id: requesterId, role: "member" },
-            ]);
-          }
-        }
-      } catch (convErr) {
-        console.warn("Non-fatal: could not pre-seed conversation on accept:", convErr);
+        await supabase.from("connections").upsert(
+          {
+            requester_id: currentUserId,
+            receiver_id: requesterId,
+            status: "accepted",
+          },
+          { onConflict: "requester_id,receiver_id" }
+        );
+      } catch (revErr) {
+        console.warn("Could not create reverse connection row:", revErr);
       }
+
+      // Automatically ensure a direct conversation exists for the newly connected pair
+      await this.ensureDirectConversation(currentUserId, requesterId);
 
       this.broadcastSocialUpdate();
       return { success: true };

@@ -1,16 +1,28 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { supabase } from "@/lib/supabase";
 import { useUser } from "@/hooks/useUser";
-import { X, UserPlus, ShieldAlert, Loader2, Check, MessageSquare, UserCheck, Unlock, Clock, LogIn } from "lucide-react";
+import {
+  X,
+  UserPlus,
+  ShieldAlert,
+  Loader2,
+  Check,
+  MessageSquare,
+  UserCheck,
+  Unlock,
+  Clock,
+  LogIn,
+  Lock,
+} from "lucide-react";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import { RoleBadge } from "@/components/ui/RoleBadge";
 import { JunctionParticipant } from "@/lib/types";
 import { useRouter } from "next/navigation";
-import { socialService } from "@/lib/social-service";
+import { socialService, RelationshipStatus } from "@/lib/social-service";
 
 interface ProfilePreviewModalProps {
   isOpen: boolean;
@@ -23,10 +35,7 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
   const { user: currentUser, isRegistered } = useUser();
   const [profile, setProfile] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [connectionStatus, setConnectionStatus] = useState<
-    "none" | "pending_from_me" | "pending_from_them" | "accepted" | "blocked_by_me" | "has_blocked_me"
-  >("none");
-  const [incomingReqId, setIncomingReqId] = useState<string | undefined>(undefined);
+  const [relationship, setRelationship] = useState<RelationshipStatus | null>(null);
   const [isRequesting, setIsRequesting] = useState(false);
   const [mounted, setMounted] = useState(false);
 
@@ -34,9 +43,24 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
     setMounted(true);
   }, []);
 
+  const fetchRelationship = useCallback(async (targetId: string) => {
+    if (!isRegistered || !currentUser?.id || currentUser.id === targetId) {
+      setRelationship(null);
+      return;
+    }
+    try {
+      const rel = await socialService.getRelationship(currentUser.id, targetId);
+      setRelationship(rel);
+    } catch (relErr) {
+      console.warn("Failed to check relationship in preview modal:", relErr);
+      setRelationship(null);
+    }
+  }, [currentUser?.id, isRegistered]);
+
   useEffect(() => {
     if (!isOpen || !participant) {
       setProfile(null);
+      setRelationship(null);
       setIsLoading(false);
       return;
     }
@@ -51,6 +75,7 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
 
     if (isExplicitGuest) {
       setProfile(null);
+      setRelationship(null);
       setIsLoading(false);
       return;
     }
@@ -99,26 +124,7 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
 
         // 2. If we are logged in, check relationship
         if (isRegistered && currentUser && currentUser.id !== profileData.id) {
-          try {
-            const rel = await socialService.getRelationship(currentUser.id, profileData.id);
-            if (rel.hasBlockedMe) {
-              setConnectionStatus("has_blocked_me");
-            } else if (rel.isBlockedByMe) {
-              setConnectionStatus("blocked_by_me");
-            } else if (rel.isFollowing) {
-              setConnectionStatus("accepted");
-            } else if (rel.hasPendingRequestFromMe) {
-              setConnectionStatus("pending_from_me");
-            } else if (rel.hasPendingRequestFromThem) {
-              setConnectionStatus("pending_from_them");
-              setIncomingReqId(rel.incomingRequestId);
-            } else {
-              setConnectionStatus("none");
-            }
-          } catch (relErr) {
-            console.warn("Failed to check relationship:", relErr);
-            setConnectionStatus("none");
-          }
+          await fetchRelationship(profileData.id);
         }
       } catch (err) {
         console.error("Failed to load profile in preview modal:", err);
@@ -129,7 +135,19 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
     }
 
     fetchDetails();
-  }, [isOpen, participant, currentUser, isRegistered]);
+  }, [isOpen, participant, currentUser, isRegistered, fetchRelationship]);
+
+  // Real-time synchronization when social actions occur elsewhere
+  useEffect(() => {
+    if (!isOpen || !profile?.id) return;
+    const handleSocialEvent = () => {
+      fetchRelationship(profile.id);
+    };
+    window.addEventListener("yapclub_social_updated", handleSocialEvent);
+    return () => {
+      window.removeEventListener("yapclub_social_updated", handleSocialEvent);
+    };
+  }, [isOpen, profile?.id, fetchRelationship]);
 
   const handleFollow = async () => {
     if (!isRegistered || !currentUser || !profile) {
@@ -142,12 +160,32 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
     try {
       const res = await socialService.followUser(currentUser.id, profile.id);
       if (res.success) {
-        setConnectionStatus("pending_from_me");
+        await fetchRelationship(profile.id);
       } else if (res.error) {
         alert(res.error);
       }
     } catch (err: any) {
       alert("Failed to send follow request. Try again.");
+    } finally {
+      setIsRequesting(false);
+    }
+  };
+
+  const handleUnfollow = async () => {
+    if (!currentUser || !profile) return;
+    const confirmed = window.confirm(`Unfollow @${profile.username}?`);
+    if (!confirmed) return;
+
+    setIsRequesting(true);
+    try {
+      const res = await socialService.unfollowUser(currentUser.id, profile.id);
+      if (res.success) {
+        await fetchRelationship(profile.id);
+      } else if (res.error) {
+        alert(res.error);
+      }
+    } catch (e) {
+      console.error(e);
     } finally {
       setIsRequesting(false);
     }
@@ -159,7 +197,7 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
     try {
       const res = await socialService.cancelFollowRequest(currentUser.id, profile.id);
       if (res.success) {
-        setConnectionStatus("none");
+        await fetchRelationship(profile.id);
       } else if (res.error) {
         alert(res.error);
       }
@@ -174,9 +212,13 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
     if (!currentUser || !profile) return;
     setIsRequesting(true);
     try {
-      const res = await socialService.acceptFollowRequest(currentUser.id, profile.id, incomingReqId);
+      const res = await socialService.acceptFollowRequest(
+        currentUser.id,
+        profile.id,
+        relationship?.incomingRequestId
+      );
       if (res.success) {
-        setConnectionStatus("accepted");
+        await fetchRelationship(profile.id);
       } else if (res.error) {
         alert(res.error);
       }
@@ -191,9 +233,13 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
     if (!currentUser || !profile) return;
     setIsRequesting(true);
     try {
-      const res = await socialService.declineFollowRequest(currentUser.id, profile.id, incomingReqId);
+      const res = await socialService.declineFollowRequest(
+        currentUser.id,
+        profile.id,
+        relationship?.incomingRequestId
+      );
       if (res.success) {
-        setConnectionStatus("none");
+        await fetchRelationship(profile.id);
       } else if (res.error) {
         alert(res.error);
       }
@@ -210,7 +256,45 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
     try {
       const res = await socialService.unblockUser(currentUser.id, profile.id);
       if (res.success) {
-        setConnectionStatus("none");
+        await fetchRelationship(profile.id);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsRequesting(false);
+    }
+  };
+
+  const handleStartMessage = async () => {
+    if (!currentUser || !profile) return;
+    if (relationship?.hasBlockedMe) {
+      alert("This account is unavailable.");
+      return;
+    }
+    if (relationship?.isBlockedByMe) {
+      alert("You must unblock this user to message them.");
+      return;
+    }
+    if (!relationship?.isAcceptedConnection) {
+      alert("Follow request must be accepted before you can message this user.");
+      return;
+    }
+
+    setIsRequesting(true);
+    try {
+      const convId = await socialService.ensureDirectConversation(currentUser.id, profile.id);
+      onClose();
+
+      // Dispatch in-room messenger trigger
+      window.dispatchEvent(
+        new CustomEvent("yapclub_open_inroom_dm", {
+          detail: { conversationId: convId, partnerId: profile.id },
+        })
+      );
+
+      // If not in a junction room, navigate to messages page directly
+      if (typeof window !== "undefined" && !window.location.pathname.startsWith("/junction")) {
+        router.push(convId ? `/messages?id=${convId}` : "/messages");
       }
     } catch (e) {
       console.error(e);
@@ -279,15 +363,26 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
                       )}
                     </div>
 
-                    <p className="text-xs font-semibold text-indigo-300/80 mb-2">
+                    <p className="text-xs font-semibold text-indigo-300/80 mb-1">
                       @{profile.username}
                     </p>
+
+                    {relationship?.isFollowing && relationship?.followsMe ? (
+                      <div className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-[10px] font-semibold text-emerald-300 mb-2">
+                        <Check size={11} className="text-emerald-400" />
+                        <span>Mutual Connection</span>
+                      </div>
+                    ) : relationship?.followsMe ? (
+                      <div className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-indigo-500/15 border border-indigo-500/30 text-[10px] font-semibold text-indigo-300 mb-2">
+                        <span>Follows you</span>
+                      </div>
+                    ) : null}
                     
-                    <p className="text-sm text-slate-400 line-clamp-2 mb-6 px-4">
+                    <p className="text-sm text-slate-400 line-clamp-2 mb-5 px-4">
                       {profile.bio || "No bio yet."}
                     </p>
 
-                {/* Interaction Button */}
+                {/* Interaction Buttons */}
                 {currentUser?.id !== profile.id && (
                   <div className="w-full">
                     {!isRegistered || !currentUser ? (
@@ -306,12 +401,12 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
                           Log in to Connect
                         </button>
                       </div>
-                    ) : connectionStatus === "has_blocked_me" ? (
+                    ) : relationship?.hasBlockedMe ? (
                       <div className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-white/5 text-slate-400 font-medium text-sm border border-white/10 cursor-not-allowed">
                         <ShieldAlert size={16} />
                         Account Unavailable
                       </div>
-                    ) : connectionStatus === "blocked_by_me" ? (
+                    ) : relationship?.isBlockedByMe ? (
                       <button 
                         onClick={handleUnblock}
                         disabled={isRequesting}
@@ -320,12 +415,7 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
                         {isRequesting ? <Loader2 size={16} className="animate-spin" /> : <Unlock size={16} />}
                         Unblock User
                       </button>
-                    ) : connectionStatus === "accepted" ? (
-                      <button className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-emerald-500/20 text-emerald-400 font-medium text-sm border border-emerald-500/30 cursor-default">
-                        <UserCheck size={16} />
-                        Following
-                      </button>
-                    ) : connectionStatus === "pending_from_them" ? (
+                    ) : relationship?.hasPendingRequestFromThem ? (
                       <div className="flex items-center gap-2 w-full">
                         <button
                           onClick={handleAcceptRequest}
@@ -343,25 +433,102 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
                           Decline
                         </button>
                       </div>
-                    ) : connectionStatus === "pending_from_me" ? (
-                      <button
-                        onClick={handleCancelRequest}
-                        disabled={isRequesting}
-                        className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-white/10 hover:bg-rose-500/20 text-slate-200 hover:text-rose-300 border border-white/10 hover:border-rose-500/30 font-medium text-sm transition-colors active:scale-95 cursor-pointer"
-                        title="Click to cancel follow request"
-                      >
-                        {isRequesting ? <Loader2 size={16} className="animate-spin" /> : <Clock size={16} className="text-amber-400" />}
-                        Requested (Cancel)
-                      </button>
+                    ) : relationship?.hasPendingRequestFromMe ? (
+                      <div className="flex items-center gap-2 w-full">
+                        <button
+                          onClick={handleCancelRequest}
+                          disabled={isRequesting}
+                          className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl bg-white/10 hover:bg-rose-500/20 text-slate-200 hover:text-rose-300 border border-white/10 hover:border-rose-500/30 font-medium text-xs sm:text-sm transition-colors active:scale-95 cursor-pointer"
+                          title="Click to cancel follow request"
+                        >
+                          {isRequesting ? <Loader2 size={15} className="animate-spin" /> : <Clock size={15} className="text-amber-400" />}
+                          Requested (Cancel)
+                        </button>
+                        <button
+                          disabled
+                          className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-white/5 border border-white/5 text-slate-500 font-medium text-xs sm:text-sm cursor-not-allowed opacity-60"
+                          title="Messaging is locked until the follow request is accepted"
+                        >
+                          <Lock size={14} />
+                          Message
+                        </button>
+                      </div>
                     ) : (
-                      <button 
-                        onClick={handleFollow}
-                        disabled={isRequesting}
-                        className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm transition-colors shadow-lg shadow-indigo-600/20 active:scale-95 cursor-pointer"
-                      >
-                        {isRequesting ? <Loader2 size={16} className="animate-spin" /> : <UserPlus size={16} />}
-                        Follow
-                      </button>
+                      <div className="flex items-center gap-2 w-full">
+                        {relationship?.isFollowing ? (
+                          <button
+                            onClick={handleUnfollow}
+                            disabled={isRequesting}
+                            className="flex-1 flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-white/10 hover:bg-rose-500/20 text-white hover:text-rose-300 border border-white/10 hover:border-rose-500/30 text-xs sm:text-sm font-semibold transition-all shadow-md active:scale-95 cursor-pointer"
+                            title="Click to unfollow"
+                          >
+                            {isRequesting ? (
+                              <Loader2 size={15} className="animate-spin" />
+                            ) : (
+                              <>
+                                <UserCheck size={15} className="text-emerald-400" />
+                                <span>Following</span>
+                              </>
+                            )}
+                          </button>
+                        ) : relationship?.followsMe ? (
+                          <button
+                            onClick={handleFollow}
+                            disabled={isRequesting}
+                            className="flex-1 flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-400 text-white text-xs sm:text-sm font-semibold transition-all shadow-lg shadow-indigo-600/25 active:scale-95 cursor-pointer"
+                            title="Follow back to connect mutually"
+                          >
+                            {isRequesting ? (
+                              <Loader2 size={15} className="animate-spin" />
+                            ) : (
+                              <>
+                                <UserPlus size={15} />
+                                <span>Follow Back</span>
+                              </>
+                            )}
+                          </button>
+                        ) : (
+                          <button
+                            onClick={handleFollow}
+                            disabled={isRequesting}
+                            className="flex-1 flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs sm:text-sm font-semibold transition-colors shadow-lg shadow-indigo-600/20 active:scale-95 cursor-pointer"
+                          >
+                            {isRequesting ? (
+                              <Loader2 size={15} className="animate-spin" />
+                            ) : (
+                              <>
+                                <UserPlus size={15} />
+                                <span>Follow</span>
+                              </>
+                            )}
+                          </button>
+                        )}
+
+                        <button
+                          onClick={relationship?.isAcceptedConnection ? handleStartMessage : undefined}
+                          disabled={isRequesting || !relationship?.isAcceptedConnection}
+                          className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl font-semibold text-xs sm:text-sm transition-all shadow-md ${
+                            relationship?.isAcceptedConnection
+                              ? "bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 active:scale-95 cursor-pointer"
+                              : "bg-white/5 border border-white/5 text-slate-500 cursor-not-allowed opacity-60"
+                          }`}
+                          title={relationship?.isAcceptedConnection ? "Send direct message" : "Follow request must be accepted before you can message this user"}
+                        >
+                          {isRequesting ? (
+                            <Loader2 size={15} className="animate-spin" />
+                          ) : !relationship?.isAcceptedConnection ? (
+                            <>
+                              <Lock size={14} />
+                              <span>Message</span>
+                            </>
+                          ) : (
+                            <>
+                              <MessageSquare size={15} />
+                              <span>Message</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
                     )}
                   </div>
                 )}

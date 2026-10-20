@@ -348,6 +348,14 @@ export function JunctionRoom({
   const [participantVolumes, setParticipantVolumes] = useState<Record<string, number>>({});
   const [activeSpeakers, setActiveSpeakers] = useState<string[]>([]);
 
+  useEffect(() => {
+    const handleOpenInRoomDm = () => {
+      setIsDirectMessengerOpen(true);
+    };
+    window.addEventListener("yapclub_open_inroom_dm", handleOpenInRoomDm);
+    return () => window.removeEventListener("yapclub_open_inroom_dm", handleOpenInRoomDm);
+  }, []);
+
   // Instant platform suspension guard
   useEffect(() => {
     if (user?.isBanned || (guest as any)?.isBanned) {

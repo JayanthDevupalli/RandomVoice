@@ -5,6 +5,7 @@ import { supabase } from "@/lib/supabase";
 import { Bell, Check, X, User } from "lucide-react";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import { useUser } from "@/hooks/useUser";
+import { socialService } from "@/lib/social-service";
 
 export function NotificationsDropdown() {
   const { user, isRegistered } = useUser();
@@ -84,29 +85,17 @@ export function NotificationsDropdown() {
     setRequests((prev) => prev.filter((req) => req.id !== connectionId));
 
     try {
-      await supabase
-        .from("connections")
-        .update({ status: "accepted" })
-        .eq("id", connectionId);
+      if (requestDetails?.requester?.id && user?.id) {
+        await socialService.acceptFollowRequest(user.id, requestDetails.requester.id, connectionId);
+      } else {
+        await supabase
+          .from("connections")
+          .update({ status: "accepted" })
+          .eq("id", connectionId);
+      }
 
       if (typeof window !== "undefined") {
         window.dispatchEvent(new CustomEvent("yapclub_social_updated"));
-      }
-
-      // If accepted, check or create a direct conversation
-      if (requestDetails && user?.id) {
-        const { data: convData } = await supabase
-          .from("conversations")
-          .insert({ type: "direct" })
-          .select("id")
-          .single();
-
-        if (convData) {
-          await supabase.from("conversation_members").insert([
-            { conversation_id: convData.id, user_id: requestDetails.requester.id, role: "member" },
-            { conversation_id: convData.id, user_id: user.id, role: "member" },
-          ]);
-        }
       }
     } catch (e) {
       console.error("Error accepting follow request:", e);
@@ -114,12 +103,15 @@ export function NotificationsDropdown() {
   };
 
   const handleDecline = async (connectionId: string) => {
-    // Optimistic UI update
+    const requestDetails = requests.find((r) => r.id === connectionId);
     setRequests((prev) => prev.filter((req) => req.id !== connectionId));
 
     try {
-      // Instagram style: declining removes the pending request completely
-      await supabase.from("connections").delete().eq("id", connectionId);
+      if (requestDetails?.requester?.id && user?.id) {
+        await socialService.declineFollowRequest(user.id, requestDetails.requester.id, connectionId);
+      } else {
+        await supabase.from("connections").delete().eq("id", connectionId);
+      }
 
       if (typeof window !== "undefined") {
         window.dispatchEvent(new CustomEvent("yapclub_social_updated"));
