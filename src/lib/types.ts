@@ -8,7 +8,7 @@ export interface Junction {
   category: 'casual' | 'gaming' | 'tech' | 'music' | 'philosophy' | 'languages' | 'chill';
   icon: string;
   tags: string[];
-  maxParticipants: number; // Always 7
+  maxParticipants: number; // Default 10 (up to 12 for custom rooms)
   currentCount: number;
   participants: JunctionParticipant[];
   createdAt: number;

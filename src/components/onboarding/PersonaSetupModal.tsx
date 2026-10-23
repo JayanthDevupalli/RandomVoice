@@ -125,7 +125,7 @@ export function PersonaSetupModal({
                 </div>
                 <div className="flex items-center gap-1.5 mt-1 text-xs text-emerald-400 font-medium">
                   <ShieldCheck size={13} />
-                  <span>100% Anonymous • 7-Seat Pass</span>
+                  <span>100% Anonymous • 10-Seat Pass</span>
                 </div>
               </div>
             </div>

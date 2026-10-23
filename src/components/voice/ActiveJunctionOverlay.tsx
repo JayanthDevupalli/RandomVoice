@@ -25,7 +25,7 @@ export function ActiveJunctionOverlay() {
   }
 
   return (
-    <div className={isMinimized ? "contents" : "fixed inset-0 z-40 bg-background overflow-hidden flex flex-col"}>
+    <div className={isMinimized ? "contents" : "fixed inset-0 z-[100] bg-background overflow-hidden flex flex-col"}>
       <JunctionRoom
         key={activeJunctionId}
         junctionId={activeJunctionId}

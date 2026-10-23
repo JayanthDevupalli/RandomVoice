@@ -79,7 +79,7 @@ function rowToJunction(
     category: row.category as Junction["category"],
     icon: row.icon,
     tags: row.tags || [],
-    maxParticipants: row.max_participants,
+    maxParticipants: (row.max_participants === 7 || !row.max_participants) ? 10 : row.max_participants,
     currentCount: participants.length,
     createdAt: row.created_at,
     isCustom: row.is_custom,
@@ -276,20 +276,38 @@ async function syncCount(junctionId: string) {
     .eq("id", junctionId);
 }
 
+// ─── Fast In-Memory Cache for Lobby ──────────────────────────────────────────
+
+let cachedJunctions: { list: Junction[]; timestamp: number } | null = null;
+const LOBBY_CACHE_TTL_MS = 2500; // 2.5s TTL for sub-millisecond repeated queries
+
+export function invalidateJunctionsCache() {
+  cachedJunctions = null;
+}
+
 // ─── Public API ─────────────────────────────────────────────────────────────
 
 export async function getAllJunctions(): Promise<Junction[]> {
-  const { data: jRows, error } = await supabase
-    .from("junctions")
-    .select("*")
-    .order("created_at", { ascending: false });
+  const now = Date.now();
+  if (cachedJunctions && now - cachedJunctions.timestamp < LOBBY_CACHE_TTL_MS) {
+    return cachedJunctions.list;
+  }
 
-  if (error || !jRows) return [];
+  const [jRes, pRes] = await Promise.all([
+    supabase
+      .from("junctions")
+      .select("*")
+      .order("created_at", { ascending: false }),
+    supabase
+      .from("junction_participants")
+      .select("*")
+      .order("joined_at", { ascending: true }),
+  ]);
 
-  const { data: pRows } = await supabase
-    .from("junction_participants")
-    .select("*")
-    .order("joined_at", { ascending: true });
+  const jRows = jRes.data;
+  const pRows = pRes.data;
+
+  if (jRes.error || !jRows) return [];
 
   const rawParticipants = (pRows || []) as ParticipantRow[];
   const allIdentities = Array.from(
@@ -375,9 +393,12 @@ export async function getAllJunctions(): Promise<Junction[]> {
     participantsByJunction[p.junction_id].push(p);
   }
 
-  return (jRows as JunctionRow[]).map((row) =>
+  const result = (jRows as JunctionRow[]).map((row) =>
     rowToJunction(row, participantsByJunction[row.id] || [], roleMap, profileMap)
   );
+
+  cachedJunctions = { list: result, timestamp: Date.now() };
+  return result;
 }
 
 export async function getJunctionById(id: string): Promise<Junction | undefined> {
@@ -406,7 +427,7 @@ export async function createJunction(data: {
     category: data.category,
     icon: "Mic",
     tags: data.tags.length > 0 ? data.tags : ["Custom", data.category],
-    max_participants: data.maxParticipants || 7,
+    max_participants: data.maxParticipants || 10,
     current_count: 0,
     created_at: now,
     is_custom: true,
@@ -422,6 +443,7 @@ export async function createJunction(data: {
   }
 
   const junction = await fetchJunctionWithParticipants(junctionId);
+  invalidateJunctionsCache();
   return junction!;
 }
 
@@ -493,7 +515,7 @@ export async function addParticipantToJunction(
   const isAlreadyPresent = Boolean(existing);
 
   if (junction.currentCount >= junction.maxParticipants && !isAlreadyPresent) {
-    return { success: false, error: "Junction is full (Max 7 seats reached)" };
+    return { success: false, error: `Junction is full (Max ${junction.maxParticipants || 10} seats reached)` };
   }
 
   const isCreator = cleanParticipantIdentity === (junction.creatorId || "").trim().toLowerCase();
@@ -515,45 +537,9 @@ export async function addParticipantToJunction(
     isMod = true;
   }
 
-  // Determine avatar and cardBgColor from participant or look up registered user profile
-  let resolvedAvatar = participant.avatar;
-  let cardBgColor = participant.cardBgColor;
-
-  try {
-    const isIdUUID = isUUID(participant.id || "");
-    const isIdentUUID = isUUID(participant.identity || "");
-    const hasValidUsername = cleanParticipantIdentity && /^[a-zA-Z0-9_.-]+$/.test(cleanParticipantIdentity);
-
-    let profQuery = supabase.from("profiles").select("*");
-    if (isIdUUID || isIdentUUID) {
-      profQuery = profQuery.eq("id", isIdUUID ? participant.id! : participant.identity!);
-    } else if (hasValidUsername) {
-      profQuery = profQuery.ilike("username", cleanParticipantIdentity);
-    } else {
-      profQuery = null as any;
-    }
-
-    if (profQuery) {
-      const { data: prof } = await profQuery.maybeSingle();
-      if (prof) {
-        if (prof.avatar) {
-          resolvedAvatar = prof.avatar;
-        }
-        if (prof.card_bg_color && prof.card_bg_color !== "#465B73") {
-          cardBgColor = prof.card_bg_color;
-        } else if (prof.social_links?.card_bg_color) {
-          cardBgColor = prof.social_links.card_bg_color;
-        }
-      }
-    }
-  } catch (e) {
-    console.error("Error fetching user profile card theme & avatar:", e);
-  }
-
-  if (!resolvedAvatar) {
-    resolvedAvatar = existing?.avatar || "zap";
-  }
-  const finalBgColor = cardBgColor || existing?.cardBgColor || "#465B73";
+  // Determine avatar and cardBgColor from participant or existing
+  const resolvedAvatar = participant.avatar || existing?.avatar || "zap";
+  const finalBgColor = participant.cardBgColor || existing?.cardBgColor || "#465B73";
 
   // Upsert participant atomically to avoid duplicate key conflicts or race conditions
   const shouldKeepModMute = Boolean(existing?.isMutedByMod || participant.isMutedByMod);
@@ -562,42 +548,89 @@ export async function addParticipantToJunction(
     finalBgColor !== "#465B73" ? finalBgColor : existing?.cardBgColor
   );
 
-  const { error: upsertError } = await supabase.from("junction_participants").upsert(
-    {
-      id: existing?.id || ("p_" + Date.now() + "_" + Math.random().toString(36).substr(2, 5)),
-      junction_id: junctionId,
-      identity: participant.identity,
-      name: participant.name,
-      avatar: resolvedAvatar,
-      color: encodedColor,
-      card_bg_color: finalBgColor,
-      role: isMod ? "moderator" : (existing?.role || participant.role || "speaker"),
-      is_muted: shouldKeepModMute ? true : (existing?.isMuted !== undefined ? existing.isMuted : (participant.isMuted !== undefined ? participant.isMuted : true)),
-      is_muted_by_mod: shouldKeepModMute,
-      is_speaking: false,
-      joined_at: existing?.joinedAt || Date.now(),
-      connection_quality: participant.connectionQuality || "excellent",
-    },
-    { onConflict: "junction_id,identity" }
-  );
+  const participantId = existing?.id || ("p_" + Date.now() + "_" + Math.random().toString(36).substr(2, 5));
+  const newRole = isMod ? "moderator" : (existing?.role || participant.role || "speaker");
+  const newMuted = shouldKeepModMute ? true : (existing?.isMuted !== undefined ? existing.isMuted : (participant.isMuted !== undefined ? participant.isMuted : true));
+  const joinedAtTime = existing?.joinedAt || Date.now();
+  const newCount = isAlreadyPresent ? junction.participants.length : junction.participants.length + 1;
 
-  if (upsertError) {
-    console.error("Failed to upsert participant:", upsertError);
-    return { success: false, error: "Database error: " + upsertError.message };
-  }
-
-  await syncCount(junctionId);
-
-  // If this participant became the host, update the junction's moderator_identity for legacy/fallback
-  if (isMod && junction.moderatorIdentity !== participant.identity) {
-    await supabase
+  // Execute database writes concurrently: upsert participant, remove ghost records, update count & moderator
+  const [upsertRes] = await Promise.all([
+    supabase.from("junction_participants").upsert(
+      {
+        id: participantId,
+        junction_id: junctionId,
+        identity: participant.identity,
+        name: participant.name,
+        avatar: resolvedAvatar,
+        color: encodedColor,
+        card_bg_color: finalBgColor,
+        role: newRole,
+        is_muted: newMuted,
+        is_muted_by_mod: shouldKeepModMute,
+        is_speaking: false,
+        joined_at: joinedAtTime,
+        connection_quality: participant.connectionQuality || "excellent",
+      },
+      { onConflict: "junction_id,identity" }
+    ),
+    supabase
+      .from("junction_participants")
+      .delete()
+      .eq("identity", participant.identity)
+      .neq("junction_id", junctionId),
+    supabase
       .from("junctions")
-      .update({ moderator_identity: participant.identity })
-      .eq("id", junctionId);
+      .update({
+        current_count: newCount,
+        ...(isMod && junction.moderatorIdentity !== participant.identity ? { moderator_identity: participant.identity } : {}),
+      })
+      .eq("id", junctionId),
+  ]);
+
+  if (upsertRes.error) {
+    console.error("Failed to upsert participant:", upsertRes.error);
+    return { success: false, error: "Database error: " + upsertRes.error.message };
   }
 
-  const updated = await fetchJunctionWithParticipants(junctionId);
-  return { success: true, junction: updated };
+  // Invalidate in-memory lobby cache so callers get fresh counts immediately
+  invalidateJunctionsCache();
+
+  // Construct updated junction immediately without making 3 extra round-trip queries!
+  const selfParticipant: JunctionParticipant = {
+    id: participantId,
+    identity: participant.identity,
+    name: participant.name,
+    displayName: participant.displayName || participant.name,
+    avatar: resolvedAvatar,
+    color: participant.color || existing?.color || "#6366F1",
+    cardBgColor: finalBgColor,
+    role: newRole,
+    userRole: participant.userRole || existing?.userRole || "user",
+    isMuted: newMuted,
+    isMutedByMod: shouldKeepModMute,
+    isSpeaking: false,
+    joinedAt: joinedAtTime,
+    connectionQuality: participant.connectionQuality || "excellent",
+    reportedBy: existing?.reportedBy || [],
+  };
+
+  const updatedParticipants = isAlreadyPresent
+    ? junction.participants.map((p) =>
+        (p.identity || "").trim().toLowerCase() === cleanParticipantIdentity
+          ? selfParticipant
+          : p
+      )
+    : [...junction.participants, selfParticipant];
+
+  const updatedJunction: Junction = {
+    ...junction,
+    currentCount: updatedParticipants.length,
+    participants: updatedParticipants,
+    moderatorIdentity: isMod ? participant.identity : junction.moderatorIdentity,
+  };
+
+  return { success: true, junction: updatedJunction };
 }
 
 export async function removeParticipantFromJunction(
@@ -669,6 +702,7 @@ export async function removeParticipantFromJunction(
       .update({ moderator_identity: newMod.identity })
       .eq("id", junctionId);
   }
+  invalidateJunctionsCache();
 }
 
 export async function moderateParticipant(
@@ -960,6 +994,7 @@ export async function updateJunctionDetails(
   }
 
   const updatedJunction = await fetchJunctionWithParticipants(junctionId);
+  invalidateJunctionsCache();
   return { success: true, junction: updatedJunction };
 }
 
@@ -993,6 +1028,7 @@ export async function toggleRoomLock(
     .eq("id", junctionId);
 
   const updated = await fetchJunctionWithParticipants(junctionId);
+  invalidateJunctionsCache();
   return { success: true, junction: updated };
 }
 
@@ -1030,7 +1066,11 @@ export async function deleteJunction(
     .delete()
     .eq("id", junctionId);
 
-  return !error;
+  if (!error) {
+    invalidateJunctionsCache();
+    return true;
+  }
+  return false;
 }
 
 export async function reportParticipant(

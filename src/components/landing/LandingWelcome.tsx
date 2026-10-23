@@ -83,6 +83,10 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
     }
   }, [guest, isLoaded, hasCompletedOnboarding]);
 
+  useEffect(() => {
+    router.prefetch("/junctions");
+  }, [router]);
+
   // Guest Join Handler
   const handleJoin = () => {
     const cleanName = name.trim();
@@ -104,7 +108,7 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
       color: selectedColor,
     });
 
-    window.location.href = "/junctions";
+    router.push("/junctions");
   };
 
   // Member Login / Signup Handler
@@ -156,8 +160,8 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
           color: "#6366F1",
         });
 
-        // Use direct navigation to apply active session state cleanly
-        window.location.href = "/junctions";
+        // Use direct client-side navigation to apply active session state cleanly
+        router.push("/junctions");
       } else {
         // Sign Up
         const { error: signUpError, data } = await supabase.auth.signUp({
@@ -220,7 +224,7 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
           color: "#6366F1",
         });
 
-        window.location.href = "/junctions";
+        router.push("/junctions");
       }
     } catch (err: any) {
       console.error("Auth error:", err);
@@ -320,8 +324,8 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
         });
 
         setTimeout(() => {
-          window.location.href = "/junctions";
-        }, 600);
+          router.push("/junctions");
+        }, 300);
       }
     } catch (err: any) {
       console.error("Recovery error:", err);
@@ -410,7 +414,7 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
             </h1>
 
             <p className="text-xs sm:text-base xl:text-lg text-slate-400 leading-relaxed max-w-lg mx-auto lg:mx-0 font-light">
-              Join exclusive 7-seat anonymous voice spaces. Discuss ideas, play games, or whisper with friends. Instant access or member profiles.
+              Join exclusive 10-seat anonymous voice spaces. Discuss ideas, play games, or whisper with friends. Instant access or member profiles.
             </p>
 
             <div className="flex flex-wrap items-center justify-center lg:justify-start gap-4 sm:gap-6 pt-1 sm:pt-2 text-xs text-slate-400 font-light">
@@ -979,7 +983,7 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
               avatar: selectedAvatar || "zap",
               color: "#6366F1",
             });
-            window.location.href = "/junctions";
+            router.push("/junctions");
           }}
         />
       )}

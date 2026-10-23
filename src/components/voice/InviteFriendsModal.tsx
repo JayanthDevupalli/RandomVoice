@@ -35,7 +35,7 @@ export function InviteFriendsModal({
   junctionName,
   description,
   participantCount = 1,
-  maxParticipants = 7,
+  maxParticipants = 10,
   currentUserId,
   currentUsername,
 }: InviteFriendsModalProps) {

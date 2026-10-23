@@ -6,6 +6,7 @@ import { DMVoiceCallProvider } from "@/components/providers/DMVoiceCallContext";
 import { ActiveJunctionProvider } from "@/components/providers/ActiveJunctionContext";
 
 import { UserProvider } from "@/components/providers/UserProvider";
+import { MaintenanceBanner } from "@/components/layout/MaintenanceBanner";
 
 const DMVoiceCallOverlay = dynamic(
   () => import("@/components/voice/DMVoiceCallOverlay").then((mod) => mod.DMVoiceCallOverlay),
@@ -18,8 +19,8 @@ const ActiveJunctionOverlay = dynamic(
 );
 
 export const metadata: Metadata = {
-  title: "YapClub - 7-Seat Voice Hangouts | No Cap, Pure Yapping",
-  description: "Drop into 7-seat anonymous voice rooms worldwide. Talk games, late night vibes, deep thoughts, and music with zero lag and zero signups.",
+  title: "YapClub - 10-Seat Voice Hangouts | No Cap, Pure Yapping",
+  description: "Drop into 10-seat anonymous voice rooms worldwide. Talk games, late night vibes, deep thoughts, and music with zero lag and zero signups.",
 };
 
 export default function RootLayout({
@@ -57,6 +58,7 @@ export default function RootLayout({
                   <div className="absolute bottom-[-10%] right-[-20%] sm:bottom-[-20%] sm:right-[-10%] w-[70%] h-[50%] sm:w-[50%] sm:h-[50%] bg-purple-600/10 blur-[100px] sm:blur-[120px] rounded-full mix-blend-screen" />
                 </div>
                 
+                <MaintenanceBanner />
                 {children}
                 <DMVoiceCallOverlay />
                 <ActiveJunctionOverlay />

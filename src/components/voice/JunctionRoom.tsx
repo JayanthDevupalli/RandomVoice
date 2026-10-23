@@ -113,24 +113,95 @@ function RemoteAudioPipeline({
   participantVolumes: Record<string, number>;
   isDeafened: boolean;
 }) {
+  const room = useRoomContext();
+
   // STRICTLY filter out local participant so own voice is NEVER looped back to oneself
   const audioTracks = useTracks(
     [Track.Source.Microphone, Track.Source.ScreenShareAudio],
     { onlySubscribed: true }
   ).filter((trackRef) => !trackRef.participant.isLocal && trackRef.publication?.kind === Track.Kind.Audio);
 
+  const getSafeVolume = (identity?: string, name?: string) => {
+    if (isDeafened) return 0;
+    const cleanId = (identity || "").trim();
+    const cleanName = (name || "").trim();
+    let vol = 100;
+    if (cleanId && participantVolumes[cleanId] !== undefined) {
+      vol = participantVolumes[cleanId];
+    } else if (cleanId && participantVolumes[cleanId.toLowerCase()] !== undefined) {
+      vol = participantVolumes[cleanId.toLowerCase()];
+    } else if (cleanName && participantVolumes[cleanName] !== undefined) {
+      vol = participantVolumes[cleanName];
+    } else if (cleanName && participantVolumes[cleanName.toLowerCase()] !== undefined) {
+      vol = participantVolumes[cleanName.toLowerCase()];
+    }
+    return Math.min(1, Math.max(0, vol / 100));
+  };
+
+  // Sync LiveKit native volume controller across all remote participants and tracks
+  useEffect(() => {
+    if (!room) return;
+
+    try {
+      room.remoteParticipants.forEach((remoteParticipant) => {
+        const safeVolume = getSafeVolume(remoteParticipant.identity, remoteParticipant.name);
+
+        // 1. Direct LiveKit RemoteParticipant setVolume API (Microphone & ScreenShare)
+        try {
+          if (typeof remoteParticipant.setVolume === "function") {
+            remoteParticipant.setVolume(safeVolume, Track.Source.Microphone);
+            remoteParticipant.setVolume(safeVolume, Track.Source.ScreenShareAudio);
+          }
+        } catch (e) {}
+
+        // 2. Set on each track publication and any attached media elements
+        remoteParticipant.audioTrackPublications.forEach((pub) => {
+          const track = pub.track;
+          if (track) {
+            try {
+              if (typeof (track as any).setVolume === "function") {
+                (track as any).setVolume(safeVolume);
+              }
+            } catch (e) {}
+
+            try {
+              const attached = (track as any).attachedElements;
+              if (attached) {
+                const els = Array.isArray(attached) ? attached : Array.from(attached);
+                for (const el of els as HTMLMediaElement[]) {
+                  if (el) {
+                    el.volume = safeVolume;
+                    el.muted = isDeafened || safeVolume === 0;
+                  }
+                }
+              }
+            } catch (e) {}
+          }
+        });
+      });
+    } catch (err) {
+      console.warn("LiveKit native volume sync error:", err);
+    }
+  }, [room, participantVolumes, isDeafened, audioTracks]);
+
   return (
-    <div style={{ display: "none" }}>
+    <div style={{ display: "none" }} aria-hidden="true">
       {audioTracks.map((trackRef) => {
         const id = trackRef.participant.identity;
-        const customVol = participantVolumes[id] ?? participantVolumes[id.toLowerCase()] ?? 100;
-        const safeVolume = Math.min(1, Math.max(0, customVol / 100));
+        const name = trackRef.participant.name;
+        const safeVolume = getSafeVolume(id, name);
         return (
           <AudioTrack
             key={trackRef.publication?.trackSid || `${id}_${trackRef.source}`}
             trackRef={trackRef}
             volume={safeVolume}
-            muted={isDeafened}
+            muted={isDeafened || safeVolume === 0}
+            ref={(element) => {
+              if (element) {
+                element.volume = safeVolume;
+                element.muted = isDeafened || safeVolume === 0;
+              }
+            }}
           />
         );
       })}
@@ -182,7 +253,9 @@ function LiveKitDataSync({
 
     const handleParticipantChange = () => {
       onParticipantSync?.();
-      publishRef.current?.({ type: "room_participants_updated" });
+      if (room && room.state === ConnectionState.Connected) {
+        publishRef.current?.({ type: "room_participants_updated" });
+      }
     };
     room.on(RoomEvent.Connected, handleParticipantChange);
     room.on(RoomEvent.ParticipantConnected, handleParticipantChange);
@@ -201,27 +274,37 @@ function LiveKitDataSync({
     if (localParticipant) {
       publishRef.current = async (data: any) => {
         try {
+          if (!room || room.state !== ConnectionState.Connected) return;
           const strData = JSON.stringify(data);
           const encoded = new TextEncoder().encode(strData);
           await localParticipant.publishData(encoded, { reliable: true });
-        } catch (err) {
-          console.error("Failed to publish LiveKit data", err);
+        } catch (err: any) {
+          if (
+            err?.message?.includes("PC manager is closed") ||
+            err?.message?.includes("closed") ||
+            err?.name === "UnexpectedConnectionState"
+          ) {
+            return;
+          }
+          console.warn("LiveKit publish notice:", err);
         }
       };
 
-      // Broadcast join update immediately over WebRTC to all peers in the room
-      localParticipant
-        .publishData(new TextEncoder().encode(JSON.stringify({ type: "room_participants_updated" })), {
-          reliable: true,
-        })
-        .catch(() => {});
+      // Broadcast join update immediately over WebRTC ONLY if room connection is open & connected
+      if (room && room.state === ConnectionState.Connected) {
+        localParticipant
+          .publishData(new TextEncoder().encode(JSON.stringify({ type: "room_participants_updated" })), {
+            reliable: true,
+          })
+          .catch(() => {});
+      }
 
       onParticipantSync?.();
     }
     return () => {
       publishRef.current = null;
     };
-  }, [localParticipant, publishRef, onParticipantSync]);
+  }, [room, localParticipant, publishRef, onParticipantSync]);
 
   useEffect(() => {
     if (localParticipant) {
@@ -239,9 +322,34 @@ function LiveKitDataSync({
   return null;
 }
 
+function RoomLifecycleListener({
+  onRoomInstance,
+  onConnected,
+}: {
+  onRoomInstance: (room: any) => void;
+  onConnected: () => void;
+}) {
+  const room = useRoomContext();
+  const connectionState = useConnectionState();
+
+  useEffect(() => {
+    if (room) {
+      onRoomInstance(room);
+    }
+  }, [room, onRoomInstance]);
+
+  useEffect(() => {
+    if (connectionState === ConnectionState.Connected) {
+      onConnected();
+    }
+  }, [connectionState, onConnected]);
+
+  return null;
+}
+
 function RoomConnectionOverlay() {
   const connectionState = useConnectionState();
-  if (connectionState === ConnectionState.Reconnecting || connectionState === ConnectionState.Connecting) {
+  if (connectionState === ConnectionState.Reconnecting) {
     return (
       <div className="fixed inset-0 z-[100] bg-background/95 backdrop-blur-md flex flex-col items-center justify-center animate-fadeIn text-white pointer-events-auto">
         <Activity size={32} className="animate-pulse text-indigo-400 mb-4" />
@@ -263,10 +371,54 @@ export function JunctionRoom({
 }: JunctionRoomProps) {
   const router = useRouter();
 
-  // Room & participants state
-  const [junction, setJunction] = useState<Junction | null>(null);
-  const [participants, setParticipants] = useState<JunctionParticipant[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  // Secure connection staging & clean exit state
+  const [isConnectingOverlayOpen, setIsConnectingOverlayOpen] = useState(true);
+  const [connectionStep, setConnectionStep] = useState<"auth" | "allocating" | "handshaking" | "connected">("auth");
+  const [connectionProgress, setConnectionProgress] = useState<number>(25);
+  const [isLeaving, setIsLeaving] = useState(false);
+  const [exitStep, setExitStep] = useState<"disconnecting" | "ended">("disconnecting");
+  const liveKitRoomRef = useRef<any>(null);
+  const isLiveKitConnectedRef = useRef(false);
+
+  // Room & participants state with instant cache retrieval
+  const [junction, setJunction] = useState<Junction | null>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const cached = sessionStorage.getItem("yapclub_cached_junctions");
+        if (cached) {
+          const list: Junction[] = JSON.parse(cached);
+          const found = list.find((j) => j.id === junctionId);
+          if (found) return found;
+        }
+      } catch {}
+    }
+    return null;
+  });
+  const [participants, setParticipants] = useState<JunctionParticipant[]>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const cached = sessionStorage.getItem("yapclub_cached_junctions");
+        if (cached) {
+          const list: Junction[] = JSON.parse(cached);
+          const found = list.find((j) => j.id === junctionId);
+          if (found?.participants) return found.participants;
+        }
+      } catch {}
+    }
+    return [];
+  });
+  const [isLoading, setIsLoading] = useState(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const cached = sessionStorage.getItem("yapclub_cached_junctions");
+        if (cached) {
+          const list: Junction[] = JSON.parse(cached);
+          if (list.some((j) => j.id === junctionId)) return false;
+        }
+      } catch {}
+    }
+    return true;
+  });
   const [error, setError] = useState<string | null>(null);
   const [kickedNotice, setKickedNotice] = useState<string | null>(null);
 
@@ -367,7 +519,22 @@ export function JunctionRoom({
   }, [router]);
 
   const [isDirectMessengerOpen, setIsDirectMessengerOpen] = useState(false);
-  const [participantVolumes, setParticipantVolumes] = useState<Record<string, number>>({});
+  const [participantVolumes, setParticipantVolumes] = useState<Record<string, number>>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const stored = localStorage.getItem("yapclub_participant_volumes");
+        if (stored) return JSON.parse(stored);
+      } catch (e) {}
+    }
+    return {};
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("yapclub_participant_volumes", JSON.stringify(participantVolumes));
+    } catch (e) {}
+  }, [participantVolumes]);
+
   const [activeSpeakers, setActiveSpeakers] = useState<string[]>([]);
 
   useEffect(() => {
@@ -1095,38 +1262,42 @@ export function JunctionRoom({
     isJoiningRef.current = true;
 
     async function loadAndJoinJunction() {
+      const startTime = Date.now();
       try {
-        setIsLoading(true);
-        const res = await fetch(`/api/junctions/${junctionId}`);
-        const data = await res.json();
-
-        if (!res.ok || !data.junction) {
-          throw new Error(data.error || "Junction not found");
-        }
-
-        if (!isMounted) return false;
-        setJunction(data.junction);
+        setConnectionStep("auth");
+        setConnectionProgress(25);
+        setIsConnectingOverlayOpen(true);
 
         // Read stored session flags to survive page reloads
         const storedModMuted = typeof window !== "undefined" && sessionStorage.getItem(`junction_mod_muted_${junctionId}`) === "true";
         const storedRole = typeof window !== "undefined" ? sessionStorage.getItem(`junction_role_${junctionId}`) : null;
 
-        // Join the junction via API
-        const joinRes = await fetch(`/api/junctions/${junctionId}`, {
+        const joinIdentity = (isRegistered && user?.username) || guest?.username || guest?.name || "Guest";
+        const joinDisplayName = (isRegistered && (user?.displayName || user?.name)) || guest?.displayName || guest?.name || joinIdentity;
+        const participantAvatar = isRegistered && user ? user.avatar : (guest.avatar || "zap");
+        const participantColor = isRegistered && user ? user.color : (guest.color || "#6366F1");
+        const participantCardBg = isRegistered && user ? user.cardBgColor : (guest.cardBgColor || "#465B73");
+
+        // Stage 1: Auth & credentials check (deliberate 500ms pacing)
+        setConnectionStep("auth");
+        setConnectionProgress(25);
+        setIsConnectingOverlayOpen(true);
+
+        const joinPromise = fetch(`/api/junctions/${junctionId}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             action: "join",
             participant: {
               id: isRegistered && user ? user.id : guest.id,
-              identity: isRegistered && user ? user.username : guest.name,
-              name: isRegistered && user ? (user.displayName || user.name) : (guest.displayName || guest.name),
-              username: isRegistered && user ? user.username : (guest.username || guest.name),
-              displayName: isRegistered && user ? (user.displayName || user.name) : (guest.displayName || guest.name),
-              avatar: isRegistered && user ? user.avatar : (guest.avatar || "zap"),
-              color: isRegistered && user ? user.color : (guest.color || "#6366F1"),
-              cardBgColor: isRegistered && user ? user.cardBgColor : (guest.cardBgColor || "#465B73"),
-              role: storedRole || "speaker", // Backend preserves moderator if already host
+              identity: joinIdentity,
+              name: joinDisplayName,
+              username: joinIdentity,
+              displayName: joinDisplayName,
+              avatar: participantAvatar,
+              color: participantColor,
+              cardBgColor: participantCardBg,
+              role: storedRole || "speaker",
               isMuted: true, // Always start MUTED by default
               isMutedByMod: storedModMuted,
               isSpeaking: false,
@@ -1135,72 +1306,99 @@ export function JunctionRoom({
           }),
         });
 
-        const joinData = await joinRes.json();
-        if (joinRes.ok && joinData.junction) {
-          setJunction(joinData.junction);
-          setParticipants(joinData.junction.participants || []);
-          setKickedNotice(null);
-          joinedJunctionIdRef.current = junctionId;
+        const tokenPromise = fetch(
+          `/api/token?room=${junctionId}&username=${encodeURIComponent(
+            joinIdentity
+          )}&displayName=${encodeURIComponent(
+            joinDisplayName
+          )}&avatar=${encodeURIComponent(participantAvatar)}&color=${encodeURIComponent(
+            participantColor
+          )}&role=${encodeURIComponent(storedRole || "speaker")}`
+        );
 
-          // Notify room peers across both LiveKit and Supabase Realtime WebSocket
-          broadcastRoomUpdate({ type: "room_participants_updated" });
+        // Keep Stage 1 visible for a clear, deliberate 500ms
+        await new Promise((r) => setTimeout(r, 500));
+        if (!isMounted) return false;
 
-          // Sync local state if participant is mod-muted or has specific role in DB or session
-          const myParticipant = joinData.junction.participants?.find((p: any) => isLocalParticipant(p));
-          if (myParticipant?.isMutedByMod || storedModMuted) {
-            setIsMutedByMod(true);
-            setIsMuted(true);
-            if (typeof window !== "undefined") {
-              sessionStorage.setItem(`junction_mod_muted_${junctionId}`, "true");
-            }
-          }
-          if (myParticipant?.role && typeof window !== "undefined") {
-            sessionStorage.setItem(`junction_role_${junctionId}`, myParticipant.role);
-          }
-        } else {
+        // Stage 2: Allocating room seat and audio buffers
+        setConnectionStep("allocating");
+        setConnectionProgress(60);
+
+        // Await responses with guaranteed deliberate pacing (minimum 600ms)
+        const [joinRes, lkRes] = await Promise.all([
+          joinPromise,
+          tokenPromise,
+          new Promise((r) => setTimeout(r, 600)),
+        ]);
+        if (!isMounted) return false;
+
+        const [joinData, lkData] = await Promise.all([joinRes.json(), lkRes.json()]);
+
+        if (!joinRes.ok || !joinData.junction) {
           const errMsg = joinData.error || "Unable to join this junction.";
           setError(errMsg);
           setKickedNotice(errMsg);
+          setIsConnectingOverlayOpen(false);
           return false;
+        }
+
+        if (!lkRes.ok || !lkData.token) {
+          const tokenErr = lkData.error || "Failed to obtain voice credentials.";
+          setError(tokenErr);
+          setKickedNotice(tokenErr);
+          setIsConnectingOverlayOpen(false);
+          return false;
+        }
+
+        // Stage 3: Handshaking encrypted WebRTC voice tunnel
+        setConnectionStep("handshaking");
+        setConnectionProgress(85);
+
+        setJunction(joinData.junction);
+        setParticipants(joinData.junction.participants || []);
+        setLiveKitToken(lkData.token);
+        setLiveKitUrl(lkData.serverUrl);
+        setKickedNotice(null);
+        joinedJunctionIdRef.current = junctionId;
+
+        // Broadcast room participant update across both channels
+        broadcastRoomUpdate({ type: "room_participants_updated" });
+
+        // Sync local state if participant is mod-muted or has specific role in DB or session
+        const myParticipant = joinData.junction.participants?.find((p: any) => isLocalParticipant(p));
+        if (myParticipant?.isMutedByMod || storedModMuted) {
+          setIsMutedByMod(true);
+          setIsMuted(true);
+          if (typeof window !== "undefined") {
+            sessionStorage.setItem(`junction_mod_muted_${junctionId}`, "true");
+          }
+        }
+        if (myParticipant?.role && typeof window !== "undefined") {
+          sessionStorage.setItem(`junction_role_${junctionId}`, myParticipant.role);
         }
 
         setChatMessages([]);
 
-        // Fetch LiveKit Token
-        try {
-          // Find actual role assigned by the server
-          const myParticipant = joinData.junction?.participants.find((p: any) => isLocalParticipant(p));
-          const role = myParticipant?.role || "speaker";
-          const joinIdentity = (isRegistered && user?.username) || guest?.username || guest?.name || "Guest";
-          const joinDisplayName = (isRegistered && (user?.displayName || user?.name)) || guest?.displayName || guest?.name || joinIdentity;
-          const lkRes = await fetch(
-            `/api/token?room=${junctionId}&username=${encodeURIComponent(
-              joinIdentity
-            )}&displayName=${encodeURIComponent(
-              joinDisplayName
-            )}&avatar=${encodeURIComponent(user?.avatar || guest.avatar || "zap")}&color=${encodeURIComponent(
-              guest.color || "#6366F1"
-            )}&role=${encodeURIComponent(role)}`
-          );
-          const lkData = await lkRes.json();
-          if (lkRes.ok && lkData.token) {
-            setLiveKitToken(lkData.token);
-            setLiveKitUrl(lkData.serverUrl);
-          } else {
-            const tokenErr = lkData.error || "Failed to obtain voice credentials.";
-            setError(tokenErr);
-            setKickedNotice(tokenErr);
-            return false;
-          }
-        } catch (e: any) {
-          console.error("Failed to fetch LiveKit token", e);
-          setError(e.message || "Failed to connect to audio service.");
-          return false;
+        // Stage 3 deliberate duration: 700ms for encrypted WebRTC tunnel handshake
+        await new Promise((r) => setTimeout(r, 700));
+        if (!isMounted) return false;
+
+        // Stage 4: 100% Connected confirmation
+        setConnectionStep("connected");
+        setConnectionProgress(100);
+
+        // Keep 100% Connected confirmation visible for a solid 850ms so user clearly sees 100% verified status!
+        await new Promise((r) => setTimeout(r, 850));
+        if (isMounted) {
+          setIsConnectingOverlayOpen(false);
         }
 
         return true;
       } catch (err: any) {
-        if (isMounted) setError(err.message);
+        if (isMounted) {
+          setError(err.message);
+          setIsConnectingOverlayOpen(false);
+        }
         return false;
       } finally {
         isJoiningRef.current = false;
@@ -1214,6 +1412,26 @@ export function JunctionRoom({
       isMounted = false;
       isRealUnmount.current = true;
       isJoiningRef.current = false;
+
+      // Emergency hardware & connection release if unmounted without handleLeave
+      if (liveKitRoomRef.current) {
+        try {
+          const local = liveKitRoomRef.current.localParticipant;
+          if (local) {
+            local.audioTrackPublications?.forEach((pub: any) => {
+              try {
+                pub.track?.stop();
+                pub.audioTrack?.stop();
+              } catch {}
+            });
+          }
+          liveKitRoomRef.current.disconnect();
+        } catch {}
+      }
+
+      if (mediaStream) {
+        mediaStream.getTracks().forEach((t) => t.stop());
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [junctionId]);
@@ -1782,15 +2000,69 @@ export function JunctionRoom({
     setTimeout(() => setIsCopied(false), 2000);
   };
 
-  const handleLeave = () => {
+  const handleLeave = async () => {
+    if (isLeaving) return;
+    setIsLeaving(true);
+    setExitStep("disconnecting");
+
+    // 1. Broadcast departure immediately across both channels so peers update UI right away
+    broadcastRoomUpdate({
+      type: "room_participants_updated",
+      payload: { action: "leave", identity: myIdentity },
+    });
+
+    // 2. Hardware mic teardown: disable microphone & stop tracks so mic indicator immediately turns off
+    try {
+      if (liveKitRoomRef.current) {
+        const local = liveKitRoomRef.current.localParticipant;
+        if (local) {
+          try {
+            await local.setMicrophoneEnabled(false);
+          } catch {}
+          local.audioTrackPublications?.forEach((pub: any) => {
+            try {
+              pub.track?.stop();
+              pub.audioTrack?.stop();
+              local.unpublishTrack(pub.track).catch(() => {});
+            } catch {}
+          });
+        }
+        await liveKitRoomRef.current.disconnect();
+      }
+    } catch (e) {
+      console.warn("LiveKit disconnect notice:", e);
+    }
+
+    // 3. Stop browser MediaStream
+    if (mediaStream) {
+      mediaStream.getTracks().forEach((t) => t.stop());
+    }
+
+    // 4. Remove all session storage keys
     if (typeof window !== "undefined") {
       sessionStorage.removeItem(`junction_mod_muted_${junctionId}`);
       sessionStorage.removeItem(`junction_role_${junctionId}`);
       sessionStorage.removeItem("yapclub_active_junction_id");
     }
 
-    if (mediaStream) {
-      mediaStream.getTracks().forEach((t) => t.stop());
+    // 5. Update cached lobby state in sessionStorage so leaving user disappears from lobby immediately
+    if (typeof window !== "undefined") {
+      try {
+        const cachedStr = sessionStorage.getItem("yapclub_cached_junctions");
+        if (cachedStr) {
+          const list: Junction[] = JSON.parse(cachedStr);
+          const updatedList = list.map((j) => {
+            if (j.id === junctionId) {
+              const remaining = j.participants.filter(
+                (p) => (p.identity || "").toLowerCase() !== myIdentity.toLowerCase()
+              );
+              return { ...j, participants: remaining, currentCount: remaining.length };
+            }
+            return j;
+          });
+          sessionStorage.setItem("yapclub_cached_junctions", JSON.stringify(updatedList));
+        }
+      } catch {}
     }
 
     const leavePayload = {
@@ -1809,29 +2081,37 @@ export function JunctionRoom({
       userId: user?.id,
     };
 
-    // Broadcast departure immediately across both channels
-    broadcastRoomUpdate({
-      type: "room_participants_updated",
-      payload: { action: "leave", identity: myIdentity },
-    });
-
-    // Notify backend in background with keepalive so it completes even after unmount
+    // 6. Await database leave request with timeout guarantee
     try {
-      fetch(`/api/junctions/${junctionId}`, {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 2500);
+      await fetch(`/api/junctions/${junctionId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(leavePayload),
+        signal: controller.signal,
         keepalive: true,
-      }).catch((e) => console.error("Failed to leave junction", e));
+      });
+      clearTimeout(timeout);
     } catch (e) {
-      console.error("Failed to dispatch leave", e);
+      console.warn("Failed to dispatch leave cleanly:", e);
     }
 
+    // 7. Reassuring confirmation: show Clean End state
+    setExitStep("ended");
+    await new Promise((r) => setTimeout(r, 600));
+
+    // Clear joined ref so component won't re-join
+    joinedJunctionIdRef.current = null;
+
+    // 8. Complete exit navigation
     if (onLeave) {
       onLeave();
     } else {
       router.replace("/junctions");
     }
+
+    setIsLeaving(false);
   };
 
   const handleMinimize = () => {
@@ -1842,9 +2122,33 @@ export function JunctionRoom({
     }
   };
 
-  const handleVolumeChange = (identity: string, vol: number) => {
-    const clamped = Math.min(100, Math.max(0, vol));
-    setParticipantVolumes((prev) => ({ ...prev, [identity]: clamped }));
+  const handleVolumeChange = (targetUser: JunctionParticipant | string, vol: number) => {
+    const clamped = Math.min(100, Math.max(0, Math.round(vol)));
+    const keys: string[] = [];
+    if (typeof targetUser === "string") {
+      keys.push(targetUser, targetUser.toLowerCase());
+    } else if (targetUser) {
+      if (targetUser.identity) {
+        keys.push(targetUser.identity, targetUser.identity.toLowerCase());
+      }
+      if (targetUser.username) {
+        keys.push(targetUser.username, targetUser.username.toLowerCase());
+      }
+      if (targetUser.name) {
+        keys.push(targetUser.name, targetUser.name.toLowerCase());
+      }
+      if (targetUser.id) {
+        keys.push(targetUser.id, targetUser.id.toLowerCase());
+      }
+    }
+
+    setParticipantVolumes((prev) => {
+      const next = { ...prev };
+      for (const k of keys) {
+        next[k] = clamped;
+      }
+      return next;
+    });
   };
 
   const handleToggleMic = () => {
@@ -1877,17 +2181,6 @@ export function JunctionRoom({
     }).catch((err) => console.error("Failed to sync mute state to DB", err));
   };
 
-  if (isLoading) {
-    return (
-      <div className="min-h-[80vh] flex flex-col items-center justify-center bg-background px-4">
-        <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-2xl bg-indigo-600 text-white flex items-center justify-center animate-pulse shadow-md mb-3">
-          <Radio className="w-6 h-6 sm:w-7 sm:h-7" />
-        </div>
-        <h2 className="text-lg sm:text-xl font-bold text-white mb-1">Connecting to Junction...</h2>
-        <p className="text-xs text-slate-500 dark:text-slate-400">Allocating encrypted secure audio stream</p>
-      </div>
-    );
-  }
 
   // Kicked / Banned / Ended Modal
   if (kickedNotice) {
@@ -1966,7 +2259,7 @@ export function JunctionRoom({
   const isLocalSpeaking = activeSpeakers.some((s) => isLocalIdentity(s));
   const isSomeoneSpeaking = activeSpeakers.length > 0;
   const speakingParticipant = participants.find((p) => activeSpeakers.some((s) => s.toLowerCase() === p.identity?.toLowerCase())) || participants[0];
-  const SEAT_SLOTS = Array.from({ length: junction?.maxParticipants || 7 });
+  const SEAT_SLOTS = Array.from({ length: junction?.maxParticipants || 10 });
 
   return (
     <>
@@ -1987,6 +2280,14 @@ export function JunctionRoom({
           }}
           style={{ display: "none" }}
         >
+          <RoomLifecycleListener
+            onRoomInstance={(r) => {
+              liveKitRoomRef.current = r;
+            }}
+            onConnected={() => {
+              isLiveKitConnectedRef.current = true;
+            }}
+          />
           <RoomConnectionOverlay />
           <LiveKitDataSync
             onMessage={onRoomMessage}
@@ -2002,6 +2303,109 @@ export function JunctionRoom({
             isDeafened={isDeafened}
           />
         </LiveKitRoom>
+      )}
+
+      {/* Simple Clean Progress Bar Connecting Screen (Mobile & Desktop) */}
+      {isConnectingOverlayOpen && (
+        <div className="fixed inset-0 h-[100dvh] z-[200] bg-[#0A0B10]/95 backdrop-blur-2xl flex flex-col items-center justify-center p-4 select-none animate-in fade-in duration-200">
+          <div className="relative max-w-xs w-full bg-[#12131D]/90 border border-white/10 rounded-3xl p-6 sm:p-7 shadow-2xl text-center flex flex-col items-center">
+            
+            {/* Top ambient glow */}
+            <div className={`absolute -top-10 inset-x-0 mx-auto w-28 h-28 rounded-full blur-3xl pointer-events-none transition-colors duration-500 ${
+              connectionStep === "connected" ? "bg-emerald-500/25" : "bg-indigo-600/20"
+            }`} />
+
+            {/* Icon */}
+            <div className={`w-14 h-14 rounded-2xl flex items-center justify-center border mb-4 transition-all duration-300 ${
+              connectionStep === "connected"
+                ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-400 shadow-[0_0_25px_rgba(16,185,129,0.3)]"
+                : "bg-indigo-600/15 border-indigo-500/30 text-indigo-400 shadow-[0_0_20px_rgba(99,102,241,0.25)]"
+            }`}>
+              {connectionStep === "connected" ? (
+                <Check size={28} className="text-emerald-400 animate-in zoom-in-75 duration-200" strokeWidth={3} />
+              ) : (
+                <Radio size={26} className="text-indigo-400 animate-pulse" />
+              )}
+            </div>
+
+            {/* Connecting Title */}
+            <h3 className="text-lg font-bold text-white tracking-tight mb-1">
+              {connectionStep === "connected" ? "Connected" : "Connecting..."}
+            </h3>
+            
+            <p className="text-xs text-slate-400 font-normal mb-5 truncate max-w-full px-2">
+              {junction?.name || "Voice Junction"}
+            </p>
+
+            {/* Simple Clean Progress Bar */}
+            <div className="w-full bg-white/10 rounded-full h-2 p-0.5 overflow-hidden mb-3.5">
+              <div
+                className={`h-full rounded-full transition-all duration-300 ease-out ${
+                  connectionStep === "connected"
+                    ? "bg-gradient-to-r from-emerald-500 to-teal-400 shadow-[0_0_12px_rgba(16,185,129,0.6)]"
+                    : "bg-gradient-to-r from-indigo-500 to-purple-500 shadow-[0_0_12px_rgba(99,102,241,0.5)]"
+                }`}
+                style={{ width: `${connectionProgress}%` }}
+              />
+            </div>
+
+            {/* Simple Bottom Row */}
+            <div className="flex items-center justify-between w-full text-[11px] font-mono px-1">
+              <span className="flex items-center gap-1.5 text-slate-400">
+                <span className={`w-1.5 h-1.5 rounded-full ${
+                  connectionStep === "connected" ? "bg-emerald-400" : "bg-indigo-400 animate-ping"
+                }`} />
+                <span>{connectionStep === "connected" ? "Secure" : "Connecting..."}</span>
+              </span>
+              <span className={connectionStep === "connected" ? "text-emerald-400 font-bold" : "text-slate-300"}>
+                {connectionProgress}%
+              </span>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* Clean Exit Disconnection Screen (Mobile & Desktop) */}
+      {isLeaving && (
+        <div className="fixed inset-0 h-[100dvh] z-[200] bg-[#0A0B10]/95 backdrop-blur-2xl flex flex-col items-center justify-center p-4 select-none animate-in fade-in duration-200">
+          <div className="relative max-w-xs w-full bg-[#12131D]/90 border border-white/10 rounded-3xl p-6 sm:p-7 shadow-2xl text-center flex flex-col items-center">
+            
+            <div className={`w-14 h-14 rounded-2xl flex items-center justify-center border mb-4 transition-all duration-300 ${
+              exitStep === "ended"
+                ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-400 shadow-[0_0_25px_rgba(16,185,129,0.25)] animate-in zoom-in-75 duration-200"
+                : "bg-rose-500/15 border border-rose-500/30 text-rose-400 shadow-[0_0_25px_rgba(244,63,94,0.25)]"
+            }`}>
+              {exitStep === "ended" ? (
+                <Check size={28} className="text-emerald-400" strokeWidth={3} />
+              ) : (
+                <PhoneOff size={26} className="animate-pulse" />
+              )}
+            </div>
+
+            <h3 className="text-lg font-bold text-white tracking-tight mb-1">
+              {exitStep === "ended" ? "Disconnected" : "Leaving Junction..."}
+            </h3>
+            
+            <p className="text-xs text-slate-400 font-light mb-5">
+              {exitStep === "ended"
+                ? "Microphone released & room seat freed safely"
+                : "Closing encrypted audio channels & freeing seat"}
+            </p>
+
+            <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-[11px] font-mono ${
+              exitStep === "ended"
+                ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
+                : "bg-white/5 border-white/10 text-slate-300"
+            }`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${
+                exitStep === "ended" ? "bg-emerald-400" : "bg-rose-400 animate-ping"
+              }`} />
+              <span>{exitStep === "ended" ? "100% Safely Ended" : "Disconnecting session..."}</span>
+            </div>
+
+          </div>
+        </div>
       )}
 
       {isMinimized ? (
@@ -2066,7 +2470,7 @@ export function JunctionRoom({
                     </div>
                   ) : (
                     <span className="text-slate-400 truncate">
-                      {participants.length}/{junction?.maxParticipants || 7} in room
+                      {participants.length}/{junction?.maxParticipants || 10} in room
                     </span>
                   )}
                 </div>
@@ -2205,7 +2609,7 @@ export function JunctionRoom({
                 {/* Participant Count Pill */}
                 <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-[10px] sm:text-xs font-semibold text-slate-300 shrink-0">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  <span>{participants.length}/{junction?.maxParticipants || 7}</span>
+                  <span>{participants.length}/{junction?.maxParticipants || 10}</span>
                 </div>
 
                 {/* User's Role Badge */}
@@ -2285,21 +2689,36 @@ export function JunctionRoom({
               >
                 <Minimize2 size={14} className="text-indigo-400" />
               </button>
+
+              {/* Leave Room Button in Top Header */}
+              <button
+                type="button"
+                onClick={handleLeave}
+                className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95"
+                title="Leave Junction Room"
+              >
+                <PhoneOff size={14} className="text-rose-400" />
+              </button>
             </div>
           </div>
         </div>
 
         {/* Dynamic Seat Stage Grid */}
-        <div className={`w-full mx-auto px-2.5 sm:px-6 my-auto py-2 sm:py-4 ${SEAT_SLOTS.length <= 2 ? "max-w-3xl" :
+        <div className={`w-full mx-auto px-2.5 sm:px-6 my-auto py-2 sm:py-4 ${
+          SEAT_SLOTS.length <= 2 ? "max-w-3xl" :
           SEAT_SLOTS.length <= 4 ? "max-w-4xl" :
-            SEAT_SLOTS.length <= 6 ? "max-w-5xl" :
-              "max-w-6xl"
+          SEAT_SLOTS.length <= 6 ? "max-w-5xl" :
+          SEAT_SLOTS.length <= 8 ? "max-w-6xl" :
+          "max-w-7xl"
+        }`}>
+          <div className={`grid gap-2.5 sm:gap-4 justify-center mx-auto ${
+            SEAT_SLOTS.length <= 2 ? "grid-cols-1 sm:grid-cols-2" :
+            SEAT_SLOTS.length <= 4 ? "grid-cols-2 sm:grid-cols-2" :
+            SEAT_SLOTS.length <= 6 ? "grid-cols-2 sm:grid-cols-3" :
+            SEAT_SLOTS.length <= 8 ? "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4" :
+            SEAT_SLOTS.length <= 10 ? "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5" :
+            "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6"
           }`}>
-          <div className={`grid gap-2.5 sm:gap-4.5 justify-center mx-auto ${SEAT_SLOTS.length <= 2 ? "grid-cols-1 sm:grid-cols-2" :
-            SEAT_SLOTS.length <= 4 ? "grid-cols-2 sm:grid-cols-2 lg:grid-cols-2" :
-              SEAT_SLOTS.length <= 6 ? "grid-cols-2 sm:grid-cols-3" :
-                "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4"
-            }`}>
             {SEAT_SLOTS.map((_, index) => {
               const participant = participants[index];
               const isLocal = isLocalParticipant(participant);
@@ -2331,7 +2750,9 @@ export function JunctionRoom({
                         ? "min-h-[175px] sm:min-h-[285px]"
                         : SEAT_SLOTS.length <= 4
                         ? "min-h-[155px] sm:min-h-[250px]"
-                        : "min-h-[140px] sm:min-h-[220px]"
+                        : SEAT_SLOTS.length <= 8
+                        ? "min-h-[140px] sm:min-h-[220px]"
+                        : "min-h-[135px] sm:min-h-[200px]"
                     } ${
                       participantRole === "super_admin"
                         ? "ring-1.5 ring-amber-400/80 shadow-[0_0_25px_rgba(245,158,11,0.25)]"
@@ -2357,9 +2778,27 @@ export function JunctionRoom({
 
                     {/* Top Card Header */}
                     <div className="w-full flex items-center justify-between gap-1 z-10 min-h-[22px]">
-                      <div className="px-2 py-0.5 rounded-full bg-black/40 backdrop-blur-md border border-white/10 text-[9px] sm:text-[10px] font-mono font-medium text-slate-300 shadow-xs flex items-center gap-1.5 shrink-0">
-                        <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
-                        <span>#{index + 1}</span>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <div className="px-2 py-0.5 rounded-full bg-black/40 backdrop-blur-md border border-white/10 text-[9px] sm:text-[10px] font-mono font-medium text-slate-300 shadow-xs flex items-center gap-1.5 shrink-0">
+                          <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
+                          <span>#{index + 1}</span>
+                        </div>
+                        {!isLocal && (() => {
+                          const pIdent = participant.identity || "";
+                          const pName = participant.name || "";
+                          const vol = participantVolumes[pIdent] ?? participantVolumes[pIdent.toLowerCase()] ?? (pName ? participantVolumes[pName] ?? participantVolumes[pName.toLowerCase()] : undefined) ?? 100;
+                          if (vol === 0) {
+                            return (
+                              <span
+                                className="px-1.5 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[8px] sm:text-[9px] font-bold flex items-center gap-0.5 backdrop-blur-md"
+                                title="You muted this user"
+                              >
+                                <VolumeX size={9} />
+                              </span>
+                            );
+                          }
+                          return null;
+                        })()}
                       </div>
 
                       <div className="flex items-center gap-1 shrink-0 justify-end">
@@ -2592,7 +3031,9 @@ export function JunctionRoom({
                       ? "min-h-[175px] sm:min-h-[285px]"
                       : SEAT_SLOTS.length <= 4
                       ? "min-h-[155px] sm:min-h-[250px]"
-                      : "min-h-[140px] sm:min-h-[220px]"
+                      : SEAT_SLOTS.length <= 8
+                      ? "min-h-[140px] sm:min-h-[220px]"
+                      : "min-h-[135px] sm:min-h-[200px]"
                   }`}
                 >
                   <div className="absolute inset-x-0 top-0 h-[1px] bg-gradient-to-r from-transparent via-white/15 to-transparent pointer-events-none" />
@@ -3142,7 +3583,7 @@ export function JunctionRoom({
                   )
                   .map((j) => {
                     const jCount = j.participants?.length ?? j.currentCount;
-                    const maxCap = j.maxParticipants || 7;
+                    const maxCap = j.maxParticipants || 10;
                     const isOccupied = jCount > 0;
                     const isSwitching = isSwitchingRoomId === j.id;
 
@@ -3245,8 +3686,8 @@ export function JunctionRoom({
       </div>
 
       {/* Floating Bottom Audio Dock Controls */}
-      <div className="fixed bottom-3 sm:bottom-6 inset-x-0 z-50 flex justify-center px-2 pointer-events-none pb-[env(safe-area-inset-bottom)]">
-        <div className="pointer-events-auto p-1.5 sm:p-2 px-3 sm:px-4 rounded-full bg-[#0E0F17]/85 backdrop-blur-3xl border border-white/15 shadow-[0_16px_50px_rgba(0,0,0,0.85),inset_0_1px_1px_rgba(255,255,255,0.18)] flex items-center gap-2 sm:gap-3 max-w-full">
+      <div className="fixed bottom-3 sm:bottom-6 inset-x-0 z-50 flex justify-center px-1 sm:px-2 pointer-events-none pb-[env(safe-area-inset-bottom)]">
+        <div className="pointer-events-auto p-1 sm:p-2 px-2 sm:px-4 rounded-full bg-[#0E0F17]/90 backdrop-blur-3xl border border-white/15 shadow-[0_16px_50px_rgba(0,0,0,0.85),inset_0_1px_1px_rgba(255,255,255,0.18)] flex items-center gap-1.5 sm:gap-3 max-w-[98vw] overflow-x-auto [&::-webkit-scrollbar]:hidden">
           {/* Mute / Unmute Mic (Hero Circular Voice Call Button) */}
           <button
             onClick={handleToggleMic}
@@ -3424,7 +3865,15 @@ export function JunctionRoom({
             ? "super_admin"
             : "user"
         );
-        const targetVolume = participantVolumes[target.identity] ?? 100;
+        const targetVolume = target
+          ? (participantVolumes[target.identity] ??
+             participantVolumes[target.identity?.toLowerCase()] ??
+             participantVolumes[target.username || ""] ??
+             participantVolumes[(target.username || "").toLowerCase()] ??
+             participantVolumes[target.name || ""] ??
+             participantVolumes[(target.name || "").toLowerCase()] ??
+             100)
+          : 100;
 
         const canStaffKick = isStaff && (
           isSuperAdmin ||
@@ -3675,17 +4124,33 @@ export function JunctionRoom({
               )}
 
               {/* Section 4: Inline Volume Slider */}
-              <div className="px-2 py-1.5 border-t border-white/10 flex items-center gap-1.5">
-                <Volume1 size={13} className="text-slate-300 shrink-0" />
+              <div className="px-2.5 py-2 border-t border-white/10 flex items-center gap-2">
+                <button
+                  type="button"
+                  title={targetVolume === 0 ? "Unmute user" : "Mute user"}
+                  onClick={() => {
+                    handleVolumeChange(target, targetVolume === 0 ? 100 : 0);
+                  }}
+                  className="p-1 rounded-md text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer shrink-0"
+                >
+                  {targetVolume === 0 ? (
+                    <VolumeX size={14} className="text-rose-400" />
+                  ) : targetVolume <= 50 ? (
+                    <Volume1 size={14} className="text-slate-300" />
+                  ) : (
+                    <Volume2 size={14} className="text-indigo-400" />
+                  )}
+                </button>
                 <input
                   type="range"
                   min="0"
                   max="100"
+                  step="5"
                   value={targetVolume}
-                  onChange={(e) => handleVolumeChange(target.identity, Number(e.target.value))}
-                  className="w-full h-1 bg-white/20 rounded appearance-none cursor-pointer accent-indigo-400"
+                  onChange={(e) => handleVolumeChange(target, Number(e.target.value))}
+                  className="w-full h-1.5 bg-white/20 rounded-lg appearance-none cursor-pointer accent-indigo-500"
                 />
-                <span className="text-[10px] text-slate-300 font-mono w-6 text-right shrink-0">
+                <span className="text-[10px] text-slate-300 font-mono w-7 text-right shrink-0">
                   {targetVolume}%
                 </span>
               </div>
@@ -3732,7 +4197,7 @@ export function JunctionRoom({
           junctionName={junction.name}
           description={junction.description}
           participantCount={participants.length}
-          maxParticipants={junction.maxParticipants || 7}
+          maxParticipants={junction.maxParticipants || 10}
           currentUserId={user?.id}
           currentUsername={user?.name || guest.name}
         />

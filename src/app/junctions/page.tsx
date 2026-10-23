@@ -64,8 +64,23 @@ export default function JunctionsPage() {
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
   const [activeTab, setActiveTab] = useState<"public" | "private">("public");
+
+  // Hydrate cached lobby data cleanly on client mount without hydration mismatch
+  useEffect(() => {
+    try {
+      const cachedJunctions = sessionStorage.getItem("yapclub_cached_junctions");
+      if (cachedJunctions) {
+        setJunctions(JSON.parse(cachedJunctions));
+        setIsLoading(false);
+      }
+      const cachedOnline = sessionStorage.getItem("yapclub_cached_total_online");
+      if (cachedOnline) {
+        setTotalOnline(Number(cachedOnline));
+      }
+    } catch {}
+  }, []);
 
   // If not onboarded, redirect to /
   useEffect(() => {
@@ -85,7 +100,13 @@ export default function JunctionsPage() {
         });
         if (typeof data.totalOnline === "number") {
           setTotalOnline(data.totalOnline);
+          try {
+            sessionStorage.setItem("yapclub_cached_total_online", String(data.totalOnline));
+          } catch {}
         }
+        try {
+          sessionStorage.setItem("yapclub_cached_junctions", JSON.stringify(data.junctions));
+        } catch {}
       }
     } catch (e: any) {
       if (e.name !== "AbortError") console.warn("Failed to fetch junctions:", e);

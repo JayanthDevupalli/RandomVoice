@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { GuestUser, Junction } from "@/lib/types";
-import { X, Plus, Sparkles, Gamepad2, Cpu, Coffee, Music, Languages, Dices, Loader2, Users } from "lucide-react";
+import { X, Plus, Sparkles, Gamepad2, Cpu, Coffee, Music, Languages, Dices, Loader2, Users, Lock, Unlock } from "lucide-react";
 
 interface CreateJunctionModalProps {
   isOpen: boolean;
@@ -27,7 +27,8 @@ export function CreateJunctionModal({ isOpen, onClose, guest, onCreated }: Creat
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [category, setCategory] = useState<Junction["category"]>("casual");
-  const [maxParticipants, setMaxParticipants] = useState<number>(7);
+  const [maxParticipants, setMaxParticipants] = useState<number>(10);
+  const [isLocked, setIsLocked] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -55,9 +56,9 @@ export function CreateJunctionModal({ isOpen, onClose, guest, onCreated }: Creat
           name: name.trim(),
           description: description.trim() || `Welcome to ${name.trim()} voice room!`,
           category,
-          tags: ["Custom", category],
-          maxParticipants: maxParticipants || 7,
-          isLocked: false,
+          tags: ["Custom", category, isLocked ? "Private" : "Public"],
+          maxParticipants: maxParticipants || 10,
+          isLocked: isLocked,
           creator: {
             name: guest.name,
             avatar: guest.avatar || "zap",
@@ -178,8 +179,8 @@ export function CreateJunctionModal({ isOpen, onClose, guest, onCreated }: Creat
                 {maxParticipants} seats
               </span>
             </div>
-            <div className="grid grid-cols-5 gap-2">
-              {[2, 4, 6, 7, 8].map((size) => (
+            <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+              {[2, 4, 6, 8, 10, 12].map((size) => (
                 <button
                   key={size}
                   type="button"
@@ -194,6 +195,54 @@ export function CreateJunctionModal({ isOpen, onClose, guest, onCreated }: Creat
                   <span className="text-[9px] font-normal opacity-70">seats</span>
                 </button>
               ))}
+            </div>
+          </div>
+
+          {/* Private Room (Locked) Toggle */}
+          <div className={`p-3.5 sm:p-4 rounded-xl border transition-all duration-300 ${
+            isLocked
+              ? "bg-amber-500/10 border-amber-500/30 shadow-[0_0_20px_rgba(245,158,11,0.1)]"
+              : "bg-white/5 border-white/10"
+          }`}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className={`p-2 rounded-xl transition-colors ${
+                  isLocked ? "bg-amber-500/20 text-amber-400" : "bg-white/5 text-slate-400"
+                }`}>
+                  {isLocked ? <Lock size={16} /> : <Unlock size={16} />}
+                </div>
+                <div>
+                  <div className="text-xs sm:text-sm font-semibold text-white flex items-center gap-1.5">
+                    <span>Private Room</span>
+                    {isLocked && (
+                      <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                        Locked
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-slate-400 font-light mt-0.5">
+                    {isLocked
+                      ? "Only people you invite or admit can join"
+                      : "Anyone in YapClub lobby can discover and drop in"}
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                role="switch"
+                aria-checked={isLocked}
+                onClick={() => setIsLocked(!isLocked)}
+                className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                  isLocked ? "bg-amber-500 shadow-md shadow-amber-500/30" : "bg-white/15"
+                }`}
+              >
+                <span
+                  className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
+                    isLocked ? "translate-x-5" : "translate-x-0"
+                  }`}
+                />
+              </button>
             </div>
           </div>
 

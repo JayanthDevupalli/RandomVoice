@@ -140,7 +140,7 @@ export function ModeratorControlModal({
                   HOST
                 </span>
               </div>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400">Manage 7-seat junction security and participants</p>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">Manage junction security and participants</p>
             </div>
           </div>
           <button
@@ -169,7 +169,7 @@ export function ModeratorControlModal({
               }`}
           >
             <Users size={14} />
-            <span>Participants ({participantList.length}/{junction.maxParticipants || 7})</span>
+            <span>Participants ({participantList.length}/{junction.maxParticipants || 10})</span>
           </button>
           <button
             onClick={() => setActiveTab("room")}
@@ -424,12 +424,12 @@ export function ModeratorControlModal({
                     {junction.isCustom && (
                       <div>
                         <label className="text-[10px] uppercase tracking-wider text-slate-500 font-bold mb-1 block">Capacity</label>
-                        <div className="flex gap-2">
-                          {[2, 4, 6, 8].map((size) => (
+                        <div className="grid grid-cols-6 gap-1.5 sm:gap-2">
+                          {[2, 4, 6, 8, 10, 12].map((size) => (
                             <button
                               key={size}
                               onClick={() => setEditCapacity(size)}
-                              className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-colors ${editCapacity === size
+                              className={`py-1.5 rounded-lg text-xs font-bold transition-colors ${editCapacity === size
                                   ? "bg-indigo-600/30 text-indigo-300 border border-indigo-500/30"
                                   : "bg-black/20 text-slate-400 border border-white/5 hover:bg-white/5"
                                 }`}

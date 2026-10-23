@@ -17,6 +17,7 @@ function LandingContent() {
   const isLoaded = isGuestLoaded && isUserLoaded;
 
   useEffect(() => {
+    router.prefetch("/junctions");
     // If user has already completed onboarding or is registered, and didn't explicitly request the login page
     if (isLoaded && (hasCompletedOnboarding || isRegistered) && !isDirectLogin) {
       router.push("/junctions");

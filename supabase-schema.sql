@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS junctions (
   category TEXT NOT NULL CHECK (category IN ('casual','gaming','tech','music','philosophy','languages','chill')),
   icon TEXT DEFAULT 'Mic',
   tags TEXT[] DEFAULT '{}',
-  max_participants INT DEFAULT 7,
+  max_participants INT DEFAULT 10,
   current_count INT DEFAULT 0,
   created_at BIGINT NOT NULL,
   is_custom BOOLEAN DEFAULT true,

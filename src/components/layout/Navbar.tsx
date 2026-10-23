@@ -48,7 +48,7 @@ export function Navbar({ totalOnline: propTotalOnline }: NavbarProps) {
             <div className="flex items-center justify-center gap-1.5 px-3.5 h-9 rounded-full bg-white/5 border border-white/10 shadow-sm text-xs text-slate-300">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)] animate-pulse" />
               <Users size={12} className="text-emerald-400 hidden xs:inline" />
-              <span className="font-semibold text-white tracking-tight">{displayOnline}</span>
+              <span suppressHydrationWarning className="font-semibold text-white tracking-tight">{displayOnline}</span>
               <span className="text-slate-400 text-[11px] hidden sm:inline">live</span>
             </div>
 

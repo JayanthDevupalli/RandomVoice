@@ -70,170 +70,170 @@ export const JunctionCard = React.memo(
     const { user } = useUser();
     const [isDeleting, setIsDeleting] = useState(false);
 
-  const isPublic = !junction.isCustom && !junction.creatorId && (!junction.id.startsWith("junc_"));
-  const IconComponent = isPublic ? MapPin : (CATEGORY_ICONS[junction.category] || Mic);
-  const colorScheme = CATEGORY_COLORS[junction.category] || CATEGORY_COLORS.casual;
-  const displayLabel = isPublic 
-    ? (["North", "South", "East", "West", "Central"].find(r => junction.tags?.includes(r)) || "Public")
-    : junction.category;
-  const displayDescription = isPublic 
-    ? (CITY_FAMOUS_MAP[junction.name] || junction.description)
-    : junction.description;
-  const participantCount = junction.participants?.length ?? junction.currentCount;
-  const maxCapacity = junction.maxParticipants || 7;
-  const isFull = participantCount >= maxCapacity;
-  const isLocked = junction.isLocked;
-  const seats = Array.from({ length: maxCapacity });
-  const isCreator = guest?.name === junction.creatorId;
+    const isPublic = !junction.isCustom && !junction.creatorId && (!junction.id.startsWith("junc_"));
+    const IconComponent = isPublic ? MapPin : (CATEGORY_ICONS[junction.category] || Mic);
+    const colorScheme = CATEGORY_COLORS[junction.category] || CATEGORY_COLORS.casual;
+    const displayLabel = isPublic
+      ? (["North", "South", "East", "West", "Central"].find(r => junction.tags?.includes(r)) || "Public")
+      : junction.category;
+    const displayDescription = isPublic
+      ? (CITY_FAMOUS_MAP[junction.name] || junction.description)
+      : junction.description;
+    const participantCount = junction.participants?.length ?? junction.currentCount;
+    const maxCapacity = junction.maxParticipants || 10;
+    const isFull = participantCount >= maxCapacity;
+    const isLocked = junction.isLocked;
+    const seats = Array.from({ length: maxCapacity });
+    const isCreator = guest?.name === junction.creatorId;
 
-  const handleDelete = async (e: React.MouseEvent) => {
-    e.preventDefault(); // prevent navigation if wrapped in Link
-    e.stopPropagation();
-    if (!confirm("Are you sure you want to delete this room?")) return;
-    try {
-      setIsDeleting(true);
-      await fetch(`/api/junctions/${junction.id}?creatorId=${encodeURIComponent(guest?.name || "")}`, {
-        method: "DELETE",
-      });
-      if (onDelete) {
-        onDelete(junction.id);
+    const handleDelete = async (e: React.MouseEvent) => {
+      e.preventDefault(); // prevent navigation if wrapped in Link
+      e.stopPropagation();
+      if (!confirm("Are you sure you want to delete this room?")) return;
+      try {
+        setIsDeleting(true);
+        await fetch(`/api/junctions/${junction.id}?creatorId=${encodeURIComponent(guest?.name || "")}`, {
+          method: "DELETE",
+        });
+        if (onDelete) {
+          onDelete(junction.id);
+        }
+      } catch (err) {
+        console.error(err);
+        setIsDeleting(false);
       }
-    } catch (err) {
-      console.error(err);
-      setIsDeleting(false);
-    }
-  };
+    };
 
-  return (
-    <div className={`group relative rounded-3xl bg-[#12131A]/60 backdrop-blur-xl hover:bg-[#12131A]/80 border border-white/5 hover:border-indigo-500/50 p-4 sm:p-5 flex flex-col justify-between transition-all duration-300 shadow-xl hover:shadow-indigo-500/10 ${isDeleting ? "opacity-50 pointer-events-none" : ""}`}>
-      <div>
-        {/* Top Header: Category & Occupancy Badge */}
-        <div className="flex items-center justify-between gap-2 mb-3">
-          <div className={`flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-semibold uppercase tracking-wider border ${colorScheme.bg} ${colorScheme.text} ${colorScheme.border}`}>
-            <IconComponent size={12} />
-            <span>{displayLabel}</span>
+    return (
+      <div className={`group relative rounded-3xl bg-[#12131A]/60 backdrop-blur-xl hover:bg-[#12131A]/80 border border-white/5 hover:border-indigo-500/50 p-4 sm:p-5 flex flex-col justify-between transition-all duration-300 shadow-xl hover:shadow-indigo-500/10 ${isDeleting ? "opacity-50 pointer-events-none" : ""}`}>
+        <div>
+          {/* Top Header: Category & Occupancy Badge */}
+          <div className="flex items-center justify-between gap-2 mb-3">
+            <div className={`flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-semibold uppercase tracking-wider border ${colorScheme.bg} ${colorScheme.text} ${colorScheme.border}`}>
+              <IconComponent size={12} />
+              <span>{displayLabel}</span>
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              {isLocked && (
+                <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-rose-500/10 border border-rose-500/20 text-[10px] text-rose-400 font-medium">
+                  <Lock size={10} />
+                  <span>Locked</span>
+                </div>
+              )}
+              <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-white/5 border border-white/10 text-xs font-medium">
+                <Users size={12} className={isFull ? "text-rose-400" : "text-emerald-400"} />
+                <span className={isFull ? "text-rose-400 font-bold" : "text-slate-300 font-semibold"}>
+                  {participantCount}/{maxCapacity}
+                </span>
+              </div>
+            </div>
           </div>
 
-          <div className="flex items-center gap-1.5">
-            {isLocked && (
-              <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-rose-500/10 border border-rose-500/20 text-[10px] text-rose-400 font-medium">
-                <Lock size={10} />
-                <span>Locked</span>
-              </div>
+          <div className="mb-3.5">
+            <div className="flex items-start justify-between gap-2">
+              <h3 className="text-base sm:text-lg font-semibold text-white tracking-tight group-hover:text-indigo-300 transition-colors line-clamp-1">
+                {junction.name}
+              </h3>
+              {isCreator && (
+                <button
+                  onClick={handleDelete}
+                  disabled={isDeleting}
+                  className="p-1.5 rounded-md text-slate-500 hover:bg-rose-500/20 hover:text-rose-400 transition-colors z-10 shrink-0 disabled:opacity-50"
+                  title="Delete Room"
+                >
+                  {isDeleting ? <Loader2 size={14} className="animate-spin text-rose-400" /> : <Trash2 size={14} />}
+                </button>
+              )}
+            </div>
+
+            {displayDescription && (
+              <p className="text-xs text-slate-400 font-light leading-relaxed line-clamp-2 mt-1 tracking-wide">
+                {displayDescription}
+              </p>
             )}
-            <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-white/5 border border-white/10 text-xs font-medium">
-              <Users size={12} className={isFull ? "text-rose-400" : "text-emerald-400"} />
-              <span className={isFull ? "text-rose-400 font-bold" : "text-slate-300 font-semibold"}>
-                {participantCount}/{maxCapacity}
-              </span>
+          </div>
+
+          {/* Dynamic Seat Strip */}
+          <div className="mb-4">
+            <div className="flex flex-wrap items-center gap-1.5 justify-start">
+              {seats.map((_, index) => {
+                const participant = junction.participants[index];
+                const isMod = participant?.role === "moderator";
+                const userRole = participant?.userRole;
+                const badgeRole = userRole && userRole !== "user" ? userRole : isMod ? "moderator" : undefined;
+                const roleTitle = userRole === "super_admin" ? "Founder" : userRole === "admin" ? "Admin" : userRole === "manager" ? "Manager" : isMod ? "Host" : "";
+
+                if (participant) {
+                  return (
+                    <div
+                      key={participant.id || index}
+                      className="relative transform hover:scale-110 transition-transform"
+                      title={`${participant.name}${roleTitle ? ` (${roleTitle})` : ""}${participant.isSpeaking ? " (Speaking)" : ""}`}
+                    >
+                      <UserAvatar
+                        avatar={participant.avatar}
+                        color={participant.color}
+                        size="sm"
+                        badgeRole={badgeRole}
+                        isSpeaking={participant.isSpeaking}
+                      />
+                    </div>
+                  );
+                }
+                return (
+                  <div
+                    key={`empty-${index}`}
+                    className="w-7 h-7 rounded-full border border-solid border-white/10 flex items-center justify-center text-[10px] font-medium text-slate-500"
+                    title={`Seat #${index + 1} (Available)`}
+                  >
+                    {index + 1}
+                  </div>
+                );
+              })}
             </div>
           </div>
         </div>
 
-        <div className="mb-3.5">
-          <div className="flex items-start justify-between gap-2">
-            <h3 className="text-base sm:text-lg font-semibold text-white tracking-tight group-hover:text-indigo-300 transition-colors line-clamp-1">
-              {junction.name}
-            </h3>
-            {isCreator && (
-              <button
-                onClick={handleDelete}
-                disabled={isDeleting}
-                className="p-1.5 rounded-md text-slate-500 hover:bg-rose-500/20 hover:text-rose-400 transition-colors z-10 shrink-0 disabled:opacity-50"
-                title="Delete Room"
-              >
-                {isDeleting ? <Loader2 size={14} className="animate-spin text-rose-400" /> : <Trash2 size={14} />}
-              </button>
-            )}
-          </div>
-
-          {displayDescription && (
-            <p className="text-xs text-slate-400 font-light leading-relaxed line-clamp-2 mt-1 tracking-wide">
-              {displayDescription}
-            </p>
+        {/* Action Button */}
+        <div>
+          {user?.isBanned ? (
+            <button
+              disabled
+              className="w-full py-2.5 px-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 font-medium text-xs flex items-center justify-center gap-1.5 cursor-not-allowed"
+            >
+              <Shield size={13} />
+              <span>Account Suspended</span>
+            </button>
+          ) : isLocked ? (
+            <button
+              disabled
+              className="w-full py-2.5 px-3 rounded-xl bg-white/5 border border-white/10 text-rose-400/80 font-medium text-xs flex items-center justify-center gap-1.5 cursor-not-allowed"
+            >
+              <Lock size={13} />
+              <span>Room Locked by Mod</span>
+            </button>
+          ) : isFull ? (
+            <button
+              disabled
+              className="w-full py-2.5 px-3 rounded-xl bg-white/5 border border-white/10 text-slate-500 font-medium text-xs flex items-center justify-center gap-1.5 cursor-not-allowed"
+            >
+              <Lock size={13} />
+              <span>Room Full ({maxCapacity}/{maxCapacity})</span>
+            </button>
+          ) : (
+            <Link
+              href={`/junction/${junction.id}`}
+              className="w-full py-3 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-[13px] flex items-center justify-center gap-1.5 shadow-md shadow-indigo-600/20 transition-all active:scale-95"
+            >
+              <Mic size={14} />
+              <span>Join Room</span>
+              <ArrowRight size={14} className="opacity-70 group-hover:translate-x-0.5 transition-transform" />
+            </Link>
           )}
         </div>
-
-        {/* Dynamic Seat Strip */}
-        <div className="mb-4">
-          <div className="flex flex-wrap items-center gap-1.5 justify-start">
-            {seats.map((_, index) => {
-              const participant = junction.participants[index];
-              const isMod = participant?.role === "moderator";
-              const userRole = participant?.userRole;
-              const badgeRole = userRole && userRole !== "user" ? userRole : isMod ? "moderator" : undefined;
-              const roleTitle = userRole === "super_admin" ? "Founder" : userRole === "admin" ? "Admin" : userRole === "manager" ? "Manager" : isMod ? "Host" : "";
-
-              if (participant) {
-                return (
-                  <div
-                    key={participant.id || index}
-                    className="relative transform hover:scale-110 transition-transform"
-                    title={`${participant.name}${roleTitle ? ` (${roleTitle})` : ""}${participant.isSpeaking ? " (Speaking)" : ""}`}
-                  >
-                    <UserAvatar
-                      avatar={participant.avatar}
-                      color={participant.color}
-                      size="sm"
-                      badgeRole={badgeRole}
-                      isSpeaking={participant.isSpeaking}
-                    />
-                  </div>
-                );
-              }
-              return (
-                <div
-                  key={`empty-${index}`}
-                  className="w-7 h-7 rounded-full border border-solid border-white/10 flex items-center justify-center text-[10px] font-medium text-slate-500"
-                  title={`Seat #${index + 1} (Available)`}
-                >
-                  {index + 1}
-                </div>
-              );
-            })}
-          </div>
-        </div>
       </div>
-
-      {/* Action Button */}
-      <div>
-        {user?.isBanned ? (
-          <button
-            disabled
-            className="w-full py-2.5 px-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 font-medium text-xs flex items-center justify-center gap-1.5 cursor-not-allowed"
-          >
-            <Shield size={13} />
-            <span>Account Suspended</span>
-          </button>
-        ) : isLocked ? (
-          <button
-            disabled
-            className="w-full py-2.5 px-3 rounded-xl bg-white/5 border border-white/10 text-rose-400/80 font-medium text-xs flex items-center justify-center gap-1.5 cursor-not-allowed"
-          >
-            <Lock size={13} />
-            <span>Room Locked by Mod</span>
-          </button>
-        ) : isFull ? (
-          <button
-            disabled
-            className="w-full py-2.5 px-3 rounded-xl bg-white/5 border border-white/10 text-slate-500 font-medium text-xs flex items-center justify-center gap-1.5 cursor-not-allowed"
-          >
-            <Lock size={13} />
-            <span>Room Full ({maxCapacity}/{maxCapacity})</span>
-          </button>
-        ) : (
-          <Link
-            href={`/junction/${junction.id}`}
-            className="w-full py-3 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-[13px] flex items-center justify-center gap-1.5 shadow-md shadow-indigo-600/20 transition-all active:scale-95"
-          >
-            <Mic size={14} />
-            <span>Join Room</span>
-            <ArrowRight size={14} className="opacity-70 group-hover:translate-x-0.5 transition-transform" />
-          </Link>
-        )}
-      </div>
-    </div>
-  );
-}, (prevProps, nextProps) => {
-  return JSON.stringify(prevProps.junction) === JSON.stringify(nextProps.junction);
-});
+    );
+  }, (prevProps, nextProps) => {
+    return JSON.stringify(prevProps.junction) === JSON.stringify(nextProps.junction);
+  });

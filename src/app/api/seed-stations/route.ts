@@ -57,7 +57,7 @@ async function handleSeed(request: NextRequest) {
           category: "casual",
           icon: "Mic",
           tags: ["Public", st.region, st.state, dist],
-          max_participants: 7,
+          max_participants: 10,
           current_count: 0,
           created_at: now,
           is_custom: false,

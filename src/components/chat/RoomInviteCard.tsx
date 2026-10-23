@@ -47,7 +47,7 @@ export function RoomInviteCard({ invite, isMe }: RoomInviteCardProps) {
         <span className="text-[11px] font-mono text-slate-400 flex items-center gap-1">
           <Users size={12} className="opacity-75" />
           <span>
-            {invite.participantCount || 1}/{invite.maxParticipants || 7}
+            {invite.participantCount || 1}/{invite.maxParticipants || 10}
           </span>
         </span>
       </div>
