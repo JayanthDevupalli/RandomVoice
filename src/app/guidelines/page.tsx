@@ -1,17 +1,35 @@
 import Link from "next/link";
+import type { Metadata } from "next";
 import { ArrowLeft, ShieldAlert, Heart, Scale } from "lucide-react";
+
+export const metadata: Metadata = {
+  title: "Community Guidelines & Safety Rules | Talk Safely With Strangers",
+  description:
+    "YapClub safety guidelines and code of conduct for talking with strangers and anonymous voice hangouts. Zero tolerance for harassment, hate speech, or abuse.",
+  alternates: {
+    canonical: "/guidelines",
+  },
+};
 
 export default function GuidelinesPage() {
   return (
     <div className="min-h-screen bg-background text-slate-100 selection:bg-indigo-500 selection:text-white px-4 sm:px-6 py-12">
       <div className="max-w-3xl mx-auto">
-        <Link
-          href="/"
-          className="inline-flex items-center gap-1.5 text-xs text-slate-400 hover:text-white transition-colors mb-8 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800"
-        >
-          <ArrowLeft size={13} />
-          <span>Back to Home</span>
-        </Link>
+        <div className="flex items-center justify-between mb-8">
+          <Link
+            href="/"
+            className="inline-flex items-center gap-1.5 text-xs text-slate-400 hover:text-white transition-colors px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800"
+          >
+            <ArrowLeft size={13} />
+            <span>Back to Home</span>
+          </Link>
+          <div className="flex items-center gap-2.5">
+            <img src="/webIcon.png" alt="YapClub Logo" className="h-7 w-auto object-contain filter drop-shadow-[0_2px_8px_rgba(99,102,241,0.3)]" />
+            <span className="font-bold text-base tracking-tight text-white flex items-center">
+              yap<span className="text-slate-400 font-normal">club</span>
+            </span>
+          </div>
+        </div>
 
         <h1 className="text-3xl sm:text-4xl font-black text-white tracking-tight mb-4">
           Community <span className="text-indigo-400">Guidelines</span>

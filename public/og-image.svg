@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" fill="none">
+  <defs>
+    <radialGradient id="glow1" cx="20%" cy="20%" r="50%">
+      <stop offset="0%" stop-color="#6366F1" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#6366F1" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow2" cx="80%" cy="80%" r="50%">
+      <stop offset="0%" stop-color="#A855F7" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#A855F7" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="textGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#818CF8"/>
+      <stop offset="50%" stop-color="#C084FC"/>
+      <stop offset="100%" stop-color="#F472B6"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="630" fill="#0B0C10"/>
+  <rect width="1200" height="630" fill="url(#glow1)"/>
+  <rect width="1200" height="630" fill="url(#glow2)"/>
+
+  <!-- Border Frame -->
+  <rect x="30" y="30" width="1140" height="570" rx="24" stroke="rgba(255, 255, 255, 0.1)" stroke-width="1.5" fill="none"/>
+
+  <!-- Logo Pill -->
+  <g transform="translate(100, 90)">
+    <rect width="320" height="48" rx="24" fill="rgba(255, 255, 255, 0.06)" stroke="rgba(255, 255, 255, 0.12)" stroke-width="1"/>
+    <image href="/webIcon.png" x="14" y="12" width="38" height="24" preserveAspectRatio="xMidYMid meet" />
+    <text x="60" y="30" fill="#E2E8F0" font-family="system-ui, -apple-system, sans-serif" font-size="18" font-weight="600" letter-spacing="0.5">
+      yapclub • Live Audio Rooms
+    </text>
+  </g>
+
+  <!-- Main Headline -->
+  <text x="100" y="230" fill="#FFFFFF" font-family="system-ui, -apple-system, sans-serif" font-size="58" font-weight="800" letter-spacing="-1">
+    Talk with Strangers &amp;
+  </text>
+  <text x="100" y="305" fill="url(#textGrad)" font-family="system-ui, -apple-system, sans-serif" font-size="58" font-weight="800" letter-spacing="-1">
+    Anonymous Voice Rooms
+  </text>
+
+  <!-- Subheadline -->
+  <text x="100" y="380" fill="#94A3B8" font-family="system-ui, -apple-system, sans-serif" font-size="24" font-weight="300">
+    Drop into cozy 10-seat group voice hangouts. Zero signups, zero camera pressure,
+  </text>
+  <text x="100" y="420" fill="#94A3B8" font-family="system-ui, -apple-system, sans-serif" font-size="24" font-weight="300">
+    crystal-clear 3D audio, and real people chatting 24/7.
+  </text>
+
+  <!-- Feature Badges -->
+  <g transform="translate(100, 480)">
+    <!-- Badge 1 -->
+    <g transform="translate(0, 0)">
+      <rect width="240" height="46" rx="12" fill="rgba(99, 102, 241, 0.15)" stroke="rgba(99, 102, 241, 0.4)" stroke-width="1"/>
+      <text x="24" y="29" fill="#C7D2FE" font-family="system-ui, -apple-system, sans-serif" font-size="16" font-weight="600">
+        🎙️ 100% Voice First
+      </text>
+    </g>
+
+    <!-- Badge 2 -->
+    <g transform="translate(260, 0)">
+      <rect width="240" height="46" rx="12" fill="rgba(168, 85, 247, 0.15)" stroke="rgba(168, 85, 247, 0.4)" stroke-width="1"/>
+      <text x="24" y="29" fill="#E9D5FF" font-family="system-ui, -apple-system, sans-serif" font-size="16" font-weight="600">
+        🔒 Pure Anonymity
+      </text>
+    </g>
+
+    <!-- Badge 3 -->
+    <g transform="translate(520, 0)">
+      <rect width="260" height="46" rx="12" fill="rgba(16, 185, 129, 0.15)" stroke="rgba(16, 185, 129, 0.4)" stroke-width="1"/>
+      <text x="24" y="29" fill="#A7F3D0" font-family="system-ui, -apple-system, sans-serif" font-size="16" font-weight="600">
+        ⚡ Zero Signup Required
+      </text>
+    </g>
+  </g>
+</svg>

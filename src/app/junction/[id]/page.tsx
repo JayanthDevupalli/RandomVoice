@@ -49,10 +49,10 @@ export default function JunctionVoicePage({ params: propParams }: { params?: { i
   if (!isLoaded || !user) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-background">
-        <div className="w-14 h-14 rounded-2xl bg-indigo-600 flex items-center justify-center animate-pulse mb-3">
-          <Radio className="w-7 h-7 text-white animate-spin" />
+        <div className="h-16 w-auto flex items-center justify-center animate-pulse mb-3">
+          <img src="/webIcon.png" alt="YapClub" className="h-14 w-auto object-contain filter drop-shadow-[0_4px_20px_rgba(99,102,241,0.45)]" />
         </div>
-        <p className="text-xs text-slate-500 dark:text-slate-400">Loading Session...</p>
+        <p className="text-xs text-slate-400 font-medium tracking-wide">Loading Session...</p>
       </div>
     );
   }

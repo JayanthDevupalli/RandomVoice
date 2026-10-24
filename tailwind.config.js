@@ -41,8 +41,13 @@ module.exports = {
         "float": "float 3s ease-in-out infinite",
         "floatUp": "floatUp 3s ease-out forwards",
         "slideUp": "slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1)",
+        "fadeIn": "fadeIn 0.25s ease-out forwards",
       },
       keyframes: {
+        "fadeIn": {
+          "0%": { opacity: "0", transform: "translateY(4px)" },
+          "100%": { opacity: "1", transform: "translateY(0)" },
+        },
         "pulse-glow": {
           "0%, 100%": {
             opacity: "1",

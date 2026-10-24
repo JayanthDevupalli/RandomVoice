@@ -93,8 +93,8 @@ export function PersonaSetupModal({
 
         {/* Header */}
         <div className="flex items-center gap-3 mb-6">
-          <div className="p-2.5 rounded-2xl bg-indigo-600 text-white shadow-md shadow-indigo-600/20">
-            <Radio className="w-5 h-5" />
+          <div className="h-10 w-auto flex items-center justify-center">
+            <img src="/webIcon.png" alt="YapClub" className="h-9 w-auto object-contain filter drop-shadow-[0_2px_8px_rgba(99,102,241,0.35)]" />
           </div>
           <div>
             <div className="flex items-center gap-2">

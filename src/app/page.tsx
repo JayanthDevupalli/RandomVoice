@@ -9,7 +9,8 @@ import { LandingWelcome } from "@/components/landing/LandingWelcome";
 function LandingContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const isDirectLogin = searchParams.get("login") === "true" || searchParams.get("mode") === "login";
+  const isDirectLogin =
+    searchParams.get("login") === "true" || searchParams.get("mode") === "login";
 
   const { hasCompletedOnboarding, isLoaded: isGuestLoaded } = useGuestUser();
   const { isRegistered, isLoaded: isUserLoaded } = useUser();
@@ -29,9 +30,7 @@ function LandingContent() {
     return <div className="min-h-screen bg-[#0B0C10]" />;
   }
 
-  return (
-    <LandingWelcome initialMode={isDirectLogin ? "login" : "guest"} />
-  );
+  return <LandingWelcome initialMode={isDirectLogin ? "login" : "guest"} />;
 }
 
 export default function RootLandingPage() {

@@ -351,9 +351,13 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
       {/* Top Nav */}
       <header className="relative z-40 w-full pt-4 sm:pt-7">
         <div className="max-w-[90rem] mx-auto px-4 sm:px-12 flex items-center justify-between">
-          <div className="flex items-center gap-2.5 opacity-90 hover:opacity-100 transition-opacity">
-            <Radio className="w-4 h-4 sm:w-5 sm:h-5 text-indigo-400" strokeWidth={1.5} />
-            <span className="font-semibold text-base sm:text-lg tracking-wide text-white">
+          <div className="flex items-center gap-2 sm:gap-2.5 opacity-95 hover:opacity-100 transition-opacity select-none">
+            <img
+              src="/webIcon.png"
+              alt="YapClub Logo"
+              className="h-6 sm:h-7 w-auto object-contain shrink-0 filter drop-shadow-[0_2px_10px_rgba(99,102,241,0.3)]"
+            />
+            <span className="font-bold text-lg sm:text-xl tracking-tight text-white flex items-center leading-none">
               yap<span className="text-slate-400 font-normal">club</span>
             </span>
           </div>

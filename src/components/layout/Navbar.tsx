@@ -36,9 +36,13 @@ export function Navbar({ totalOnline: propTotalOnline, className = "" }: NavbarP
       <header className={`sticky top-0 z-40 w-full border-b border-white/5 bg-background/50 backdrop-blur-xl shrink-0 ${className}`}>
         <div className="max-w-7xl mx-auto px-3 sm:px-6 h-14 sm:h-16 flex items-center justify-between">
           {/* Brand Logo */}
-          <Link href="/junctions" className="flex items-center gap-2.5 group opacity-90 hover:opacity-100 transition-opacity">
-            <Radio className="w-4 h-4 sm:w-5 sm:h-5 text-indigo-400" strokeWidth={1.5} />
-            <span className="font-semibold text-base sm:text-lg tracking-wide text-white">
+          <Link href="/junctions" className="flex items-center gap-2 sm:gap-2.5 group opacity-95 hover:opacity-100 transition-opacity select-none">
+            <img
+              src="/webIcon.png"
+              alt="YapClub Logo"
+              className="h-6 sm:h-7 w-auto object-contain shrink-0 group-hover:scale-105 transition-transform filter drop-shadow-[0_2px_10px_rgba(99,102,241,0.3)]"
+            />
+            <span className="font-bold text-lg sm:text-xl tracking-tight text-white flex items-center leading-none">
               yap<span className="text-slate-400 font-normal">club</span>
             </span>
           </Link>

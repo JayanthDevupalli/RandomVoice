@@ -1,7 +1,15 @@
-"use client";
-
+import type { Metadata } from "next";
 import { Suspense } from "react";
 import { LandingWelcome } from "@/components/landing/LandingWelcome";
+
+export const metadata: Metadata = {
+  title: "Member Login & Account Recovery",
+  description:
+    "Log into your YapClub member account to access persistent direct messages, user profiles, and friend circles.",
+  alternates: {
+    canonical: "/login",
+  },
+};
 
 export default function LoginPage() {
   return (

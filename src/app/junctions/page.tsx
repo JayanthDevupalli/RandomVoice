@@ -211,10 +211,10 @@ export default function JunctionsPage() {
   if (!isLoaded || !guest) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center px-4 text-slate-400">
-        <div className="w-10 h-10 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center animate-pulse mb-3 shadow-md">
-          <Radio className="w-5 h-5 text-indigo-400" />
+        <div className="h-12 w-auto flex items-center justify-center animate-pulse mb-3">
+          <img src="/webIcon.png" alt="YapClub" className="h-10 w-auto object-contain filter drop-shadow-[0_4px_16px_rgba(99,102,241,0.4)]" />
         </div>
-        <p className="text-xs font-medium">Loading YapClub...</p>
+        <p className="text-xs font-medium tracking-wide text-slate-400">Loading YapClub...</p>
       </div>
     );
   }
