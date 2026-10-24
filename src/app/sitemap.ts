@@ -1,7 +1,8 @@
 import { MetadataRoute } from "next";
 
 export default function sitemap(): MetadataRoute.Sitemap {
-  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "http://yapclub.vercel.app/";
+  const rawSiteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://yapclub.vercel.app";
+  const siteUrl = rawSiteUrl.replace(/\/+$/, "");
   const now = new Date();
 
   return [
