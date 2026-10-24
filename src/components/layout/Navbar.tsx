@@ -65,13 +65,12 @@ export function Navbar({ totalOnline: propTotalOnline, className = "" }: NavbarP
                     {isStaff && (
                       <Link
                         href="/admin"
-                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold transition-all shadow-sm ${
-                          isSuperAdmin
-                            ? "bg-amber-500/15 border border-amber-500/40 text-amber-300 hover:bg-amber-500/25 shadow-[0_0_12px_rgba(245,158,11,0.2)]"
-                            : isAdmin
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold transition-all shadow-sm ${isSuperAdmin
+                          ? "bg-amber-500/15 border border-amber-500/40 text-amber-300 hover:bg-amber-500/25 shadow-[0_0_12px_rgba(245,158,11,0.2)]"
+                          : isAdmin
                             ? "bg-indigo-500/15 border border-indigo-500/30 text-indigo-300 hover:bg-indigo-500/25"
                             : "bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/25"
-                        }`}
+                          }`}
                         title={isSuperAdmin ? "Root Founder Admin Console" : isAdmin ? "Admin Moderation Console" : "Manager Console"}
                       >
                         {isSuperAdmin ? (
@@ -101,7 +100,7 @@ export function Navbar({ totalOnline: propTotalOnline, className = "" }: NavbarP
                     </Link>
 
                     <NotificationsDropdown />
-                    
+
                     {/* Profile Button */}
                     <button
                       onClick={() => router.push(`/profile/me`)}

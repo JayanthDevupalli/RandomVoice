@@ -174,7 +174,7 @@ export function NotificationsDropdown() {
                         <UserAvatar avatar={req.requester?.avatar} color="#6366F1" size="sm" className="!w-full !h-full" />
                       )}
                     </div>
-                    
+
                     {/* Content */}
                     <div className="flex-1 min-w-0">
                       <p className="text-sm text-slate-300 leading-snug">

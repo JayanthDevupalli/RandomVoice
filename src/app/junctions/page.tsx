@@ -79,7 +79,7 @@ export default function JunctionsPage() {
       if (cachedOnline) {
         setTotalOnline(Number(cachedOnline));
       }
-    } catch {}
+    } catch { }
   }, []);
 
   // If not onboarded, redirect to /
@@ -102,11 +102,11 @@ export default function JunctionsPage() {
           setTotalOnline(data.totalOnline);
           try {
             sessionStorage.setItem("yapclub_cached_total_online", String(data.totalOnline));
-          } catch {}
+          } catch { }
         }
         try {
           sessionStorage.setItem("yapclub_cached_junctions", JSON.stringify(data.junctions));
-        } catch {}
+        } catch { }
       }
     } catch (e: any) {
       if (e.name !== "AbortError") console.warn("Failed to fetch junctions:", e);
@@ -120,7 +120,7 @@ export default function JunctionsPage() {
     const poll = async () => {
       if (abortController) abortController.abort();
       abortController = new AbortController();
-      
+
       await fetchJunctions(abortController.signal);
       setIsLoading(false);
       timeoutId = setTimeout(poll, 30000);
@@ -195,7 +195,7 @@ export default function JunctionsPage() {
         activeTab === "private"
           ? selectedCategory === "all" || j.category === selectedCategory
           : selectedCategory === "all" || j.tags.includes(selectedCategory); // public filters match region tag
-          
+
       const matchesSearch =
         j.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
         j.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -222,227 +222,221 @@ export default function JunctionsPage() {
   return (
     <>
       <PullToRefresh onRefresh={handleManualRefresh}>
-      <div className="min-h-screen flex flex-col text-slate-200">
-        <Navbar totalOnline={totalOnline} />
+        <div className="min-h-screen flex flex-col text-slate-200">
+          <Navbar totalOnline={totalOnline} />
 
-      <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 py-3 sm:py-6">
-        {/* Platform Suspension Banner */}
-        {user?.isBanned && (
-          <div className="mb-4 p-4 rounded-2xl bg-rose-500/10 border border-rose-500/30 flex items-center gap-3 text-rose-300">
-            <div className="w-10 h-10 rounded-xl bg-rose-500/20 text-rose-400 flex items-center justify-center shrink-0 border border-rose-500/30">
-              <Shield size={20} />
-            </div>
-            <div className="flex-1">
-              <h4 className="text-sm font-semibold text-rose-200">Account Suspended</h4>
-              <p className="text-xs text-rose-300/90 font-light mt-0.5">
-                {user.bannedReason || "Your account has been suspended by YapClub moderation. You cannot join voice rooms or create new rooms."}
-              </p>
-            </div>
-          </div>
-        )}
-
-        {/* Sleek Top Header & Action Row */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3 sm:mb-5">
-          <div className="flex items-center justify-between w-full sm:w-auto">
-            <div className="flex items-center gap-2">
-              <h1 className="text-xl sm:text-2xl font-light text-white tracking-tight">
-                Live <span className="font-medium bg-clip-text text-transparent bg-gradient-to-r from-indigo-300 to-purple-300">Rooms</span>
-              </h1>
-              <span className="text-[11px] px-2.5 py-1 rounded-full bg-white/5 text-slate-300 font-medium border border-white/10 backdrop-blur-md">
-                {currentTabRooms.length} <span className="hidden sm:inline">Rooms</span>
-              </span>
-            </div>
-
-            {/* Mobile Tab Switcher */}
-            <div className="flex sm:hidden bg-white/5 border border-white/10 rounded-xl p-1 ml-2">
-              <button
-                onClick={() => {
-                  setActiveTab("public");
-                  setSelectedCategory("all");
-                }}
-                className={`px-3 py-1 rounded-lg text-[11px] font-medium transition-all ${
-                  activeTab === "public" ? "bg-white/10 text-white shadow-sm" : "text-slate-400"
-                }`}
-              >
-                Public
-              </button>
-              <button
-                onClick={() => {
-                  setActiveTab("private");
-                  setSelectedCategory("all");
-                }}
-                className={`px-3 py-1 rounded-lg text-[11px] font-medium transition-all ${
-                  activeTab === "private" ? "bg-white/10 text-white shadow-sm" : "text-slate-400"
-                }`}
-              >
-                Private
-              </button>
-            </div>
-          </div>
-
-          <div className="hidden sm:flex sm:flex-row sm:items-center gap-2 w-full sm:w-auto">
-            <div className="flex bg-white/5 border border-white/10 rounded-xl p-1 mr-0 sm:mr-4">
-              <button
-                onClick={() => {
-                  setActiveTab("public");
-                  setSelectedCategory("all");
-                }}
-                className={`flex-1 sm:flex-none px-4 py-1.5 rounded-lg text-[13px] font-medium transition-all ${
-                  activeTab === "public" ? "bg-white/10 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"
-                }`}
-              >
-                Public ({publicStations.length})
-              </button>
-              <button
-                onClick={() => {
-                  setActiveTab("private");
-                  setSelectedCategory("all");
-                }}
-                className={`flex-1 sm:flex-none px-4 py-1.5 rounded-lg text-[13px] font-medium transition-all ${
-                  activeTab === "private" ? "bg-white/10 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"
-                }`}
-              >
-                Private ({userRooms.length})
-              </button>
-            </div>
-            
-            <button
-              onClick={() => {
-                if (user?.isBanned) return;
-                setIsCreateModalOpen(true);
-              }}
-              disabled={user?.isBanned}
-              className={`w-full sm:w-auto px-4 py-2.5 rounded-xl text-white font-semibold text-[13px] shadow-md transition-all flex items-center justify-center gap-1.5 whitespace-nowrap ${
-                user?.isBanned
-                  ? "bg-rose-500/10 border border-rose-500/20 text-rose-400 cursor-not-allowed opacity-60"
-                  : "bg-indigo-600 hover:bg-indigo-500 shadow-indigo-600/20 cursor-pointer active:scale-95"
-              }`}
-            >
-              <Plus size={16} />
-              <span>Create Room</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Minimal Search & Filters (Single Row on Desktop / Compact on Mobile) */}
-        <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-3 sm:mb-5">
-          {/* Search Box */}
-          <div className="relative flex-1">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search rooms or tags..."
-              className="w-full pl-9 pr-3.5 py-1.5 sm:py-2 rounded-xl bg-white/5 border border-white/10 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500/50 focus:bg-white/[0.07] backdrop-blur-md transition-all font-light"
-            />
-          </div>
-
-          {/* Quick Category Chips */}
-          <div className="flex items-center gap-1.5 overflow-x-auto pb-2 sm:pb-0 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
-            {(activeTab === "public" ? PUBLIC_FILTERS : CATEGORY_FILTERS).map((cat) => {
-              const Icon = cat.icon;
-              const isSelected = selectedCategory === cat.id;
-              return (
-                <button
-                  key={cat.id}
-                  onClick={() => setSelectedCategory(cat.id)}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium whitespace-nowrap transition-all border cursor-pointer backdrop-blur-md active:scale-95 ${
-                    isSelected
-                      ? "bg-white/10 text-white border-white/20 shadow-sm"
-                      : "bg-white/5 text-slate-400 border-white/5 hover:text-slate-200 hover:bg-white/10 hover:border-white/10"
-                  }`}
-                >
-                  <Icon size={12} className={isSelected ? "text-indigo-400" : "text-slate-500"} />
-                  <span>{cat.label}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Active Tab Content */}
-        {isLoading ? (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4 mb-8">
-            {[1, 2, 3].map((i) => (
-              <div key={i} className="h-40 sm:h-48 rounded-[1.5rem] bg-[#12131A]/40 border border-white/5 animate-pulse p-4" />
-            ))}
-          </div>
-        ) : activeTab === "public" ? (
-          <div>
-            {publicStations.length > 0 ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
-                {publicStations.map((junction) => (
-                  <JunctionCard key={junction.id} junction={junction} onDelete={handleJunctionDeleted} />
-                ))}
-              </div>
-            ) : (
-              <div className="p-8 sm:p-12 rounded-[2rem] bg-[#12131A]/60 backdrop-blur-xl border border-white/5 text-center max-w-md mx-auto shadow-2xl">
-                <div className="w-14 h-14 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center mx-auto mb-4 text-indigo-400">
-                  <Radio className="w-6 h-6" />
+          <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 py-3 sm:py-6">
+            {/* Platform Suspension Banner */}
+            {user?.isBanned && (
+              <div className="mb-4 p-4 rounded-2xl bg-rose-500/10 border border-rose-500/30 flex items-center gap-3 text-rose-300">
+                <div className="w-10 h-10 rounded-xl bg-rose-500/20 text-rose-400 flex items-center justify-center shrink-0 border border-rose-500/30">
+                  <Shield size={20} />
                 </div>
-                <h3 className="text-lg sm:text-xl font-medium text-white mb-2">No Public Stations</h3>
-                <p className="text-sm text-slate-400 font-light">
-                  Public stations will appear here.
-                </p>
+                <div className="flex-1">
+                  <h4 className="text-sm font-semibold text-rose-200">Account Suspended</h4>
+                  <p className="text-xs text-rose-300/90 font-light mt-0.5">
+                    {user.bannedReason || "Your account has been suspended by YapClub moderation. You cannot join voice rooms or create new rooms."}
+                  </p>
+                </div>
               </div>
             )}
-          </div>
-        ) : (
-          <div>
-            {userRooms.length > 0 ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
-                {userRooms.map((junction) => (
-                  <JunctionCard key={junction.id} junction={junction} onDelete={handleJunctionDeleted} />
-                ))}
-              </div>
-            ) : (
-              <div className="p-8 sm:p-12 rounded-[2rem] bg-[#12131A]/60 backdrop-blur-xl border border-white/5 text-center max-w-md mx-auto shadow-2xl">
-                <div className="w-14 h-14 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center mx-auto mb-4 text-indigo-400">
-                  <Radio className="w-6 h-6" />
+
+            {/* Sleek Top Header & Action Row */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3 sm:mb-5">
+              <div className="flex items-center justify-between w-full sm:w-auto">
+                <div className="flex items-center gap-2">
+                  <h1 className="text-xl sm:text-2xl font-light text-white tracking-tight">
+                    Live <span className="font-medium bg-clip-text text-transparent bg-gradient-to-r from-indigo-300 to-purple-300">Rooms</span>
+                  </h1>
+                  <span className="text-[11px] px-2.5 py-1 rounded-full bg-white/5 text-slate-300 font-medium border border-white/10 backdrop-blur-md">
+                    {currentTabRooms.length} <span className="hidden sm:inline">Rooms</span>
+                  </span>
                 </div>
-                <h3 className="text-lg sm:text-xl font-medium text-white mb-2">No Private Rooms</h3>
-                <p className="text-sm text-slate-400 mb-6 font-light">
-                  Start a custom voice room.
-                </p>
+
+                {/* Mobile Tab Switcher */}
+                <div className="flex sm:hidden bg-white/5 border border-white/10 rounded-xl p-1 ml-2">
+                  <button
+                    onClick={() => {
+                      setActiveTab("public");
+                      setSelectedCategory("all");
+                    }}
+                    className={`px-3 py-1 rounded-lg text-[11px] font-medium transition-all ${activeTab === "public" ? "bg-white/10 text-white shadow-sm" : "text-slate-400"
+                      }`}
+                  >
+                    Public
+                  </button>
+                  <button
+                    onClick={() => {
+                      setActiveTab("private");
+                      setSelectedCategory("all");
+                    }}
+                    className={`px-3 py-1 rounded-lg text-[11px] font-medium transition-all ${activeTab === "private" ? "bg-white/10 text-white shadow-sm" : "text-slate-400"
+                      }`}
+                  >
+                    Private
+                  </button>
+                </div>
+              </div>
+
+              <div className="hidden sm:flex sm:flex-row sm:items-center gap-2 w-full sm:w-auto">
+                <div className="flex bg-white/5 border border-white/10 rounded-xl p-1 mr-0 sm:mr-4">
+                  <button
+                    onClick={() => {
+                      setActiveTab("public");
+                      setSelectedCategory("all");
+                    }}
+                    className={`flex-1 sm:flex-none px-4 py-1.5 rounded-lg text-[13px] font-medium transition-all ${activeTab === "public" ? "bg-white/10 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"
+                      }`}
+                  >
+                    Public ({publicStations.length})
+                  </button>
+                  <button
+                    onClick={() => {
+                      setActiveTab("private");
+                      setSelectedCategory("all");
+                    }}
+                    className={`flex-1 sm:flex-none px-4 py-1.5 rounded-lg text-[13px] font-medium transition-all ${activeTab === "private" ? "bg-white/10 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"
+                      }`}
+                  >
+                    Private ({userRooms.length})
+                  </button>
+                </div>
+
                 <button
-                  onClick={() => setIsCreateModalOpen(true)}
-                  className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow-md shadow-indigo-600/20 transition-all flex items-center justify-center gap-1.5 mx-auto cursor-pointer active:scale-95"
+                  onClick={() => {
+                    if (user?.isBanned) return;
+                    setIsCreateModalOpen(true);
+                  }}
+                  disabled={user?.isBanned}
+                  className={`w-full sm:w-auto px-4 py-2.5 rounded-xl text-white font-semibold text-[13px] shadow-md transition-all flex items-center justify-center gap-1.5 whitespace-nowrap ${user?.isBanned
+                      ? "bg-rose-500/10 border border-rose-500/20 text-rose-400 cursor-not-allowed opacity-60"
+                      : "bg-indigo-600 hover:bg-indigo-500 shadow-indigo-600/20 cursor-pointer active:scale-95"
+                    }`}
                 >
-                  <Plus size={15} />
+                  <Plus size={16} />
                   <span>Create Room</span>
                 </button>
               </div>
+            </div>
+
+            {/* Minimal Search & Filters (Single Row on Desktop / Compact on Mobile) */}
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-3 sm:mb-5">
+              {/* Search Box */}
+              <div className="relative flex-1">
+                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search rooms or tags..."
+                  className="w-full pl-9 pr-3.5 py-1.5 sm:py-2 rounded-xl bg-white/5 border border-white/10 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500/50 focus:bg-white/[0.07] backdrop-blur-md transition-all font-light"
+                />
+              </div>
+
+              {/* Quick Category Chips */}
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-2 sm:pb-0 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+                {(activeTab === "public" ? PUBLIC_FILTERS : CATEGORY_FILTERS).map((cat) => {
+                  const Icon = cat.icon;
+                  const isSelected = selectedCategory === cat.id;
+                  return (
+                    <button
+                      key={cat.id}
+                      onClick={() => setSelectedCategory(cat.id)}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium whitespace-nowrap transition-all border cursor-pointer backdrop-blur-md active:scale-95 ${isSelected
+                          ? "bg-white/10 text-white border-white/20 shadow-sm"
+                          : "bg-white/5 text-slate-400 border-white/5 hover:text-slate-200 hover:bg-white/10 hover:border-white/10"
+                        }`}
+                    >
+                      <Icon size={12} className={isSelected ? "text-indigo-400" : "text-slate-500"} />
+                      <span>{cat.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Active Tab Content */}
+            {isLoading ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4 mb-8">
+                {[1, 2, 3].map((i) => (
+                  <div key={i} className="h-40 sm:h-48 rounded-[1.5rem] bg-[#12131A]/40 border border-white/5 animate-pulse p-4" />
+                ))}
+              </div>
+            ) : activeTab === "public" ? (
+              <div>
+                {publicStations.length > 0 ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
+                    {publicStations.map((junction) => (
+                      <JunctionCard key={junction.id} junction={junction} onDelete={handleJunctionDeleted} />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="p-8 sm:p-12 rounded-[2rem] bg-[#12131A]/60 backdrop-blur-xl border border-white/5 text-center max-w-md mx-auto shadow-2xl">
+                    <div className="w-14 h-14 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center mx-auto mb-4 text-indigo-400">
+                      <Radio className="w-6 h-6" />
+                    </div>
+                    <h3 className="text-lg sm:text-xl font-medium text-white mb-2">No Public Stations</h3>
+                    <p className="text-sm text-slate-400 font-light">
+                      Public stations will appear here.
+                    </p>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div>
+                {userRooms.length > 0 ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
+                    {userRooms.map((junction) => (
+                      <JunctionCard key={junction.id} junction={junction} onDelete={handleJunctionDeleted} />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="p-8 sm:p-12 rounded-[2rem] bg-[#12131A]/60 backdrop-blur-xl border border-white/5 text-center max-w-md mx-auto shadow-2xl">
+                    <div className="w-14 h-14 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center mx-auto mb-4 text-indigo-400">
+                      <Radio className="w-6 h-6" />
+                    </div>
+                    <h3 className="text-lg sm:text-xl font-medium text-white mb-2">No Private Rooms</h3>
+                    <p className="text-sm text-slate-400 mb-6 font-light">
+                      Start a custom voice room.
+                    </p>
+                    <button
+                      onClick={() => setIsCreateModalOpen(true)}
+                      className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow-md shadow-indigo-600/20 transition-all flex items-center justify-center gap-1.5 mx-auto cursor-pointer active:scale-95"
+                    >
+                      <Plus size={15} />
+                      <span>Create Room</span>
+                    </button>
+                  </div>
+                )}
+              </div>
             )}
-          </div>
-        )}
-      </main>
+          </main>
 
-      {/* Lightweight Footer */}
-      <footer className="w-full border-t border-white/5 py-4 text-center text-[10px] sm:text-xs font-light text-slate-500 bg-background/50 backdrop-blur-md">
-        <p>YapClub • Proudly Made in India 🇮🇳 • Pure Voice, Zero Lag</p>
-      </footer>
+          {/* Lightweight Footer */}
+          <footer className="w-full border-t border-white/5 py-4 text-center text-[10px] sm:text-xs font-light text-slate-500 bg-background/50 backdrop-blur-md">
+            <p>YapClub • Proudly Made in India 🇮🇳 • Pure Voice, Zero Lag</p>
+          </footer>
 
-      </div>
-    </PullToRefresh>
+        </div>
+      </PullToRefresh>
 
-    {/* Mobile FAB for Create Room */}
-    {activeTab === "private" && !user?.isBanned && (
-      <button
-        onClick={() => setIsCreateModalOpen(true)}
-        className="sm:hidden fixed bottom-6 right-5 z-40 w-14 h-14 rounded-full bg-indigo-600 text-white flex items-center justify-center shadow-lg shadow-indigo-600/30 active:scale-95 transition-transform"
-      >
-        <Plus size={24} />
-      </button>
-    )}
+      {/* Mobile FAB for Create Room */}
+      {activeTab === "private" && !user?.isBanned && (
+        <button
+          onClick={() => setIsCreateModalOpen(true)}
+          className="sm:hidden fixed bottom-6 right-5 z-40 w-14 h-14 rounded-full bg-indigo-600 text-white flex items-center justify-center shadow-lg shadow-indigo-600/30 active:scale-95 transition-transform"
+        >
+          <Plus size={24} />
+        </button>
+      )}
 
-    {/* Create Junction Modal */}
-    <CreateJunctionModal
-      isOpen={isCreateModalOpen}
-      onClose={() => setIsCreateModalOpen(false)}
-      guest={guest}
-      onCreated={handleJunctionCreated}
-    />
+      {/* Create Junction Modal */}
+      <CreateJunctionModal
+        isOpen={isCreateModalOpen}
+        onClose={() => setIsCreateModalOpen(false)}
+        guest={guest}
+        onCreated={handleJunctionCreated}
+      />
     </>
   );
 }
