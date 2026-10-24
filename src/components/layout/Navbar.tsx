@@ -14,9 +14,10 @@ import { useLiveStats } from "@/hooks/useLiveStats";
 
 interface NavbarProps {
   totalOnline?: number;
+  className?: string;
 }
 
-export function Navbar({ totalOnline: propTotalOnline }: NavbarProps) {
+export function Navbar({ totalOnline: propTotalOnline, className = "" }: NavbarProps) {
   const router = useRouter();
   const { user, isRegistered, isLoaded } = useUser();
   const { unreadCount } = useUnreadMessages();
@@ -32,7 +33,7 @@ export function Navbar({ totalOnline: propTotalOnline }: NavbarProps) {
 
   return (
     <>
-      <header className="sticky top-0 z-40 w-full border-b border-white/5 bg-background/50 backdrop-blur-xl shrink-0">
+      <header className={`sticky top-0 z-40 w-full border-b border-white/5 bg-background/50 backdrop-blur-xl shrink-0 ${className}`}>
         <div className="max-w-7xl mx-auto px-3 sm:px-6 h-14 sm:h-16 flex items-center justify-between">
           {/* Brand Logo */}
           <Link href="/junctions" className="flex items-center gap-2.5 group opacity-90 hover:opacity-100 transition-opacity">

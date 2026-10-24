@@ -8,16 +8,20 @@ export interface RoomInviteData {
 }
 
 export interface ParsedMessage {
-  type: "text" | "voice" | "room_invite";
+  type: "text" | "voice" | "room_invite" | "gif";
   text?: string;
   audioUrl?: string;
   duration?: number;
+  gifUrl?: string;
+  gifTitle?: string;
   roomInvite?: RoomInviteData;
   replyTo?: {
     id: string;
     sender: string;
     text: string;
     isVoice?: boolean;
+    isGif?: boolean;
+    gifUrl?: string;
   } | null;
   isEdited?: boolean;
 }
@@ -28,9 +32,35 @@ export function parseMessageContent(raw: string): ParsedMessage {
   }
 
   const trimmed = raw.trim();
+
+  // 1. Check if raw content is a direct GIF URL
+  if (
+    trimmed.startsWith("http") &&
+    (trimmed.includes(".gif") || trimmed.includes("giphy.com") || trimmed.includes("tenor.com")) &&
+    !trimmed.includes(" ")
+  ) {
+    return {
+      type: "gif",
+      gifUrl: trimmed,
+      gifTitle: "GIF",
+    };
+  }
+
+  // 2. Parse JSON formatted messages
   if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
     try {
       const parsed = JSON.parse(trimmed);
+
+      if (parsed.type === "gif") {
+        return {
+          type: "gif",
+          gifUrl: parsed.gifUrl || parsed.url || "",
+          gifTitle: parsed.gifTitle || parsed.title || "GIF",
+          text: parsed.text,
+          replyTo: parsed.replyTo || null,
+        };
+      }
+
       if (parsed.type === "room_invite" && (parsed.roomInvite || parsed.junctionId)) {
         const invite: RoomInviteData = parsed.roomInvite || {
           junctionId: parsed.junctionId,
@@ -47,6 +77,7 @@ export function parseMessageContent(raw: string): ParsedMessage {
           replyTo: parsed.replyTo || null,
         };
       }
+
       if (parsed.type === "voice") {
         return {
           type: "voice",
@@ -56,6 +87,7 @@ export function parseMessageContent(raw: string): ParsedMessage {
           isEdited: !!parsed.isEdited,
         };
       }
+
       if (parsed.type === "text" || parsed.text !== undefined) {
         return {
           type: "text",
@@ -101,6 +133,19 @@ export function serializeVoiceMessage(
   });
 }
 
+export function serializeGifMessage(
+  gifUrl: string,
+  gifTitle: string = "GIF",
+  replyTo?: ParsedMessage["replyTo"]
+): string {
+  return JSON.stringify({
+    type: "gif",
+    gifUrl,
+    gifTitle,
+    replyTo: replyTo || null,
+  });
+}
+
 export function serializeRoomInvite(
   invite: RoomInviteData,
   replyTo?: ParsedMessage["replyTo"]
@@ -112,4 +157,29 @@ export function serializeRoomInvite(
     replyTo: replyTo || null,
   });
 }
+
+// Distinct WhatsApp / Discord style vibrant colors for group chat members
+export const SENDER_COLORS = [
+  "text-emerald-400",
+  "text-sky-400",
+  "text-amber-400",
+  "text-purple-400",
+  "text-rose-400",
+  "text-teal-400",
+  "text-cyan-400",
+  "text-orange-400",
+  "text-pink-400",
+  "text-indigo-400",
+];
+
+export function getSenderColor(nameOrId?: string): string {
+  if (!nameOrId) return SENDER_COLORS[0];
+  let hash = 0;
+  for (let i = 0; i < nameOrId.length; i++) {
+    hash = nameOrId.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const index = Math.abs(hash) % SENDER_COLORS.length;
+  return SENDER_COLORS[index];
+}
+
 

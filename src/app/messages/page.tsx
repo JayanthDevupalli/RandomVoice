@@ -39,10 +39,29 @@ import {
   parseMessageContent, 
   serializeTextMessage, 
   serializeVoiceMessage,
+  serializeGifMessage,
+  getSenderColor,
   ParsedMessage 
 } from "@/lib/chat-utils";
 import { socialService, RelationshipStatus } from "@/lib/social-service";
 import { RoomInviteCard } from "@/components/chat/RoomInviteCard";
+import { GifPicker } from "@/components/chat/GifPicker";
+import { MediaLightbox } from "@/components/chat/MediaLightbox";
+import { GroupInfoModal } from "@/components/chat/GroupInfoModal";
+import { AddGroupMemberModal } from "@/components/chat/AddGroupMemberModal";
+
+function formatGroupSubtitle(
+  members: Array<{ id: string; username: string }>,
+  currentUserId?: string
+): string {
+  if (!members || members.length === 0) return "Group Conversation";
+  const names = members.map((m) => (m.id === currentUserId ? "You" : m.username));
+  const sortedNames = [...names.filter((n) => n === "You"), ...names.filter((n) => n !== "You")];
+  if (sortedNames.length <= 4) {
+    return sortedNames.join(", ");
+  }
+  return `${sortedNames.slice(0, 3).join(", ")}, +${sortedNames.length - 3} more`;
+}
 
 export default function MessagesPage() {
   const { user, isRegistered, isLoaded } = useUser();
@@ -85,6 +104,8 @@ export default function MessagesPage() {
     sender: string;
     text: string;
     isVoice?: boolean;
+    isGif?: boolean;
+    gifUrl?: string;
   } | null>(null);
 
   const [editingMessage, setEditingMessage] = useState<{
@@ -111,6 +132,17 @@ export default function MessagesPage() {
   const [otherUserLastReadAt, setOtherUserLastReadAt] = useState<string | null>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const presenceChannelRef = useRef<any>(null);
+
+  // --- Feature 7: Animated GIFs & Media Lightbox ---
+  const [isGifPickerOpen, setIsGifPickerOpen] = useState(false);
+  const [expandedMediaUrl, setExpandedMediaUrl] = useState<string | null>(null);
+  const [expandedMediaTitle, setExpandedMediaTitle] = useState<string>("GIF");
+  const [activeActionMsgId, setActiveActionMsgId] = useState<string | null>(null);
+
+  // --- Feature 8: Group Info & Management ---
+  const [isGroupInfoOpen, setIsGroupInfoOpen] = useState(false);
+  const [isAddGroupMemberOpen, setIsAddGroupMemberOpen] = useState(false);
+  const [activeGroupMembers, setActiveGroupMembers] = useState<Array<{ id: string; username: string; role: string; avatar?: string }>>([]);
 
   // --- Scroll to Bottom & Container ---
   const chatContainerRef = useRef<HTMLDivElement>(null);
@@ -362,6 +394,80 @@ export default function MessagesPage() {
   }, [activeConversationId, markAsRead, messages]);
 
   const activeConversation = conversations.find(c => c.id === activeConversationId);
+
+  // Load active group members for header subtitle, online indicators & member management
+  const loadActiveGroupMembers = useCallback(async () => {
+    if (!activeConversationId || activeConversation?.type !== "group") {
+      setActiveGroupMembers([]);
+      return;
+    }
+    try {
+      const { data, error } = await supabase
+        .from("conversation_members")
+        .select(`
+          user_id,
+          role,
+          profiles (
+            id,
+            username,
+            avatar
+          )
+        `)
+        .eq("conversation_id", activeConversationId);
+
+      if (error) {
+        // Fallback flat query if join fails
+        const { data: flatMembers } = await supabase
+          .from("conversation_members")
+          .select("user_id, role")
+          .eq("conversation_id", activeConversationId);
+
+        if (flatMembers && flatMembers.length > 0) {
+          const uids = flatMembers.map((m: any) => m.user_id);
+          const { data: profs } = await supabase
+            .from("profiles")
+            .select("id, username, avatar")
+            .in("id", uids);
+
+          const pMap = new Map((profs || []).map((p: any) => [p.id, p]));
+          const formatted = flatMembers.map((m: any) => {
+            const p = pMap.get(m.user_id);
+            return {
+              id: m.user_id,
+              username: p?.username || "Unknown",
+              role: m.role || "member",
+              avatar: p?.avatar,
+            };
+          });
+          setActiveGroupMembers(formatted);
+          return;
+        }
+      }
+
+      if (data) {
+        const membersList = data.map((d: any) => {
+          const profile = Array.isArray(d.profiles) ? d.profiles[0] : d.profiles;
+          return {
+            id: d.user_id,
+            username: profile?.username || "Unknown",
+            role: d.role || "member",
+            avatar: profile?.avatar,
+          };
+        });
+        setActiveGroupMembers(membersList);
+      }
+    } catch (err) {
+      console.error("Failed to load active group members:", err);
+    }
+  }, [activeConversationId, activeConversation?.type]);
+
+  useEffect(() => {
+    if (activeConversationId && activeConversation?.type === "group") {
+      loadActiveGroupMembers();
+    } else {
+      setActiveGroupMembers([]);
+    }
+  }, [activeConversationId, activeConversation?.type, loadActiveGroupMembers]);
 
   // Check relationship status for 1-on-1 direct conversations to ensure connection is accepted
   useEffect(() => {
@@ -910,6 +1016,78 @@ export default function MessagesPage() {
     markAsRead(activeConversationId);
   };
 
+  const handleSendGif = async (gifUrl: string, gifTitle: string) => {
+    if (!activeConversationId || !user) return;
+
+    if (user?.isBanned) {
+      alert("Your account is currently suspended. Messaging is disabled.");
+      return;
+    }
+
+    const targetUserId = activeConversation?.other_user?.id;
+    if (targetUserId && (blockedUsers.includes(targetUserId) || blockedMeUsers.includes(targetUserId))) {
+      alert("Cannot send messages in this conversation.");
+      return;
+    }
+
+    if (activeConversation?.type !== "group" && targetRelationship && !targetRelationship.isAcceptedConnection) {
+      alert("Messaging is locked until the follow request is accepted by both users.");
+      return;
+    }
+
+    const content = serializeGifMessage(gifUrl, gifTitle, replyingTo);
+    setReplyingTo(null);
+    setIsGifPickerOpen(false);
+
+    // Optimistic message append
+    const tempId = `temp-gif-${Date.now()}`;
+    const optimisticMsg = {
+      id: tempId,
+      conversation_id: activeConversationId,
+      sender_id: user.id,
+      content,
+      created_at: new Date().toISOString(),
+      profiles: {
+        username: user.username,
+        avatar: user.avatar,
+      },
+    };
+    setMessages((prev) => [...prev, optimisticMsg]);
+
+    try {
+      const { data, error } = await supabase
+        .from("messages")
+        .insert({
+          conversation_id: activeConversationId,
+          sender_id: user.id,
+          content: content,
+        })
+        .select(`
+          id,
+          content,
+          created_at,
+          sender_id,
+          profiles (
+            username,
+            avatar
+          )
+        `)
+        .single();
+
+      if (!error && data) {
+        const profile = Array.isArray(data.profiles) ? data.profiles[0] : data.profiles;
+        setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...data, profiles: profile } : m)));
+        await supabase
+          .from("conversations")
+          .update({ last_message_at: new Date().toISOString() })
+          .eq("id", activeConversationId);
+        markAsRead(activeConversationId);
+      }
+    } catch (err) {
+      console.error("Error sending GIF message:", err);
+    }
+  };
+
   if (!isLoaded || !isRegistered || !user) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
@@ -926,7 +1104,7 @@ export default function MessagesPage() {
 
   return (
     <div className="h-screen h-[100dvh] flex flex-col bg-background overflow-hidden">
-      <Navbar />
+      <Navbar className={activeConversationId ? "hidden sm:block" : "block"} />
 
       <main className="flex-1 max-w-7xl w-full mx-auto p-0 sm:p-4 flex gap-4 min-h-0 overflow-hidden">
         {/* Sidebar (Conversations Inbox) */}
@@ -1128,81 +1306,103 @@ export default function MessagesPage() {
                     : (customNickname || activeConversation?.other_user?.username || "Chat");
 
                 return (
-                  <div className="relative z-30 h-16 border-b border-white/5 flex items-center justify-between px-3 sm:px-6 shrink-0 bg-[#090A0F]/90 backdrop-blur-xl shadow-sm">
-                    <div className="flex items-center gap-2.5 sm:gap-3.5 min-w-0">
+                  <div className="relative z-30 h-14 sm:h-16 border-b border-white/5 flex items-center justify-between px-2.5 sm:px-6 shrink-0 bg-[#090A0F]/95 backdrop-blur-xl shadow-sm pt-[env(safe-area-inset-top,0px)]">
+                    <div className="flex items-center gap-2 sm:gap-3 min-w-0">
                       {/* Back Button */}
                       <button
                         onClick={() => setActiveConversationId(null)}
-                        className="p-2 -ml-1 rounded-full text-slate-400 hover:text-white active:bg-white/10 transition-colors"
+                        className="p-2 -ml-1 rounded-full text-slate-300 hover:text-white active:bg-white/10 active:scale-95 transition-all cursor-pointer"
                         title="Back to conversations"
                         aria-label="Back to conversations"
                       >
                         <ArrowLeft size={20} />
                       </button>
 
-                      <div className="w-10 h-10 rounded-full bg-slate-800 overflow-hidden shrink-0 flex items-center justify-center border border-white/10">
-                        {isGroup ? (
-                          <div className="w-full h-full bg-indigo-950/60 flex items-center justify-center text-indigo-400">
-                            <Users size={18} />
-                          </div>
-                        ) : activeConversation?.other_user?.avatar?.includes("http") ? (
-                          <img src={activeConversation.other_user.avatar} className="w-full h-full object-cover" />
-                        ) : (
-                          <UserAvatar avatar={activeConversation?.other_user?.avatar} color="#6366F1" size="sm" className="!w-full !h-full" />
-                        )}
-                      </div>
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          <h3 className="text-sm sm:text-base font-bold text-white truncate">
-                            {headerTitle}
-                          </h3>
-                          {customNickname && !isGroup && (
-                            <span className="text-[11px] text-slate-400 truncate hidden xs:inline">
-                              @{activeConversation?.other_user?.username}
-                            </span>
+                      <div
+                        onClick={() => isGroup && setIsGroupInfoOpen(true)}
+                        className={`flex items-center gap-2 sm:gap-3 min-w-0 ${isGroup ? "cursor-pointer group/hdr hover:opacity-95" : ""}`}
+                        title={isGroup ? "Click for Group Info" : undefined}
+                      >
+                        <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-slate-800 overflow-hidden shrink-0 flex items-center justify-center border border-white/10 group-hover/hdr:border-indigo-500/50 transition-colors">
+                          {isGroup ? (
+                            <div className="w-full h-full bg-gradient-to-tr from-indigo-900/80 to-indigo-600/50 flex items-center justify-center text-indigo-300">
+                              <Users size={18} />
+                            </div>
+                          ) : activeConversation?.other_user?.avatar?.includes("http") ? (
+                            <img src={activeConversation.other_user.avatar} className="w-full h-full object-cover" />
+                          ) : (
+                            <UserAvatar avatar={activeConversation?.other_user?.avatar} color="#6366F1" size="sm" className="!w-full !h-full" />
                           )}
                         </div>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <h3 className="text-sm sm:text-base font-bold text-white truncate group-hover/hdr:text-indigo-300 transition-colors">
+                              {headerTitle}
+                            </h3>
+                            {customNickname && !isGroup && (
+                              <span className="text-[11px] text-slate-400 truncate hidden xs:inline">
+                                @{activeConversation?.other_user?.username}
+                              </span>
+                            )}
+                          </div>
 
-                        {/* Status Subtitle: Online / Offline / Typing / Blocked / Unavailable */}
-                        {isGroup ? (
-                          <p className="text-[11px] text-slate-400 flex items-center gap-1">
-                            <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
-                            Group Chat
-                          </p>
-                        ) : isBlocked ? (
-                          <p className="text-[11px] text-rose-400 flex items-center gap-1 font-medium">
-                            <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
-                            Contact Blocked
-                          </p>
-                        ) : isBlockedByOther ? (
-                          <p className="text-[11px] text-slate-400 flex items-center gap-1 font-medium">
-                            <span className="w-1.5 h-1.5 rounded-full bg-slate-500" />
-                            Account Unavailable
-                          </p>
-                        ) : isOtherUserTyping ? (
-                          <p className="text-[11px] text-indigo-400 font-medium flex items-center gap-1.5 animate-pulse">
-                            <span className="flex gap-0.5">
-                              <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce" style={{ animationDelay: "0ms" }} />
-                              <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce" style={{ animationDelay: "150ms" }} />
-                              <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce" style={{ animationDelay: "300ms" }} />
-                            </span>
-                            typing...
-                          </p>
-                        ) : isOtherUserOnline ? (
-                          <p className="text-[11px] text-emerald-400 flex items-center gap-1 font-medium">
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)] animate-pulse" />
-                            Online
-                          </p>
-                        ) : (
-                          <p className="text-[11px] text-slate-500 flex items-center gap-1">
-                            <span className="w-1.5 h-1.5 rounded-full bg-slate-500" />
-                            Offline
-                          </p>
-                        )}
+                          {/* Status Subtitle: Online / Offline / Typing / Blocked / Unavailable */}
+                          {isGroup ? (
+                            <p className="text-[11px] text-slate-400 flex items-center gap-1.5 truncate">
+                              <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 shrink-0" />
+                              <span className="truncate">
+                                {activeGroupMembers.length > 0
+                                  ? `${formatGroupSubtitle(activeGroupMembers, user?.id)} (${activeGroupMembers.length} members)`
+                                  : "Group Conversation"}
+                              </span>
+                            </p>
+                          ) : isBlocked ? (
+                            <p className="text-[11px] text-rose-400 flex items-center gap-1 font-medium">
+                              <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+                              Contact Blocked
+                            </p>
+                          ) : isBlockedByOther ? (
+                            <p className="text-[11px] text-slate-400 flex items-center gap-1 font-medium">
+                              <span className="w-1.5 h-1.5 rounded-full bg-slate-500" />
+                              Account Unavailable
+                            </p>
+                          ) : isOtherUserTyping ? (
+                            <p className="text-[11px] text-indigo-400 font-medium flex items-center gap-1.5 animate-pulse">
+                              <span className="flex gap-0.5">
+                                <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce" style={{ animationDelay: "0ms" }} />
+                                <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce" style={{ animationDelay: "150ms" }} />
+                                <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce" style={{ animationDelay: "300ms" }} />
+                              </span>
+                              typing...
+                            </p>
+                          ) : isOtherUserOnline ? (
+                            <p className="text-[11px] text-emerald-400 flex items-center gap-1 font-medium">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)] animate-pulse" />
+                              Online
+                            </p>
+                          ) : (
+                            <p className="text-[11px] text-slate-500 flex items-center gap-1">
+                              <span className="w-1.5 h-1.5 rounded-full bg-slate-500" />
+                              Offline
+                            </p>
+                          )}
+                        </div>
                       </div>
                     </div>
 
                     <div className="flex items-center gap-2 shrink-0">
+                      {/* Group Info button shortcut */}
+                      {isGroup && (
+                        <button
+                          onClick={() => setIsGroupInfoOpen(true)}
+                          className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/10 active:scale-95 transition-all flex items-center gap-1.5 text-xs font-semibold"
+                          title="Group Info"
+                          aria-label="Group Info"
+                        >
+                          <Users size={17} className="text-indigo-400" />
+                          <span className="hidden sm:inline">Group Info</span>
+                        </button>
+                      )}
                       {/* Voice Call Button for 1-on-1 chats */}
                       {!isGroup && otherUserId && (
                         <button
@@ -1251,6 +1451,33 @@ export default function MessagesPage() {
 
                       {isHeaderMenuOpen && (
                         <div className="absolute right-0 top-full mt-2 w-48 rounded-2xl bg-[#12131A] border border-white/10 shadow-2xl py-1.5 z-50 animate-in fade-in zoom-in-95 duration-150 backdrop-blur-2xl">
+                          {isGroup && (
+                            <>
+                              <button
+                                onClick={() => {
+                                  setIsGroupInfoOpen(true);
+                                  setIsHeaderMenuOpen(false);
+                                }}
+                                className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/5 transition-colors text-left"
+                              >
+                                <Users size={15} className="text-indigo-400" />
+                                <span>Group Info</span>
+                              </button>
+
+                              <button
+                                onClick={() => {
+                                  setIsAddGroupMemberOpen(true);
+                                  setIsHeaderMenuOpen(false);
+                                }}
+                                className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/5 transition-colors text-left"
+                              >
+                                <UserPlus size={15} className="text-indigo-400" />
+                                <span>Add Participants</span>
+                              </button>
+
+                              <div className="h-px bg-white/5 my-1" />
+                            </>
+                          )}
                           {!isGroup && otherUserId && (
                             <>
                               <button
@@ -1358,17 +1585,27 @@ export default function MessagesPage() {
                             </div>
                           )}
 
-                          {/* Hover Actions for own messages (Reply, Edit, Delete) */}
+                          {/* Hover/Tap Actions for own messages (Reply, Edit, Delete) */}
                           {isMe && (
-                            <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5 bg-[#12131A] border border-white/10 rounded-xl px-1.5 py-0.5 shadow-lg mb-1 backdrop-blur-md">
+                            <div className={`${
+                              activeActionMsgId === msg.id
+                                ? "opacity-100 scale-100 pointer-events-auto"
+                                : "opacity-0 scale-95 pointer-events-none sm:group-hover:opacity-100 sm:group-hover:scale-100 sm:group-hover:pointer-events-auto"
+                            } transition-all duration-150 flex items-center gap-0.5 bg-[#12131A]/95 border border-white/10 rounded-xl px-1.5 py-0.5 shadow-xl mb-1 backdrop-blur-md z-10`}>
                               <button
                                 type="button"
-                                onClick={() => setReplyingTo({
-                                  id: msg.id,
-                                  sender: senderName,
-                                  text: parsed.type === "voice" ? "Voice Note" : parsed.type === "room_invite" ? "Voice Hangout Invite" : parsed.text || "",
-                                  isVoice: parsed.type === "voice",
-                                })}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setActiveActionMsgId(null);
+                                  setReplyingTo({
+                                    id: msg.id,
+                                    sender: senderName,
+                                    text: parsed.type === "voice" ? "Voice Note" : parsed.type === "gif" ? "GIF" : parsed.type === "room_invite" ? "Voice Hangout Invite" : parsed.text || "",
+                                    isVoice: parsed.type === "voice",
+                                    isGif: parsed.type === "gif",
+                                    gifUrl: parsed.gifUrl,
+                                  });
+                                }}
                                 className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
                                 title="Reply"
                                 aria-label="Reply"
@@ -1376,10 +1613,14 @@ export default function MessagesPage() {
                                 <Reply size={13} />
                               </button>
 
-                              {parsed.type !== "voice" && parsed.type !== "room_invite" && (
+                              {parsed.type !== "voice" && parsed.type !== "room_invite" && parsed.type !== "gif" && (
                                 <button
                                   type="button"
-                                  onClick={() => startEditingMessage(msg.id, msg.content)}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setActiveActionMsgId(null);
+                                    startEditingMessage(msg.id, msg.content);
+                                  }}
                                   className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
                                   title="Edit message"
                                   aria-label="Edit message"
@@ -1390,7 +1631,11 @@ export default function MessagesPage() {
 
                               <button
                                 type="button"
-                                onClick={() => setDeletingMessageId(msg.id)}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setActiveActionMsgId(null);
+                                  setDeletingMessageId(msg.id);
+                                }}
                                 className="p-1 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
                                 title="Delete message"
                                 aria-label="Delete message"
@@ -1401,91 +1646,140 @@ export default function MessagesPage() {
                           )}
 
                           <div className={`max-w-[85%] sm:max-w-[70%] min-w-0 flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
-                            {/* Sender name in group */}
+                            {/* Sender name in group with WhatsApp-style vibrant color */}
                             {!isMe && activeConversation?.type === "group" && (
-                              <span className="text-[11px] font-semibold text-indigo-400 mb-1 px-1 truncate max-w-full">
+                              <span className={`text-[11px] font-bold mb-1 px-1 truncate max-w-full ${getSenderColor(senderName)}`}>
                                 {senderName}
                               </span>
                             )}
 
-                            <div 
-                              className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed shadow-md break-words w-full min-w-0 overflow-hidden ${
-                                isMe 
-                                  ? 'bg-gradient-to-r from-indigo-600 to-indigo-500 text-white rounded-tr-xs' 
-                                  : 'bg-white/10 text-slate-100 border border-white/5 rounded-tl-xs backdrop-blur-sm'
-                              }`}
-                            >
-                              {/* Quoted Reply reference if this message was in reply to another */}
-                              {parsed.replyTo && (
-                                <div
-                                  onClick={() => scrollToMessage(parsed.replyTo?.id)}
-                                  className={`mb-2 px-2.5 py-1.5 rounded-xl text-xs border-l-2 cursor-pointer transition-colors w-full min-w-0 overflow-hidden ${
-                                    isMe
-                                      ? "bg-indigo-950/50 border-white/60 hover:bg-indigo-950/70 text-white/90"
-                                      : "bg-white/5 border-indigo-400 hover:bg-white/10 text-slate-300"
+                            {/* Message Bubble Container */}
+                            {(() => {
+                              const isGif = parsed.type === "gif" && !!parsed.gifUrl;
+                              return (
+                                <div 
+                                  onClick={() => setActiveActionMsgId(prev => prev === msg.id ? null : msg.id)}
+                                  className={`rounded-2xl shadow-md break-words min-w-0 overflow-hidden cursor-pointer transition-all ${
+                                    isGif 
+                                      ? isMe
+                                        ? 'p-1 bg-gradient-to-r from-indigo-600 to-indigo-500 text-white rounded-tr-xs'
+                                        : 'p-1 bg-white/10 text-slate-100 border border-white/10 rounded-tl-xs backdrop-blur-sm'
+                                      : isMe 
+                                        ? 'px-4 py-2.5 text-sm leading-relaxed bg-gradient-to-r from-indigo-600 to-indigo-500 text-white rounded-tr-xs' 
+                                        : 'px-4 py-2.5 text-sm leading-relaxed bg-white/10 text-slate-100 border border-white/5 rounded-tl-xs backdrop-blur-sm'
                                   }`}
                                 >
-                                  <div className="flex items-center gap-1 font-semibold text-[11px] mb-0.5 text-indigo-300 min-w-0">
-                                    <Reply size={11} className="rotate-180 shrink-0" />
-                                    <span className="truncate">{parsed.replyTo.sender}</span>
-                                  </div>
-                                  <p className="line-clamp-2 text-[11px] opacity-80 break-words w-full overflow-hidden text-ellipsis">
-                                    {parsed.replyTo.isVoice ? "🎵 Voice Note" : parsed.replyTo.text}
-                                  </p>
+                                  {/* Quoted Reply reference if this message was in reply to another */}
+                                  {parsed.replyTo && (
+                                    <div
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        scrollToMessage(parsed.replyTo?.id);
+                                      }}
+                                      className={`mb-1.5 px-2.5 py-1.5 rounded-xl text-xs border-l-2 cursor-pointer transition-colors w-full min-w-0 overflow-hidden ${
+                                        isMe
+                                          ? "bg-indigo-950/70 border-white/70 hover:bg-indigo-950/90 text-white/90"
+                                          : "bg-white/5 border-indigo-400 hover:bg-white/10 text-slate-300"
+                                      }`}
+                                    >
+                                      <div className="flex items-center gap-1 font-semibold text-[11px] mb-0.5 text-indigo-300 min-w-0">
+                                        <Reply size={11} className="rotate-180 shrink-0" />
+                                        <span className="truncate">{parsed.replyTo.sender}</span>
+                                      </div>
+                                      <p className="line-clamp-2 text-[11px] opacity-80 break-words w-full overflow-hidden text-ellipsis">
+                                        {parsed.replyTo.isVoice ? "🎵 Voice Note" : parsed.replyTo.isGif ? "🖼️ GIF" : parsed.replyTo.text}
+                                      </p>
+                                    </div>
+                                  )}
+
+                                  {/* Voice Note, Room Invite, GIF, or Text */}
+                                  {parsed.type === "room_invite" && parsed.roomInvite ? (
+                                    <RoomInviteCard invite={parsed.roomInvite} isMe={isMe} />
+                                  ) : parsed.type === "voice" ? (
+                                    <VoiceNotePlayer
+                                      audioUrl={parsed.audioUrl || ""}
+                                      duration={parsed.duration}
+                                      isMe={isMe}
+                                    />
+                                  ) : isGif ? (
+                                    <div className="relative rounded-xl overflow-hidden max-w-[240px] sm:max-w-[300px] bg-black/40 group/gif">
+                                      <img
+                                        src={parsed.gifUrl}
+                                        alt={parsed.gifTitle || "GIF"}
+                                        className="w-full h-auto max-h-[260px] sm:max-h-[300px] object-cover rounded-xl cursor-pointer hover:opacity-95 transition-opacity"
+                                        loading="lazy"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setExpandedMediaUrl(parsed.gifUrl!);
+                                          setExpandedMediaTitle(parsed.gifTitle || "GIF");
+                                        }}
+                                      />
+                                      <div className="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded-md bg-black/70 backdrop-blur-md text-[9px] font-black text-white/90 border border-white/10 pointer-events-none tracking-wider">
+                                        GIF
+                                      </div>
+                                      <div className="absolute bottom-1.5 right-1.5 px-2 py-0.5 rounded-md bg-black/70 backdrop-blur-md text-[9px] font-medium text-white/90 border border-white/10 flex items-center gap-1 select-none pointer-events-none">
+                                        <span>{new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                                        {isMe && activeConversation?.type !== "group" && (
+                                          <span className="text-sky-300 font-semibold">•</span>
+                                        )}
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <p className="whitespace-pre-wrap select-text">{parsed.text}</p>
+                                  )}
+
+                                  {/* Timestamp, (edited) and Read Receipts for non-GIF messages */}
+                                  {!isGif && (
+                                    <div 
+                                      className={`text-[9px] mt-1 flex items-center gap-1 select-none ${
+                                        isMe ? 'text-indigo-200/80 justify-end' : 'text-slate-400 justify-end'
+                                      }`}
+                                    >
+                                      {parsed.isEdited && <span className="italic opacity-80">(edited)</span>}
+                                      <span>{new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+
+                                      {/* Read Receipt status text labels for 1-on-1 chats */}
+                                      {isMe && activeConversation?.type !== "group" && (
+                                        <span className="ml-1 inline-flex items-center gap-1 font-medium tracking-wide">
+                                          <span className="opacity-40">•</span>
+                                          {otherUserLastReadAt && new Date(msg.created_at).getTime() <= new Date(otherUserLastReadAt).getTime() ? (
+                                            <span className="text-sky-300 font-semibold opacity-95">seen</span>
+                                          ) : isOtherUserOnline ? (
+                                            <span className="text-indigo-200/80 font-medium opacity-85">delivered</span>
+                                          ) : (
+                                            <span className="text-indigo-200/60 font-medium opacity-70">sent</span>
+                                          )}
+                                        </span>
+                                      )}
+                                    </div>
+                                  )}
                                 </div>
-                              )}
-
-                              {/* Voice Note, Room Invite, or Text */}
-                              {parsed.type === "room_invite" && parsed.roomInvite ? (
-                                <RoomInviteCard invite={parsed.roomInvite} isMe={isMe} />
-                              ) : parsed.type === "voice" ? (
-                                <VoiceNotePlayer
-                                  audioUrl={parsed.audioUrl || ""}
-                                  duration={parsed.duration}
-                                  isMe={isMe}
-                                />
-                              ) : (
-                                <p className="whitespace-pre-wrap select-text">{parsed.text}</p>
-                              )}
-
-                              {/* Timestamp, (edited) and Read Receipts */}
-                              <div 
-                                className={`text-[9px] mt-1 flex items-center gap-1 select-none ${
-                                  isMe ? 'text-indigo-200/80 justify-end' : 'text-slate-400 justify-end'
-                                }`}
-                              >
-                                {parsed.isEdited && <span className="italic opacity-80">(edited)</span>}
-                                <span>{new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-
-                                {/* Read Receipt status text labels for 1-on-1 chats */}
-                                {isMe && activeConversation?.type !== "group" && (
-                                  <span className="ml-1 inline-flex items-center gap-1 font-medium tracking-wide">
-                                    <span className="opacity-40">•</span>
-                                    {otherUserLastReadAt && new Date(msg.created_at).getTime() <= new Date(otherUserLastReadAt).getTime() ? (
-                                      <span className="text-sky-300 font-semibold opacity-95">seen</span>
-                                    ) : isOtherUserOnline ? (
-                                      <span className="text-indigo-200/80 font-medium opacity-85">delivered</span>
-                                    ) : (
-                                      <span className="text-indigo-200/60 font-medium opacity-70">sent</span>
-                                    )}
-                                  </span>
-                                )}
-                              </div>
-                            </div>
+                              );
+                            })()}
                           </div>
 
-                          {/* Hover Actions for incoming messages (Reply only) */}
+                          {/* Hover/Tap Actions for incoming messages placed on the RIGHT side of the bubble */}
                           {!isMe && (
-                            <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5 bg-[#12131A] border border-white/10 rounded-xl px-1.5 py-0.5 shadow-lg mb-1 backdrop-blur-md">
+                            <div className={`${
+                              activeActionMsgId === msg.id
+                                ? "opacity-100 scale-100 pointer-events-auto"
+                                : "opacity-0 scale-95 pointer-events-none sm:group-hover:opacity-100 sm:group-hover:scale-100 sm:group-hover:pointer-events-auto"
+                            } transition-all duration-150 flex items-center gap-0.5 bg-[#12131A]/95 border border-white/10 rounded-xl px-1.5 py-0.5 shadow-xl mb-1 backdrop-blur-md z-10 shrink-0`}>
                               <button
                                 type="button"
-                                onClick={() => setReplyingTo({
-                                  id: msg.id,
-                                  sender: senderName,
-                                  text: parsed.type === "voice" ? "Voice Note" : parsed.text || "",
-                                  isVoice: parsed.type === "voice",
-                                })}
-                                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setActiveActionMsgId(null);
+                                  setReplyingTo({
+                                    id: msg.id,
+                                    sender: senderName,
+                                    text: parsed.type === "voice" ? "Voice Note" : parsed.type === "gif" ? "GIF" : parsed.type === "room_invite" ? "Voice Hangout Invite" : parsed.text || "",
+                                    isVoice: parsed.type === "voice",
+                                    isGif: parsed.type === "gif",
+                                    gifUrl: parsed.gifUrl,
+                                  });
+                                }}
+                                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 active:scale-95 transition-all cursor-pointer"
                                 title="Reply"
                                 aria-label="Reply"
                               >
@@ -1670,23 +1964,30 @@ export default function MessagesPage() {
                 }
 
                 return (
-                  <form onSubmit={handleSendMessage} className="p-3 sm:p-4 border-t border-white/5 bg-black/40 backdrop-blur-md shrink-0">
+                  <form onSubmit={handleSendMessage} className="relative p-2 sm:p-4 pb-[max(0.65rem,env(safe-area-inset-bottom))] border-t border-white/5 bg-[#090A0F]/95 backdrop-blur-xl shrink-0">
+                    {/* GIF Picker Popover / Mobile Drawer */}
+                    <GifPicker
+                      isOpen={isGifPickerOpen}
+                      onClose={() => setIsGifPickerOpen(false)}
+                      onSelectGif={handleSendGif}
+                    />
+
                     {/* Replying Banner */}
                     {replyingTo && (
-                      <div className="mb-2 flex items-center justify-between px-3.5 py-2 rounded-xl bg-indigo-950/50 border border-indigo-500/30 text-xs animate-in fade-in slide-in-from-bottom-2 duration-150">
+                      <div className="mb-2 flex items-center justify-between px-3 py-1.5 sm:px-3.5 sm:py-2 rounded-xl bg-indigo-950/60 border border-indigo-500/30 text-xs animate-in fade-in slide-in-from-bottom-2 duration-150">
                         <div className="flex items-center gap-2 min-w-0">
                           <Reply size={14} className="text-indigo-400 shrink-0" />
                           <div className="min-w-0">
                             <span className="font-semibold text-indigo-300">Replying to @{replyingTo.sender}: </span>
-                            <span className="text-slate-300 truncate inline-block max-w-[200px] sm:max-w-md align-bottom">
-                              {replyingTo.isVoice ? "🎵 Voice Note" : replyingTo.text}
+                            <span className="text-slate-300 truncate inline-block max-w-[180px] sm:max-w-md align-bottom">
+                              {replyingTo.isVoice ? "🎵 Voice Note" : replyingTo.isGif ? "🖼️ GIF" : replyingTo.text}
                             </span>
                           </div>
                         </div>
                         <button
                           type="button"
                           onClick={() => setReplyingTo(null)}
-                          className="p-1 rounded-md text-slate-400 hover:text-white transition-colors"
+                          className="p-1 rounded-md text-slate-400 hover:text-white transition-colors cursor-pointer"
                         >
                           <X size={14} />
                         </button>
@@ -1695,7 +1996,7 @@ export default function MessagesPage() {
 
                     {/* Editing Banner */}
                     {editingMessage && (
-                      <div className="mb-2 flex items-center justify-between px-3.5 py-2 rounded-xl bg-amber-950/50 border border-amber-500/30 text-xs animate-in fade-in slide-in-from-bottom-2 duration-150">
+                      <div className="mb-2 flex items-center justify-between px-3 py-1.5 sm:px-3.5 sm:py-2 rounded-xl bg-amber-950/60 border border-amber-500/30 text-xs animate-in fade-in slide-in-from-bottom-2 duration-150">
                         <div className="flex items-center gap-2 min-w-0">
                           <Edit3 size={14} className="text-amber-400 shrink-0" />
                           <span className="font-semibold text-amber-300">Editing message</span>
@@ -1703,7 +2004,7 @@ export default function MessagesPage() {
                         <button
                           type="button"
                           onClick={cancelEditing}
-                          className="p-1 rounded-md text-slate-400 hover:text-white transition-colors"
+                          className="p-1 rounded-md text-slate-400 hover:text-white transition-colors cursor-pointer"
                         >
                           <X size={14} />
                         </button>
@@ -1712,13 +2013,13 @@ export default function MessagesPage() {
 
                     {/* Active Voice Recording Bar */}
                     {isRecordingVoice ? (
-                      <div className="w-full flex items-center justify-between gap-3 px-4 py-2.5 bg-rose-950/30 border border-rose-500/30 rounded-2xl animate-in fade-in duration-200">
-                        <div className="flex items-center gap-3">
+                      <div className="w-full flex items-center justify-between gap-3 px-3.5 py-2.5 bg-rose-950/40 border border-rose-500/30 rounded-full animate-in fade-in duration-200">
+                        <div className="flex items-center gap-2.5">
                           <div className="relative flex items-center justify-center">
                             <span className="w-3 h-3 rounded-full bg-rose-500 animate-ping absolute" />
                             <span className="w-2.5 h-2.5 rounded-full bg-rose-500" />
                           </div>
-                          <span className="text-xs font-semibold text-rose-300">
+                          <span className="text-xs font-semibold text-rose-300 hidden xs:inline">
                             Recording Voice Note
                           </span>
                           <span className="text-xs font-mono font-bold text-white bg-rose-500/20 px-2 py-0.5 rounded-lg border border-rose-500/30">
@@ -1730,7 +2031,7 @@ export default function MessagesPage() {
                           <button
                             type="button"
                             onClick={cancelVoiceRecording}
-                            className="p-2 rounded-xl bg-white/5 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 transition-colors cursor-pointer"
+                            className="p-2 rounded-full bg-white/5 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 transition-colors cursor-pointer"
                             title="Discard recording"
                           >
                             <Trash2 size={16} />
@@ -1739,7 +2040,7 @@ export default function MessagesPage() {
                           <button
                             type="button"
                             onClick={sendVoiceRecording}
-                            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white text-xs font-bold transition-all shadow-md shadow-indigo-600/30 cursor-pointer"
+                            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white text-xs font-bold transition-all shadow-md shadow-indigo-600/30 cursor-pointer"
                           >
                             <Send size={14} />
                             <span>Send</span>
@@ -1747,36 +2048,59 @@ export default function MessagesPage() {
                         </div>
                       </div>
                     ) : (
-                      <div className="relative flex items-center gap-2">
-                        <input
-                          ref={textInputRef}
-                          type="text"
-                          value={inputMessage}
-                          onChange={handleInputChange}
-                          placeholder={editingMessage ? "Edit message..." : "Type a message..."}
-                          className="w-full pl-4 pr-24 py-3 bg-white/5 border border-white/10 rounded-2xl text-base sm:text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-500/50 transition-colors shadow-inner"
-                        />
-
-                        {/* Voice Note Record Button */}
+                      <div className="flex items-center gap-1.5 sm:gap-2">
+                        {/* GIF Picker Button on Left */}
                         <button
                           type="button"
-                          onClick={startVoiceRecording}
-                          className="absolute right-12 w-9 h-9 flex items-center justify-center rounded-xl text-slate-400 hover:text-white hover:bg-white/10 transition-all cursor-pointer"
-                          title="Record voice note"
-                          aria-label="Record voice note"
+                          onClick={() => setIsGifPickerOpen(!isGifPickerOpen)}
+                          className={`w-9 h-9 sm:w-10 sm:h-10 flex items-center justify-center rounded-full transition-all shrink-0 cursor-pointer ${
+                            isGifPickerOpen
+                              ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
+                              : "text-slate-400 hover:text-white hover:bg-white/10 active:scale-95"
+                          }`}
+                          title="Send GIF"
+                          aria-label="Send GIF"
                         >
-                          <Mic size={17} />
+                          <span className="text-[10px] font-black tracking-wider border border-current px-1 py-0.5 rounded leading-none">
+                            GIF
+                          </span>
                         </button>
 
-                        {/* Send / Save Button */}
-                        <button
-                          type="submit"
-                          disabled={!inputMessage.trim()}
-                          className="absolute right-1.5 w-9 h-9 flex items-center justify-center bg-indigo-600 hover:bg-indigo-500 active:scale-95 disabled:bg-slate-800 disabled:text-slate-500 text-white rounded-xl transition-all shadow-md cursor-pointer disabled:cursor-not-allowed"
-                          aria-label={editingMessage ? "Save Edit" : "Send Message"}
-                        >
-                          {editingMessage ? <Check size={16} /> : <Send size={15} />}
-                        </button>
+                        {/* Message Text Input */}
+                        <div className="relative flex-1 min-w-0">
+                          <input
+                            ref={textInputRef}
+                            type="text"
+                            value={inputMessage}
+                            onChange={handleInputChange}
+                            placeholder={editingMessage ? "Edit message..." : "Type a message..."}
+                            className="w-full px-4 py-2.5 sm:py-3 bg-white/5 border border-white/10 rounded-full text-base sm:text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-500/50 transition-colors shadow-inner"
+                          />
+                        </div>
+
+                        {/* Voice Note Record Button (When not typing & not editing) */}
+                        {!inputMessage.trim() && !editingMessage && (
+                          <button
+                            type="button"
+                            onClick={startVoiceRecording}
+                            className="w-9 h-9 sm:w-10 sm:h-10 flex items-center justify-center rounded-full bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white active:scale-95 transition-all shrink-0 cursor-pointer border border-white/10"
+                            title="Record voice note"
+                            aria-label="Record voice note"
+                          >
+                            <Mic size={18} />
+                          </button>
+                        )}
+
+                        {/* Send / Save Button (Active when typing or editing) */}
+                        {(inputMessage.trim() || editingMessage) && (
+                          <button
+                            type="submit"
+                            className="w-9 h-9 sm:w-10 sm:h-10 flex items-center justify-center bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white rounded-full transition-all shadow-md shadow-indigo-600/30 shrink-0 cursor-pointer animate-in zoom-in-75 duration-150"
+                            aria-label={editingMessage ? "Save Edit" : "Send Message"}
+                          >
+                            {editingMessage ? <Check size={18} /> : <Send size={16} />}
+                          </button>
+                        )}
                       </div>
                     )}
                   </form>
@@ -1911,6 +2235,60 @@ export default function MessagesPage() {
         onGroupCreated={(id) => {
           setActiveConversationId(id);
         }}
+      />
+
+      {/* WhatsApp-Style Group Info Modal */}
+      {activeConversation && activeConversation.type === "group" && (
+        <GroupInfoModal
+          isOpen={isGroupInfoOpen}
+          onClose={() => setIsGroupInfoOpen(false)}
+          conversationId={activeConversation.id}
+          groupName={activeConversation.name || "Group Chat"}
+          currentUser={user}
+          onlineUserIds={onlineUserIds}
+          onMembersChange={loadActiveGroupMembers}
+          onUpdateGroupName={(newName) => {
+            setConversations((prev) =>
+              prev.map((c) => (c.id === activeConversation.id ? { ...c, name: newName } : c))
+            );
+          }}
+          onLeaveGroup={() => {
+            setConversations((prev) => prev.filter((c) => c.id !== activeConversation.id));
+            setActiveConversationId(null);
+            setIsGroupInfoOpen(false);
+          }}
+          onOpenDirectMessage={async (targetUserId) => {
+            if (!user?.id || targetUserId === user.id) return;
+            try {
+              const convId = await socialService.ensureDirectConversation(user.id, targetUserId);
+              if (convId) {
+                setActiveConversationId(convId);
+                setIsGroupInfoOpen(false);
+              }
+            } catch (e) {
+              console.error("Error opening DM with group member:", e);
+            }
+          }}
+        />
+      )}
+
+      {/* Add Members to Group Modal */}
+      {activeConversation && activeConversation.type === "group" && (
+        <AddGroupMemberModal
+          isOpen={isAddGroupMemberOpen}
+          onClose={() => setIsAddGroupMemberOpen(false)}
+          conversationId={activeConversation.id}
+          existingMemberIds={activeGroupMembers.map((m) => m.id)}
+          currentUser={user}
+          onMembersAdded={loadActiveGroupMembers}
+        />
+      )}
+
+      {/* Fullscreen Media Lightbox for GIFs and Photos */}
+      <MediaLightbox
+        mediaUrl={expandedMediaUrl}
+        onClose={() => setExpandedMediaUrl(null)}
+        title={expandedMediaTitle}
       />
     </div>
   );
