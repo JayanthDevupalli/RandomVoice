@@ -2,9 +2,10 @@
 
 import { useState, useEffect } from "react";
 import { supabase } from "@/lib/supabase";
-import { X, Users, Loader2, Check } from "lucide-react";
+import { X, Users, Loader2, Check, Search } from "lucide-react";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import { createPortal } from "react-dom";
+import { socialService } from "@/lib/social-service";
 
 interface CreateGroupModalProps {
   isOpen: boolean;
@@ -17,6 +18,7 @@ export function CreateGroupModal({ isOpen, onClose, currentUser, onGroupCreated 
   const [friends, setFriends] = useState<any[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [groupName, setGroupName] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isCreating, setIsCreating] = useState(false);
   const [mounted, setMounted] = useState(false);
@@ -25,33 +27,70 @@ export function CreateGroupModal({ isOpen, onClose, currentUser, onGroupCreated 
     setMounted(true);
   }, []);
 
+  // Reset form when modal opens
+  useEffect(() => {
+    if (isOpen) {
+      setGroupName("");
+      setSelectedIds([]);
+      setSearchQuery("");
+    }
+  }, [isOpen]);
+
   useEffect(() => {
     if (!isOpen || !currentUser) return;
 
     const fetchFriends = async () => {
       setIsLoading(true);
-      // Friends are where status='accepted' and user is requester OR receiver
-      const { data, error } = await supabase
-        .from("connections")
-        .select(`
-          requester_id,
-          receiver_id,
-          requester:profiles!connections_requester_id_fkey(id, username, avatar),
-          receiver:profiles!connections_receiver_id_fkey(id, username, avatar)
-        `)
-        .or(`requester_id.eq.${currentUser.id},receiver_id.eq.${currentUser.id}`)
-        .eq("status", "accepted");
+      try {
+        let blockedSet = new Set<string>();
+        if (currentUser.id) {
+          try {
+            const { blockedByMeIds, blockedMeIds } = await socialService.getBlockLists(currentUser.id);
+            blockedSet = new Set([...(blockedByMeIds || []), ...(blockedMeIds || [])]);
+          } catch (e) {
+            console.warn("Could not fetch blocked list for group modal:", e);
+          }
+        }
 
-      if (data) {
-        // Extract the "other" profile
-        const friendProfiles = data.map((conn: any) => {
-          const req = Array.isArray(conn.requester) ? conn.requester[0] : conn.requester;
-          const rec = Array.isArray(conn.receiver) ? conn.receiver[0] : conn.receiver;
-          return conn.requester_id === currentUser.id ? rec : req;
-        });
-        setFriends(friendProfiles);
+        // Friends are where status='accepted' and user is requester OR receiver
+        const { data } = await supabase
+          .from("connections")
+          .select(`
+            requester_id,
+            receiver_id,
+            requester:profiles!connections_requester_id_fkey(id, username, avatar),
+            receiver:profiles!connections_receiver_id_fkey(id, username, avatar)
+          `)
+          .or(`requester_id.eq.${currentUser.id},receiver_id.eq.${currentUser.id}`)
+          .eq("status", "accepted");
+
+        if (data) {
+          // Deduplicate mutual connections using unique friend ID Map
+          const uniqueFriendsMap = new Map<string, any>();
+
+          for (const conn of data) {
+            const req = Array.isArray(conn.requester) ? conn.requester[0] : conn.requester;
+            const rec = Array.isArray(conn.receiver) ? conn.receiver[0] : conn.receiver;
+            const other = conn.requester_id === currentUser.id ? rec : req;
+
+            if (other && other.id && other.id !== currentUser.id && !blockedSet.has(other.id)) {
+              if (!uniqueFriendsMap.has(other.id)) {
+                uniqueFriendsMap.set(other.id, other);
+              }
+            }
+          }
+
+          const sortedFriends = Array.from(uniqueFriendsMap.values()).sort((a, b) =>
+            (a.username || "").localeCompare(b.username || "")
+          );
+
+          setFriends(sortedFriends);
+        }
+      } catch (err) {
+        console.error("Error loading friends for group modal:", err);
+      } finally {
+        setIsLoading(false);
       }
-      setIsLoading(false);
     };
 
     fetchFriends();
@@ -99,6 +138,10 @@ export function CreateGroupModal({ isOpen, onClose, currentUser, onGroupCreated 
     
     setIsCreating(false);
   };
+
+  const filteredFriends = friends.filter(f =>
+    !searchQuery.trim() || (f.username || "").toLowerCase().includes(searchQuery.trim().toLowerCase())
+  );
 
   if (!mounted || !isOpen) return null;
 
@@ -149,6 +192,20 @@ export function CreateGroupModal({ isOpen, onClose, currentUser, onGroupCreated 
               )}
             </div>
 
+            {/* Quick Member Search Box if multiple friends */}
+            {friends.length > 3 && (
+              <div className="relative mb-2">
+                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={e => setSearchQuery(e.target.value)}
+                  placeholder="Search connections..."
+                  className="w-full pl-9 pr-3 py-2 bg-black/30 border border-white/10 rounded-xl text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-500 transition-colors"
+                />
+              </div>
+            )}
+
             <div className="max-h-56 sm:max-h-60 overflow-y-auto border border-white/10 rounded-xl bg-black/20 divide-y divide-white/5">
               {isLoading ? (
                 <div className="p-8 flex justify-center"><Loader2 className="animate-spin text-indigo-500 w-6 h-6" /></div>
@@ -156,8 +213,12 @@ export function CreateGroupModal({ isOpen, onClose, currentUser, onGroupCreated 
                 <div className="p-6 text-center text-sm text-slate-500">
                   You don't have any connections yet. Connect with someone in a room first!
                 </div>
+              ) : filteredFriends.length === 0 ? (
+                <div className="p-6 text-center text-sm text-slate-500">
+                  No connections found matching "{searchQuery}"
+                </div>
               ) : (
-                friends.map(friend => {
+                filteredFriends.map(friend => {
                   const isSelected = selectedIds.includes(friend.id);
                   return (
                     <button
@@ -190,7 +251,7 @@ export function CreateGroupModal({ isOpen, onClose, currentUser, onGroupCreated 
           <button
             onClick={handleCreate}
             disabled={!groupName.trim() || selectedIds.length === 0 || isCreating}
-            className="w-full flex items-center justify-center gap-2 py-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 active:scale-95 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold transition-all shadow-lg text-sm sm:text-base"
+            className="w-full flex items-center justify-center gap-2 py-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 active:scale-95 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold transition-all shadow-lg text-sm sm:text-base cursor-pointer disabled:cursor-not-allowed"
           >
             {isCreating ? <Loader2 size={18} className="animate-spin" /> : `Create Group (${selectedIds.length})`}
           </button>
@@ -199,3 +260,4 @@ export function CreateGroupModal({ isOpen, onClose, currentUser, onGroupCreated 
     </div>
   , document.body);
 }
+

@@ -474,6 +474,7 @@ export function JunctionRoom({
 
   const joinedJunctionIdRef = useRef<string | null>(null);
   const isJoiningRef = useRef<boolean>(false);
+  const hasJoinedSuccessfullyRef = useRef<boolean>(false);
 
   // User platform clearance & identity - seamlessly inherits promoted role instantly
   const myParticipant = participants.find((p) => isLocalParticipant(p));
@@ -948,11 +949,18 @@ export function JunctionRoom({
           return updated;
         });
 
-        // Check if user was removed/kicked
+        // Check if user was removed/kicked only strictly AFTER initial joining has fully completed
         const amIParticipant = pollData.junction.participants?.some(
           (p: JunctionParticipant) => isLocalParticipant(p)
         );
-        if (pollData.junction.participants?.length > 0 && !amIParticipant && !kickedNoticeRef.current) {
+        if (
+          hasJoinedSuccessfullyRef.current &&
+          joinedJunctionIdRef.current === junctionId &&
+          !isJoiningRef.current &&
+          pollData.junction.participants?.length > 0 &&
+          !amIParticipant &&
+          !kickedNoticeRef.current
+        ) {
           setKickedNotice("You are no longer in this junction.");
         }
 
@@ -1158,20 +1166,23 @@ export function JunctionRoom({
     const triggerDebouncedPoll = () => {
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
-        if (isMounted) {
+        if (isMounted && hasJoinedSuccessfullyRef.current && joinedJunctionIdRef.current === junctionId) {
           pollJunctionRef.current();
         }
       }, 1000);
     };
 
     const runPoll = async () => {
-      await pollJunctionRef.current();
+      if (hasJoinedSuccessfullyRef.current && joinedJunctionIdRef.current === junctionId && !isJoiningRef.current) {
+        await pollJunctionRef.current();
+      }
       if (isMounted) {
         timerId = setTimeout(runPoll, 5000);
       }
     };
 
-    runPoll();
+    // Delay initial background poll heartbeat so join sequence establishes cleanly without concurrent fetch collisions
+    timerId = setTimeout(runPoll, 5000);
 
     const roomChannelId = `room_realtime_${junctionId}`;
     const existingRoomCh = supabase.getChannels().find(
@@ -1260,6 +1271,7 @@ export function JunctionRoom({
       return;
     }
     isJoiningRef.current = true;
+    hasJoinedSuccessfullyRef.current = false;
 
     async function loadAndJoinJunction() {
       const startTime = Date.now();
@@ -1360,6 +1372,7 @@ export function JunctionRoom({
         setLiveKitUrl(lkData.serverUrl);
         setKickedNotice(null);
         joinedJunctionIdRef.current = junctionId;
+        hasJoinedSuccessfullyRef.current = true;
 
         // Broadcast room participant update across both channels
         broadcastRoomUpdate({ type: "room_participants_updated" });
@@ -1412,6 +1425,7 @@ export function JunctionRoom({
       isMounted = false;
       isRealUnmount.current = true;
       isJoiningRef.current = false;
+      hasJoinedSuccessfullyRef.current = false;
 
       // Emergency hardware & connection release if unmounted without handleLeave
       if (liveKitRoomRef.current) {
@@ -2081,28 +2095,34 @@ export function JunctionRoom({
       userId: user?.id,
     };
 
-    // 6. Await database leave request with timeout guarantee
+    // 6. Dispatch database leave request with keepalive guarantee
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 2500);
-      await fetch(`/api/junctions/${junctionId}`, {
+      const leavePromise = fetch(`/api/junctions/${junctionId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(leavePayload),
-        signal: controller.signal,
         keepalive: true,
       });
-      clearTimeout(timeout);
-    } catch (e) {
-      console.warn("Failed to dispatch leave cleanly:", e);
+
+      // Allow up to 3000ms for database leave response, but do NOT abort keepalive if it takes longer
+      // (keepalive ensures the browser finishes freeing the seat safely in the background)
+      await Promise.race([
+        leavePromise,
+        new Promise((r) => setTimeout(r, 3000)),
+      ]);
+    } catch (e: any) {
+      if (e?.name !== "AbortError") {
+        console.warn("Notice during leave dispatch:", e);
+      }
     }
 
     // 7. Reassuring confirmation: show Clean End state
     setExitStep("ended");
     await new Promise((r) => setTimeout(r, 600));
 
-    // Clear joined ref so component won't re-join
+    // Clear joined refs so component won't re-join
     joinedJunctionIdRef.current = null;
+    hasJoinedSuccessfullyRef.current = false;
 
     // 8. Complete exit navigation
     if (onLeave) {

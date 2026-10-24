@@ -670,16 +670,20 @@ export async function removeParticipantFromJunction(
       .from("junction_participants")
       .delete()
       .in("id", matchedIds);
-  }
-
-  // 2. Direct fallback delete for every target candidate using ilike on identity and name
-  for (const t of Array.from(targetSet)) {
-    if (!t) continue;
-    await supabase
-      .from("junction_participants")
-      .delete()
-      .eq("junction_id", junctionId)
-      .or(`identity.eq.${t},identity.ilike.${t},name.eq.${t},name.ilike.${t},id.eq.${t}`);
+  } else {
+    // 2. Direct fallback delete across candidate targets only if no match was found in step 1
+    const candidates = Array.from(targetSet).filter(Boolean);
+    if (candidates.length > 0) {
+      await Promise.allSettled(
+        candidates.map((t) =>
+          supabase
+            .from("junction_participants")
+            .delete()
+            .eq("junction_id", junctionId)
+            .or(`identity.eq.${t},identity.ilike.${t},name.eq.${t},name.ilike.${t},id.eq.${t}`)
+        )
+      );
+    }
   }
 
   await syncCount(junctionId);
