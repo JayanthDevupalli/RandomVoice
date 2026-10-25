@@ -359,7 +359,7 @@ export default function JunctionsPage() {
             {isLoading ? (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4 mb-8">
                 {[1, 2, 3].map((i) => (
-                  <div key={i} className="h-40 sm:h-48 rounded-[1.5rem] bg-[#12131A]/40 border border-white/5 animate-pulse p-4" />
+                  <div key={i} className="h-32 sm:h-36 rounded-2xl bg-[#12131A]/40 border border-white/5 animate-pulse p-4" />
                 ))}
               </div>
             ) : activeTab === "public" ? (

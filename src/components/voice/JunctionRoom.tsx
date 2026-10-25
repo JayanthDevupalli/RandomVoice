@@ -683,15 +683,22 @@ export function JunctionRoom({
       const res = await fetch("/api/junctions");
       const data = await res.json();
       if (data?.junctions) {
-        const others = (data.junctions as Junction[]).filter(
-          (j) =>
-            j.id !== junctionId &&
-            !j.isLocked &&
-            !j.isCustom &&
-            !j.creatorId &&
-            typeof j.id === "string" &&
-            !j.id.startsWith("junc_")
-        );
+        const others = (data.junctions as Junction[])
+          .filter(
+            (j) =>
+              j.id !== junctionId &&
+              !j.isLocked &&
+              !j.isCustom &&
+              !j.creatorId &&
+              typeof j.id === "string" &&
+              !j.id.startsWith("junc_")
+          )
+          .sort((a, b) => {
+            const countA = a.participants?.length ?? a.currentCount ?? 0;
+            const countB = b.participants?.length ?? b.currentCount ?? 0;
+            if (countB !== countA) return countB - countA;
+            return a.name.localeCompare(b.name);
+          });
         setOtherJunctions(others);
       }
     } catch (err) {
@@ -3642,6 +3649,12 @@ export function JunctionRoom({
                     j.category.toLowerCase().includes(junctionSearchQuery.toLowerCase()) ||
                     (j.tags && j.tags.some((t) => t.toLowerCase().includes(junctionSearchQuery.toLowerCase())))
                   )
+                  .sort((a, b) => {
+                    const countA = a.participants?.length ?? a.currentCount ?? 0;
+                    const countB = b.participants?.length ?? b.currentCount ?? 0;
+                    if (countB !== countA) return countB - countA;
+                    return a.name.localeCompare(b.name);
+                  })
                   .map((j) => {
                     const jCount = j.participants?.length ?? j.currentCount;
                     const maxCap = j.maxParticipants || 10;

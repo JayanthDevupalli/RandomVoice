@@ -455,9 +455,16 @@ export async function getAllJunctions(): Promise<Junction[]> {
     });
   }
 
-  const result = (jRows as JunctionRow[]).map((row) =>
-    rowToJunction(row, participantsByJunction[row.id] || [], roleMap, profileMap)
-  );
+  const result = (jRows as JunctionRow[])
+    .map((row) =>
+      rowToJunction(row, participantsByJunction[row.id] || [], roleMap, profileMap)
+    )
+    .sort((a, b) => {
+      const countA = a.participants?.length ?? a.currentCount ?? 0;
+      const countB = b.participants?.length ?? b.currentCount ?? 0;
+      if (countB !== countA) return countB - countA;
+      return a.name.localeCompare(b.name);
+    });
 
   cachedJunctions = { list: result, timestamp: Date.now() };
   return result;
