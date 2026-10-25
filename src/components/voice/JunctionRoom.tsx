@@ -14,6 +14,7 @@ import { InviteFriendsModal } from "./InviteFriendsModal";
 import confetti from "canvas-confetti";
 import { getCardThemeStyle } from "@/lib/card-themes";
 import { supabase } from "@/lib/supabase";
+import { useScreenWakeLock } from "@/hooks/useScreenWakeLock";
 import { LiveKitRoom, useTracks, useLocalParticipant, useRoomContext, useConnectionState, AudioTrack, StartAudio } from "@livekit/components-react";
 import { Track, RoomEvent, ConnectionState } from "livekit-client";
 import {
@@ -211,6 +212,7 @@ function RemoteAudioPipeline({
 }
 
 function LiveKitDataSync({
+  junctionId,
   onMessage,
   publishRef,
   onSpeakingChange,
@@ -219,6 +221,7 @@ function LiveKitDataSync({
   isMutedByMod,
   isDeafened
 }: {
+  junctionId?: string;
   onMessage: (data: any) => void;
   publishRef: React.MutableRefObject<((data: any) => void) | null>;
   onSpeakingChange: (speakingIdentities: string[]) => void;
@@ -257,18 +260,39 @@ function LiveKitDataSync({
         publishRef.current?.({ type: "room_participants_updated" });
       }
     };
+
+    const handleParticipantDisconnected = (participant: any) => {
+      const pIdentity = participant?.identity;
+      if (pIdentity && junctionId) {
+        // Immediately notify server to remove disconnected peer from DB
+        fetch(`/api/junctions/${junctionId}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "leave",
+            identity: pIdentity,
+            name: participant?.name,
+          }),
+        }).catch(() => {});
+      }
+      onParticipantSync?.();
+      if (room && room.state === ConnectionState.Connected) {
+        publishRef.current?.({ type: "room_participants_updated" });
+      }
+    };
+
     room.on(RoomEvent.Connected, handleParticipantChange);
     room.on(RoomEvent.ParticipantConnected, handleParticipantChange);
-    room.on(RoomEvent.ParticipantDisconnected, handleParticipantChange);
+    room.on(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
 
     return () => {
       room.off(RoomEvent.DataReceived, handleData);
       room.off(RoomEvent.ActiveSpeakersChanged, handleActiveSpeakers);
       room.off(RoomEvent.Connected, handleParticipantChange);
       room.off(RoomEvent.ParticipantConnected, handleParticipantChange);
-      room.off(RoomEvent.ParticipantDisconnected, handleParticipantChange);
+      room.off(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
     };
-  }, [room, onMessage, onSpeakingChange, onParticipantSync, publishRef]);
+  }, [room, junctionId, onMessage, onSpeakingChange, onParticipantSync, publishRef]);
 
   useEffect(() => {
     if (localParticipant) {
@@ -557,6 +581,10 @@ export function JunctionRoom({
   // LiveKit state
   const [liveKitToken, setLiveKitToken] = useState<string | null>(null);
   const [liveKitUrl, setLiveKitUrl] = useState<string | null>(null);
+
+  // Prevent device screen from sleeping while in room voice call
+  const isRoomCallActive = !isLeaving && (hasJoinedSuccessfullyRef.current || !!liveKitToken);
+  useScreenWakeLock(isRoomCallActive);
 
   // Moderation state
   const [isModDeckOpen, setIsModDeckOpen] = useState(false);
@@ -1454,6 +1482,16 @@ export function JunctionRoom({
   useEffect(() => {
     const handleUnload = () => {
       try {
+        if (typeof window !== "undefined") {
+          sessionStorage.removeItem("yapclub_active_junction_id");
+          sessionStorage.removeItem(`junction_mod_muted_${junctionId}`);
+          sessionStorage.removeItem(`junction_role_${junctionId}`);
+        }
+
+        if (liveKitRoomRef.current) {
+          liveKitRoomRef.current.disconnect();
+        }
+
         const payload = JSON.stringify({
           action: "leave",
           identity: myIdentity,
@@ -1469,7 +1507,19 @@ export function JunctionRoom({
           participantId: guest.id,
           userId: user?.id,
         });
-        navigator.sendBeacon(`/api/junctions/${junctionId}`, new Blob([payload], { type: "application/json" }));
+
+        // 1. sendBeacon with text/plain (avoids CORS preflight cancellation during unload)
+        if (typeof navigator !== "undefined" && navigator.sendBeacon) {
+          navigator.sendBeacon(`/api/junctions/${junctionId}`, new Blob([payload], { type: "text/plain" }));
+        }
+
+        // 2. keepalive fetch with text/plain
+        fetch(`/api/junctions/${junctionId}`, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain" },
+          body: payload,
+          keepalive: true,
+        }).catch(() => {});
       } catch (e) { }
     };
 
@@ -2310,6 +2360,7 @@ export function JunctionRoom({
           />
           <RoomConnectionOverlay />
           <LiveKitDataSync
+            junctionId={junctionId}
             onMessage={onRoomMessage}
             publishRef={liveKitPublishRef}
             onSpeakingChange={setActiveSpeakers}

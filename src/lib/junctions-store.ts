@@ -1,7 +1,12 @@
 import { supabase as anonSupabase } from "./supabase";
 import { createClient } from "@supabase/supabase-js";
 import { Junction, JunctionParticipant, UserRole } from "./types";
-import { kickLiveKitParticipant, muteLiveKitParticipant } from "./livekit-server";
+import {
+  kickLiveKitParticipant,
+  muteLiveKitParticipant,
+  getActiveLiveKitParticipants,
+  getActiveLiveKitRooms,
+} from "./livekit-server";
 
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
@@ -250,14 +255,42 @@ async function fetchJunctionWithParticipants(junctionId: string): Promise<Juncti
     }
   }
 
-  // Filter out any suspended users and purge from this room
+  // Reconcile with LiveKit WebRTC state to purge ghost participants
+  // (users who closed tab, swiped Chrome away from recent apps, crashed, or disconnected)
+  let liveKitIdentities: Set<string> | null = null;
+  if (rawParticipants.length > 0) {
+    liveKitIdentities = await getActiveLiveKitParticipants(junctionId);
+  }
+
+  const now = Date.now();
+  const GRACE_PERIOD_MS = 25000; // 25s grace period for newly joining participants
+
+  let purgedAny = false;
   const participants = rawParticipants.filter((p) => {
     if (bannedUsernames.has(p.identity.toLowerCase())) {
       supabase.from("junction_participants").delete().eq("id", p.id).then();
+      purgedAny = true;
       return false;
     }
+
+    if (liveKitIdentities !== null && (now - p.joined_at > GRACE_PERIOD_MS)) {
+      const pIdent = (p.identity || "").toLowerCase().trim();
+      const pName = (p.name || "").toLowerCase().trim();
+      const isConnected = liveKitIdentities.has(pIdent) || liveKitIdentities.has(pName);
+      if (!isConnected) {
+        // Ghost participant! Delete from DB
+        supabase.from("junction_participants").delete().eq("id", p.id).then();
+        purgedAny = true;
+        return false;
+      }
+    }
+
     return true;
   });
+
+  if (purgedAny) {
+    syncCount(junctionId).then();
+  }
 
   return rowToJunction(jRow as JunctionRow, participants, roleMap, profileMap);
 }
@@ -380,17 +413,46 @@ export async function getAllJunctions(): Promise<Junction[]> {
     }
   }
 
-  // Filter out any suspended users from participant rows and purge from DB
+  // Reconcile with active LiveKit rooms to purge ghosts across junctions
+  let activeRooms: Map<string, number> | null = null;
+  if (rawParticipants.length > 0) {
+    activeRooms = await getActiveLiveKitRooms();
+  }
+
+  const GRACE_PERIOD_MS = 25000;
+
+  // Filter out any suspended users or ghost participants from participant rows and purge from DB
   const participantsByJunction: Record<string, ParticipantRow[]> = {};
+  const junctionsNeedingSync = new Set<string>();
+
   for (const p of rawParticipants) {
     if (bannedUsernames.has(p.identity.toLowerCase())) {
       supabase.from("junction_participants").delete().eq("id", p.id).then();
+      junctionsNeedingSync.add(p.junction_id);
       continue;
     }
+
+    // Check if the junction room exists in LiveKit
+    if (activeRooms !== null && (now - p.joined_at > GRACE_PERIOD_MS)) {
+      const roomParticipantCount = activeRooms.get(p.junction_id);
+      // If room is completely missing from LiveKit or has 0 participants, participant is a ghost
+      if (roomParticipantCount === undefined || roomParticipantCount === 0) {
+        supabase.from("junction_participants").delete().eq("id", p.id).then();
+        junctionsNeedingSync.add(p.junction_id);
+        continue;
+      }
+    }
+
     if (!participantsByJunction[p.junction_id]) {
       participantsByJunction[p.junction_id] = [];
     }
     participantsByJunction[p.junction_id].push(p);
+  }
+
+  if (junctionsNeedingSync.size > 0) {
+    junctionsNeedingSync.forEach((jId) => {
+      syncCount(jId).then();
+    });
   }
 
   const result = (jRows as JunctionRow[]).map((row) =>

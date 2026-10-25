@@ -29,12 +29,39 @@ export function ActiveJunctionProvider({ children }: { children: React.ReactNode
 
   const [activeJunctionId, setActiveJunctionIdState] = useState<string | null>(() => {
     if (typeof window !== "undefined") {
-      return sessionStorage.getItem("yapclub_active_junction_id");
+      try {
+        const nav = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
+        const isReload = nav?.type === "reload" || (performance as any).navigation?.type === 1;
+        const isJunctionPath = window.location.pathname.startsWith("/junction/");
+        const stored = sessionStorage.getItem("yapclub_active_junction_id");
+
+        // Only restore active junction if page is refreshed or user is actively on a /junction/ URL
+        if (stored && (isReload || isJunctionPath)) {
+          return stored;
+        } else {
+          sessionStorage.removeItem("yapclub_active_junction_id");
+          return null;
+        }
+      } catch {
+        return null;
+      }
     }
     return null;
   });
 
   const [isMinimized, setIsMinimized] = useState<boolean>(false);
+
+  // Clear active junction on tab close or navigation away so stale sessions don't resurrect
+  useEffect(() => {
+    const handleUnload = () => {
+      try {
+        sessionStorage.removeItem("yapclub_active_junction_id");
+      } catch {}
+    };
+
+    window.addEventListener("pagehide", handleUnload);
+    return () => window.removeEventListener("pagehide", handleUnload);
+  }, []);
 
   const setActiveJunctionId = useCallback((id: string | null) => {
     setActiveJunctionIdState(id);

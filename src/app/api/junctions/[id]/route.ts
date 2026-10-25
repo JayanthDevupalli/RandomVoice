@@ -19,6 +19,14 @@ export async function GET(
   { params }: { params: { id: string } }
 ) {
   try {
+    const { searchParams } = new URL(request.url);
+    const action = searchParams.get("action");
+    const identity = searchParams.get("identity") || searchParams.get("username") || "";
+
+    if (action === "leave" && identity) {
+      await removeParticipantFromJunction(params.id, identity);
+    }
+
     const junction = await getJunctionById(params.id);
     if (!junction) {
       return NextResponse.json({ error: "Junction not found" }, { status: 404 });
@@ -45,7 +53,26 @@ export async function POST(
   { params }: { params: { id: string } }
 ) {
   try {
-    const body = await request.json();
+    let body: any = {};
+    const contentType = request.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+      try {
+        body = await request.json();
+      } catch {
+        body = {};
+      }
+    } else {
+      try {
+        const text = await request.text();
+        body = JSON.parse(text);
+      } catch {
+        try {
+          body = await request.json();
+        } catch {
+          body = {};
+        }
+      }
+    }
     const { action, participant, identity, moderatorIdentity, moderatorUserId, requesterRole, targetIdentity, modAction, isLocked, updates } = body;
 
     if (action === "join") {

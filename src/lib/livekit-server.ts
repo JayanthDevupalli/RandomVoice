@@ -50,3 +50,55 @@ export async function muteLiveKitParticipant(room: string, identity: string, mut
     return false;
   }
 }
+
+/**
+ * Fetch the set of lowercase identities actively connected in a LiveKit room.
+ * Returns:
+ * - Set of identities currently present in the LiveKit room.
+ * - Empty Set() if the room does not exist in LiveKit (0 active participants).
+ * - null if LiveKit service is unavailable or encountered a network error.
+ */
+export async function getActiveLiveKitParticipants(room: string): Promise<Set<string> | null> {
+  try {
+    const svc = getLiveKitRoomService();
+    if (!svc) return null;
+    const participants = await svc.listParticipants(room);
+    return new Set(
+      participants
+        .map((p) => (p.identity || "").toLowerCase().trim())
+        .filter(Boolean)
+    );
+  } catch (err: any) {
+    // If room does not exist in LiveKit, 0 participants are connected
+    if (
+      err?.status === 404 ||
+      err?.code === "not_found" ||
+      err?.message?.includes("does not exist") ||
+      err?.message?.includes("room not found")
+    ) {
+      return new Set();
+    }
+    console.warn(`[LiveKit Server] Could not list participants for "${room}":`, err?.message || err);
+    return null;
+  }
+}
+
+/**
+ * Fetch all active rooms and their participant counts in LiveKit.
+ * Returns a Map of room name -> participant count, or null if service unavailable.
+ */
+export async function getActiveLiveKitRooms(): Promise<Map<string, number> | null> {
+  try {
+    const svc = getLiveKitRoomService();
+    if (!svc) return null;
+    const rooms = await svc.listRooms();
+    const map = new Map<string, number>();
+    for (const r of rooms) {
+      map.set(r.name, r.numParticipants || 0);
+    }
+    return map;
+  } catch (err: any) {
+    console.warn("[LiveKit Server] Could not list active rooms:", err?.message || err);
+    return null;
+  }
+}

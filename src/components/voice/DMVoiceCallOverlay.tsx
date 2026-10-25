@@ -19,6 +19,7 @@ import {
   PhoneCall
 } from "lucide-react";
 import { LiveKitRoom, RoomAudioRenderer } from "@livekit/components-react";
+import { useScreenWakeLock } from "@/hooks/useScreenWakeLock";
 
 export function DMVoiceCallOverlay() {
   const { user } = useUser();
@@ -36,6 +37,9 @@ export function DMVoiceCallOverlay() {
     toggleMute,
     toggleDeafen,
   } = useDMVoiceCall();
+
+  // Prevent device screen from sleeping during active call
+  useScreenWakeLock(callState === "connected");
 
   const [liveKitToken, setLiveKitToken] = useState<string | null>(null);
   const [liveKitUrl, setLiveKitUrl] = useState<string | null>(null);
