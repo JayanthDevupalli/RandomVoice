@@ -2760,16 +2760,6 @@ export function JunctionRoom({
               >
                 <Minimize2 size={14} className="text-indigo-400" />
               </button>
-
-              {/* Leave Room Button in Top Header */}
-              <button
-                type="button"
-                onClick={handleLeave}
-                className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95"
-                title="Leave Junction Room"
-              >
-                <PhoneOff size={14} className="text-rose-400" />
-              </button>
             </div>
           </div>
         </div>
