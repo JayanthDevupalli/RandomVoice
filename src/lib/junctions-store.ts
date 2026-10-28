@@ -255,15 +255,18 @@ async function fetchJunctionWithParticipants(junctionId: string): Promise<Juncti
     }
   }
 
-  // Reconcile with LiveKit WebRTC state to purge ghost participants
-  // (users who closed tab, swiped Chrome away from recent apps, crashed, or disconnected)
+  // Reconcile with LiveKit WebRTC state to purge ghost participants ONLY when:
+  // 1. LiveKit is active and has other participants (liveKitIdentities.size > 0), AND
+  // 2. The participant's heartbeat has been completely inactive for over 90 seconds (stale ghost).
+  // NEVER purge when LiveKit reports 0 participants or room not found, because LiveKit room
+  // might still be initializing, quiet/muted, or connecting.
   let liveKitIdentities: Set<string> | null = null;
   if (rawParticipants.length > 0) {
     liveKitIdentities = await getActiveLiveKitParticipants(junctionId);
   }
 
   const now = Date.now();
-  const GRACE_PERIOD_MS = 25000; // 25s grace period for newly joining participants
+  const STALE_HEARTBEAT_PURGE_MS = 90000; // 90 seconds grace before ghost purge
 
   let purgedAny = false;
   const participants = rawParticipants.filter((p) => {
@@ -273,12 +276,17 @@ async function fetchJunctionWithParticipants(junctionId: string): Promise<Juncti
       return false;
     }
 
-    if (liveKitIdentities !== null && (now - p.joined_at > GRACE_PERIOD_MS)) {
+    const timeSinceHeartbeat = now - (p.joined_at || 0);
+
+    // Only consider ghost-purging if the participant has been inactive for > 90s
+    // AND LiveKit room is actively running with other peers (size > 0)
+    if (timeSinceHeartbeat > STALE_HEARTBEAT_PURGE_MS && liveKitIdentities !== null && liveKitIdentities.size > 0) {
       const pIdent = (p.identity || "").toLowerCase().trim();
       const pName = (p.name || "").toLowerCase().trim();
-      const isConnected = liveKitIdentities.has(pIdent) || liveKitIdentities.has(pName);
+      const pId = (p.id || "").toLowerCase().trim();
+      const isConnected = liveKitIdentities.has(pIdent) || liveKitIdentities.has(pName) || liveKitIdentities.has(pId);
       if (!isConnected) {
-        // Ghost participant! Delete from DB
+        // Ghost participant verified absent from an active LiveKit room!
         supabase.from("junction_participants").delete().eq("id", p.id).then();
         purgedAny = true;
         return false;
@@ -307,6 +315,21 @@ async function syncCount(junctionId: string) {
     .from("junctions")
     .update({ current_count: count || 0 })
     .eq("id", junctionId);
+}
+
+// ─── Touch Heartbeat to Keep Active Participants Fresh ─────────────────────────
+
+export async function touchParticipantHeartbeat(junctionId: string, identity: string) {
+  if (!junctionId || !identity) return;
+  const now = Date.now();
+  const clean = identity.trim();
+  try {
+    await supabase
+      .from("junction_participants")
+      .update({ joined_at: now })
+      .eq("junction_id", junctionId)
+      .or(`identity.ilike.${clean},name.ilike.${clean},id.eq.${clean}`);
+  } catch {}
 }
 
 // ─── Fast In-Memory Cache for Lobby ──────────────────────────────────────────
@@ -419,7 +442,7 @@ export async function getAllJunctions(): Promise<Junction[]> {
     activeRooms = await getActiveLiveKitRooms();
   }
 
-  const GRACE_PERIOD_MS = 25000;
+  const STALE_LOBBY_PURGE_MS = 120000; // 2 minutes grace before lobby purge
 
   // Filter out any suspended users or ghost participants from participant rows and purge from DB
   const participantsByJunction: Record<string, ParticipantRow[]> = {};
@@ -432,10 +455,10 @@ export async function getAllJunctions(): Promise<Junction[]> {
       continue;
     }
 
-    // Check if the junction room exists in LiveKit
-    if (activeRooms !== null && (now - p.joined_at > GRACE_PERIOD_MS)) {
+    // Only purge ghosts if participant heartbeat is stale (> 2 mins) AND LiveKit actively returned active rooms
+    const timeSinceHeartbeat = now - (p.joined_at || 0);
+    if (timeSinceHeartbeat > STALE_LOBBY_PURGE_MS && activeRooms !== null && activeRooms.size > 0) {
       const roomParticipantCount = activeRooms.get(p.junction_id);
-      // If room is completely missing from LiveKit or has 0 participants, participant is a ghost
       if (roomParticipantCount === undefined || roomParticipantCount === 0) {
         supabase.from("junction_participants").delete().eq("id", p.id).then();
         junctionsNeedingSync.add(p.junction_id);

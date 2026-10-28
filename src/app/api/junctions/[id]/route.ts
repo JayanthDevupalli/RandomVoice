@@ -9,6 +9,7 @@ import {
   updateParticipantProfile,
   reportParticipant,
   updateJunctionDetails,
+  touchParticipantHeartbeat,
 } from "@/lib/junctions-store";
 
 export const dynamic = "force-dynamic";
@@ -25,6 +26,9 @@ export async function GET(
 
     if (action === "leave" && identity) {
       await removeParticipantFromJunction(params.id, identity);
+    } else if (identity) {
+      // Touch heartbeat to keep participant fresh and prevent accidental ghost purging
+      touchParticipantHeartbeat(params.id, identity).catch(() => {});
     }
 
     const junction = await getJunctionById(params.id);

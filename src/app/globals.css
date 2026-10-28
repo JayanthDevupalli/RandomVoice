@@ -145,3 +145,125 @@
 ::-webkit-scrollbar-thumb:hover {
   background: #6366F1;
 }
+
+/* ==========================================================================
+   Voice Room Professional Floating Reactions (FaceTime / macOS Style)
+   Calm, elegant, steady vertical ascent. Perfectly upright, subtle drift,
+   refined depth, zero cartoon wobble or bouncy scaling.
+   ========================================================================== */
+
+@keyframes reactionProAscendCenter {
+  0% {
+    opacity: 0;
+    transform: translate3d(-50%, 8px, 0) scale(0.85);
+  }
+  15% {
+    opacity: 1;
+    transform: translate3d(-50%, -36px, 0) scale(1);
+  }
+  78% {
+    opacity: 1;
+    transform: translate3d(-50%, -300px, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(-50%, -400px, 0) scale(0.96);
+  }
+}
+
+@keyframes reactionProAscendLeft {
+  0% {
+    opacity: 0;
+    transform: translate3d(-50%, 8px, 0) scale(0.85);
+  }
+  15% {
+    opacity: 1;
+    transform: translate3d(calc(-50% - 4px), -36px, 0) scale(1);
+  }
+  78% {
+    opacity: 1;
+    transform: translate3d(calc(-50% - 14px), -300px, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(calc(-50% - 18px), -400px, 0) scale(0.96);
+  }
+}
+
+@keyframes reactionProAscendRight {
+  0% {
+    opacity: 0;
+    transform: translate3d(-50%, 8px, 0) scale(0.85);
+  }
+  15% {
+    opacity: 1;
+    transform: translate3d(calc(-50% + 4px), -36px, 0) scale(1);
+  }
+  78% {
+    opacity: 1;
+    transform: translate3d(calc(-50% + 14px), -300px, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(calc(-50% + 18px), -400px, 0) scale(0.96);
+  }
+}
+
+.animate-reaction-pro-center {
+  animation: reactionProAscendCenter 1.4s cubic-bezier(0.2, 0.8, 0.25, 1) forwards;
+  will-change: transform, opacity;
+}
+
+.animate-reaction-pro-left {
+  animation: reactionProAscendLeft 1.4s cubic-bezier(0.2, 0.8, 0.25, 1) forwards;
+  will-change: transform, opacity;
+}
+
+.animate-reaction-pro-right {
+  animation: reactionProAscendRight 1.4s cubic-bezier(0.2, 0.8, 0.25, 1) forwards;
+  will-change: transform, opacity;
+}
+
+/* Backward compatibility aliases */
+.animate-reaction-rise,
+.animate-reaction-minimal-center,
+.animate-reaction-tiktok-center,
+.animate-reaction-sway-center,
+.animate-reaction-float {
+  animation: reactionProAscendCenter 1.4s cubic-bezier(0.2, 0.8, 0.25, 1) forwards;
+  will-change: transform, opacity;
+}
+
+.animate-reaction-minimal-left,
+.animate-reaction-tiktok-left,
+.animate-reaction-sway-left {
+  animation: reactionProAscendLeft 1.4s cubic-bezier(0.2, 0.8, 0.25, 1) forwards;
+  will-change: transform, opacity;
+}
+
+.animate-reaction-minimal-right,
+.animate-reaction-tiktok-right,
+.animate-reaction-sway-right {
+  animation: reactionProAscendRight 1.4s cubic-bezier(0.2, 0.8, 0.25, 1) forwards;
+  will-change: transform, opacity;
+}
+
+.animate-reaction-minimal-arc-left,
+.animate-reaction-tiktok-arc-left {
+  animation: reactionProAscendLeft 1.4s cubic-bezier(0.2, 0.8, 0.25, 1) forwards;
+  will-change: transform, opacity;
+}
+
+.animate-reaction-minimal-arc-right,
+.animate-reaction-tiktok-arc-right {
+  animation: reactionProAscendRight 1.4s cubic-bezier(0.2, 0.8, 0.25, 1) forwards;
+  will-change: transform, opacity;
+}
+
+.animate-emoji-jiggle {
+  animation: none;
+}
+
+.animate-emoji-tap {
+  animation: none;
+}

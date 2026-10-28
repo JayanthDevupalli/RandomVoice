@@ -67,6 +67,13 @@ import {
   ChevronLeft
 } from "lucide-react";
 import { RoleBadge, RoleAvatarDot } from "@/components/ui/RoleBadge";
+import {
+  VectorReaction,
+  EmojiReactionItem,
+  FRIENDS_EMOJI_REACTIONS,
+} from "@/components/voice/reactions/friendsEmojis";
+import { FloatingReactionOverlay } from "@/components/voice/reactions/FloatingReactionOverlay";
+import { FriendReactionPicker } from "@/components/voice/reactions/FriendReactionPicker";
 
 interface JunctionRoomProps {
   junctionId: string;
@@ -88,24 +95,8 @@ interface InRoomPopupMessage {
   timestamp: number;
 }
 
-interface VectorReaction {
-  id: string;
-  iconName: string;
-  label: string;
-  senderName: string;
-  color: string;
-  x: number;
-}
-
-const EMOJI_REACTIONS = [
-  { id: "heart", label: "Love", emoji: "❤️", color: "#EC4899" },
-  { id: "fire", label: "Fire", emoji: "🔥", color: "#F59E0B" },
-  { id: "rocket", label: "Rocket", emoji: "🚀", color: "#8B5CF6" },
-  { id: "laugh", label: "Haha", emoji: "😂", color: "#EAB308" },
-  { id: "clap", label: "Clap", emoji: "👏", color: "#10B981" },
-  { id: "100", label: "100", emoji: "💯", color: "#EF4444" },
-  { id: "party", label: "Party", emoji: "🎉", color: "#3B82F6" },
-];
+// Backward compatible alias
+const EMOJI_REACTIONS = FRIENDS_EMOJI_REACTIONS;
 
 function RemoteAudioPipeline({
   participantVolumes,
@@ -263,6 +254,15 @@ function LiveKitDataSync({
 
     const handleParticipantDisconnected = (participant: any) => {
       const pIdentity = participant?.identity;
+      const isLocal = Boolean(
+        localParticipant &&
+        (participant?.sid === localParticipant.sid ||
+         (pIdentity && pIdentity.toLowerCase() === localParticipant.identity?.toLowerCase()))
+      );
+      if (isLocal) {
+        // Guard: Never tell server to leave for the local participant on WebRTC reconnect/event!
+        return;
+      }
       if (pIdentity && junctionId) {
         // Immediately notify server to remove disconnected peer from DB
         fetch(`/api/junctions/${junctionId}`, {
@@ -948,10 +948,14 @@ export function JunctionRoom({
   const isRealUnmount = useRef(false);
 
   // Robust poll junction data from server
+  // Robust poll junction data from server with participant heartbeat
   const pollJunction = useCallback(async () => {
     if (isRealUnmount.current) return;
     try {
-      const pollRes = await fetch(`/api/junctions/${junctionId}`, {
+      const pollUrl = myIdentity
+        ? `/api/junctions/${junctionId}?identity=${encodeURIComponent(myIdentity)}&heartbeat=1`
+        : `/api/junctions/${junctionId}`;
+      const pollRes = await fetch(pollUrl, {
         cache: "no-store",
         headers: { "Cache-Control": "no-cache" },
       });
@@ -968,8 +972,10 @@ export function JunctionRoom({
           return pollData.junction;
         });
         setParticipants((prev) => {
-          const serverParticipants = pollData.junction.participants || [];
-          const updated = serverParticipants.map((sp: JunctionParticipant) => {
+          const serverParticipants: JunctionParticipant[] = pollData.junction.participants || [];
+          const localInServer = serverParticipants.some((sp) => isLocalParticipant(sp));
+
+          let updated = serverParticipants.map((sp: JunctionParticipant) => {
             if (isLocalParticipant(sp)) {
               return {
                 ...sp,
@@ -980,6 +986,62 @@ export function JunctionRoom({
             }
             return sp;
           });
+
+          // Self-healing: if I am in this junction, NEVER drop myself from participants!
+          if (hasJoinedSuccessfullyRef.current && joinedJunctionIdRef.current === junctionId && !localInServer) {
+            const localFromPrev = prev.find((p) => isLocalParticipant(p));
+            const selfParticipant: JunctionParticipant = localFromPrev || {
+              id: isRegistered && user ? user.id : guest?.id || "local",
+              identity: myIdentity,
+              name: myDisplayName,
+              displayName: myDisplayName,
+              username: myIdentity,
+              avatar: user?.avatar || guest?.avatar || "zap",
+              color: user?.color || guest?.color || "#6366F1",
+              cardBgColor: user?.cardBgColor || guest?.cardBgColor || "#465B73",
+              role: (typeof window !== "undefined" && (sessionStorage.getItem(`junction_role_${junctionId}`) as any)) || "speaker",
+              userRole: myEffectiveRole,
+              isMuted: isMutedRef.current,
+              isMutedByMod: isMutedByModRef.current,
+              isSpeaking: isLocalSpeaking,
+              joinedAt: Date.now(),
+              connectionQuality: "excellent",
+            };
+
+            updated = [selfParticipant, ...updated];
+
+            // Re-announce presence / heal registration with server in background
+            const joinIdentity = myIdentity;
+            const joinDisplayName = myDisplayName;
+            const participantAvatar = user?.avatar || guest?.avatar || "zap";
+            const participantColor = user?.color || guest?.color || "#6366F1";
+            const participantCardBg = user?.cardBgColor || guest?.cardBgColor || "#465B73";
+            const storedRole = typeof window !== "undefined" ? sessionStorage.getItem(`junction_role_${junctionId}`) : null;
+
+            fetch(`/api/junctions/${junctionId}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                action: "join",
+                participant: {
+                  id: isRegistered && user ? user.id : guest?.id,
+                  identity: joinIdentity,
+                  name: joinDisplayName,
+                  username: joinIdentity,
+                  displayName: joinDisplayName,
+                  avatar: participantAvatar,
+                  color: participantColor,
+                  cardBgColor: participantCardBg,
+                  role: storedRole || selfParticipant.role || "speaker",
+                  isMuted: isMutedRef.current,
+                  isMutedByMod: isMutedByModRef.current,
+                  isSpeaking: false,
+                  connectionQuality: "excellent",
+                },
+              }),
+            }).catch(() => {});
+          }
+
           if (JSON.stringify(prev) === JSON.stringify(updated)) return prev;
           return updated;
         });
@@ -996,7 +1058,7 @@ export function JunctionRoom({
           !amIParticipant &&
           !kickedNoticeRef.current
         ) {
-          setKickedNotice("You are no longer in this junction.");
+          // If server momentarily lost participant row, do not kick - self-healing already restored it above!
         }
 
         // Check if user is mod-muted
@@ -1073,10 +1135,24 @@ export function JunctionRoom({
         const { id } = payload;
         setChatMessages((prev) => prev.filter((m) => m.id !== id));
       } else if (type === "reaction" && payload) {
-        setReactions((prev) => [...prev, payload]);
+        const resolvedEmoji =
+          payload.emoji ||
+          FRIENDS_EMOJI_REACTIONS.find((er) => er.id === payload.iconName)?.emoji ||
+          "❤️";
+        const sways: ("left" | "right" | "center")[] = ["left", "right", "center"];
+        const resolvedReaction: VectorReaction = {
+          ...payload,
+          emoji: resolvedEmoji,
+          sway: payload.sway || sways[Math.floor(Math.random() * sways.length)],
+          scale: payload.scale || Number((0.95 + Math.random() * 0.3).toFixed(2)),
+          duration: payload.duration || Number((2.7 + Math.random() * 0.4).toFixed(2)),
+        };
+
+        setReactions((prev) => [...prev.slice(-16), resolvedReaction]);
+
         setTimeout(() => {
           setReactions((prev) => prev.filter((r) => r.id !== payload.id));
-        }, 2800);
+        }, 1500);
       } else if (type === "clear_chat") {
         setChatMessages([]);
       } else if (type === "moderation_event" && payload) {
@@ -1487,7 +1563,9 @@ export function JunctionRoom({
 
   // Clean disconnect on tab close, back button or page hide
   useEffect(() => {
-    const handleUnload = () => {
+    const handleUnload = (e?: any) => {
+      // Don't leave if this is just a bfcache freeze where page might be restored
+      if (e && e.persisted) return;
       try {
         if (typeof window !== "undefined") {
           sessionStorage.removeItem("yapclub_active_junction_id");
@@ -1530,12 +1608,20 @@ export function JunctionRoom({
       } catch (e) { }
     };
 
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible" && hasJoinedSuccessfullyRef.current) {
+        pollJunctionRef.current();
+      }
+    };
+
     window.addEventListener("pagehide", handleUnload);
     window.addEventListener("beforeunload", handleUnload);
+    document.addEventListener("visibilitychange", handleVisibility);
 
     return () => {
       window.removeEventListener("pagehide", handleUnload);
       window.removeEventListener("beforeunload", handleUnload);
+      document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, [junctionId, myIdentity, myDisplayName, guest.name, guest.username, guest.id, user?.username, user?.name, user?.id]);
 
@@ -2046,23 +2132,69 @@ export function JunctionRoom({
     }
   };
 
-  // Send Floating Vector Icon Reaction
-  const handleSendReaction = (iconName: string, label: string, color: string) => {
+  const lastReactionTimeRef = useRef<number>(0);
+  const lastReactionIdRef = useRef<string>("");
+  const reactionComboRef = useRef<number>(1);
+
+  // Send Floating Emoji Reaction - TikTok / Instagram Live fountain burst style
+  const handleSendReaction = (
+    itemOrId: EmojiReactionItem | string,
+    fallbackLabel?: string,
+    fallbackColor?: string
+  ) => {
+    const item: EmojiReactionItem =
+      typeof itemOrId === "object"
+        ? itemOrId
+        : FRIENDS_EMOJI_REACTIONS.find((er) => er.id === itemOrId) || {
+            id: itemOrId,
+            emoji: "❤️",
+            label: fallbackLabel || "Love",
+            color: fallbackColor || "#EF4444",
+          };
+
+    const now = Date.now();
+    // TikTok Live combo multiplier: rapid taps within 1.5s increment combo count
+    if (now - lastReactionTimeRef.current < 1500 && lastReactionIdRef.current === item.id) {
+      reactionComboRef.current = Math.min(reactionComboRef.current + 1, 99);
+    } else {
+      reactionComboRef.current = 1;
+    }
+    lastReactionTimeRef.current = now;
+    lastReactionIdRef.current = item.id;
+    const currentCombo = reactionComboRef.current;
+
+    // Gentle natural spread centered directly above the bottom picker/dock
+    const fanOffset = ((currentCombo * 5) % 22) - 11;
+    const randomJitter = (Math.random() - 0.5) * 10;
+    const finalX = Math.max(36, Math.min(64, Math.round(50 + fanOffset + randomJitter)));
+
+    // Choose from 5 dynamic trajectories (left, right, center, arc-left, arc-right)
+    const trajectories: (1 | 2 | 3 | 4 | 5)[] = [1, 2, 3, 4, 5];
+    const chosenTrajectory = trajectories[Math.floor(Math.random() * trajectories.length)];
+
+    const baseScale = 1.0;
+    const randomDuration = Number((1.35 + Math.random() * 0.10).toFixed(2)); // 1.35s - 1.45s
+
     const newReaction: VectorReaction = {
-      id: "react_" + Date.now() + Math.random(),
-      iconName,
-      label,
-      color,
-      senderName: guest.name,
-      x: Math.floor(Math.random() * 60) + 20,
+      id: "react_" + now + "_" + Math.random().toString(36).slice(2, 6),
+      iconName: item.id,
+      emoji: item.emoji,
+      label: item.label,
+      color: item.color,
+      senderName: guest.name || "Friend",
+      x: finalX,
+      trajectory: chosenTrajectory,
+      scale: baseScale,
+      duration: randomDuration,
+      combo: currentCombo,
     };
 
-    setReactions((prev) => [...prev, newReaction]);
+    setReactions((prev) => [...prev.slice(-16), newReaction]); // memory & layout optimized
     broadcastRoomUpdate({ type: "reaction", payload: newReaction });
 
     setTimeout(() => {
       setReactions((prev) => prev.filter((r) => r.id !== newReaction.id));
-    }, 2800);
+    }, 1500);
   };
 
   const handleCopyLink = () => {
@@ -2335,7 +2467,30 @@ export function JunctionRoom({
 
   const isLocalSpeaking = activeSpeakers.some((s) => isLocalIdentity(s));
   const isSomeoneSpeaking = activeSpeakers.length > 0;
-  const speakingParticipant = participants.find((p) => activeSpeakers.some((s) => s.toLowerCase() === p.identity?.toLowerCase())) || participants[0];
+  const isLocalInParticipants = participants.some((p) => isLocalParticipant(p));
+  const effectiveParticipants: JunctionParticipant[] = (hasJoinedSuccessfullyRef.current && !isLocalInParticipants)
+    ? [
+        {
+          id: isRegistered && user ? user.id : guest?.id || "local",
+          identity: myIdentity,
+          name: myDisplayName,
+          displayName: myDisplayName,
+          username: myIdentity,
+          avatar: user?.avatar || guest?.avatar || "zap",
+          color: user?.color || guest?.color || "#6366F1",
+          cardBgColor: user?.cardBgColor || guest?.cardBgColor || "#465B73",
+          role: (typeof window !== "undefined" && (sessionStorage.getItem(`junction_role_${junctionId}`) as any)) || "speaker",
+          userRole: myEffectiveRole,
+          isMuted: isMuted,
+          isMutedByMod: isMutedByMod,
+          isSpeaking: isLocalSpeaking,
+          joinedAt: Date.now(),
+          connectionQuality: "excellent",
+        },
+        ...participants,
+      ]
+    : participants;
+  const speakingParticipant = effectiveParticipants.find((p) => activeSpeakers.some((s) => s.toLowerCase() === p.identity?.toLowerCase())) || effectiveParticipants[0];
   const SEAT_SLOTS = Array.from({ length: junction?.maxParticipants || 10 });
 
   return (
@@ -2548,7 +2703,7 @@ export function JunctionRoom({
                     </div>
                   ) : (
                     <span className="text-slate-400 truncate">
-                      {participants.length}/{junction?.maxParticipants || 10} in room
+                      {effectiveParticipants.length}/{junction?.maxParticipants || 10} in room
                     </span>
                   )}
                 </div>
@@ -2638,30 +2793,8 @@ export function JunctionRoom({
         </div>
       )}
 
-      {/* Floating Emoji Reactions Overlay */}
-      <div className="pointer-events-none fixed inset-0 z-40 overflow-hidden">
-        {reactions.map((r) => {
-          const emoji = EMOJI_REACTIONS.find((er) => er.id === r.iconName)?.emoji || "❤️";
-
-          return (
-            <div
-              key={r.id}
-              style={{ left: `${r.x}%` }}
-              className="absolute bottom-28 transform -translate-x-1/2 flex flex-col items-center animate-floatUp drop-shadow-2xl"
-            >
-              <div className="text-4xl sm:text-5xl drop-shadow-lg">
-                {emoji}
-              </div>
-              <span
-                className="text-[10px] sm:text-xs font-bold text-white px-2.5 py-0.5 rounded-full mt-1 bg-black/60 backdrop-blur-md"
-                style={{ color: r.color }}
-              >
-                {r.senderName}
-              </span>
-            </div>
-          );
-        })}
-      </div>
+      {/* Floating Emoji Reactions Overlay - 60/120fps with Buoyant Sway & Particles */}
+      <FloatingReactionOverlay reactions={reactions} />
 
       {/* Main Left Content Area */}
       <div className={`flex-1 flex flex-col pb-20 lg:pb-0 overflow-y-auto overflow-x-hidden transition-all duration-300`}>
@@ -2788,7 +2921,7 @@ export function JunctionRoom({
             "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6"
           }`}>
             {SEAT_SLOTS.map((_, index) => {
-              const participant = participants[index];
+              const participant = effectiveParticipants[index];
               const isLocal = isLocalParticipant(participant);
               const isParticipantMod = participant?.role === "moderator";
               const participantRole = isLocal
@@ -3760,7 +3893,18 @@ export function JunctionRoom({
       </div>
 
       {/* Floating Bottom Audio Dock Controls */}
-      <div className="fixed bottom-3 sm:bottom-6 inset-x-0 z-50 flex justify-center px-1 sm:px-2 pointer-events-none pb-[env(safe-area-inset-bottom)]">
+      <div className="fixed bottom-3 sm:bottom-6 inset-x-0 z-50 flex flex-col items-center pointer-events-none pb-[env(safe-area-inset-bottom)]">
+        {/* Floating Friends Emoji Reaction Picker - Always directly above the dock, never clipped */}
+        {isReactionsOpen && (
+          <div className="pointer-events-auto mb-2.5 sm:mb-3.5">
+            <FriendReactionPicker
+              isOpen={isReactionsOpen}
+              onClose={() => setIsReactionsOpen(false)}
+              onSelectReaction={handleSendReaction}
+            />
+          </div>
+        )}
+
         <div className="pointer-events-auto p-1 sm:p-2 px-2 sm:px-4 rounded-full bg-[#0E0F17]/90 backdrop-blur-3xl border border-white/15 shadow-[0_16px_50px_rgba(0,0,0,0.85),inset_0_1px_1px_rgba(255,255,255,0.18)] flex items-center gap-1.5 sm:gap-3 max-w-[98vw] overflow-x-auto [&::-webkit-scrollbar]:hidden">
           {/* Mute / Unmute Mic (Hero Circular Voice Call Button) */}
           <button
@@ -3791,36 +3935,18 @@ export function JunctionRoom({
 
           <div className="h-6 w-px bg-gradient-to-b from-transparent via-white/25 to-transparent mx-0.5" />
 
-          {/* Reactions */}
-          <div className="relative">
-            <button
-              onClick={() => setIsReactionsOpen(!isReactionsOpen)}
-              className={`w-10 h-10 sm:w-11 sm:h-11 rounded-full flex items-center justify-center transition-all duration-200 hover:scale-105 active:scale-90 cursor-pointer ${isReactionsOpen
-                ? "bg-indigo-600 text-white shadow-[0_4px_16px_rgba(99,102,241,0.5)] ring-2 ring-indigo-400/40"
-                : "bg-white/10 hover:bg-white/20 text-slate-200 hover:text-white border border-white/10 backdrop-blur-md"
-                }`}
-              title="Reactions"
-            >
-              <Smile size={18} />
-            </button>
-
-            {isReactionsOpen && (
-              <div className="absolute bottom-14 sm:bottom-16 left-1/2 -translate-x-1/2 p-2 sm:p-2.5 rounded-full bg-[#0E0F17]/95 backdrop-blur-3xl border border-white/15 shadow-[0_16px_40px_rgba(0,0,0,0.85)] flex items-center gap-1 sm:gap-2 animate-fadeIn max-w-[90vw] overflow-x-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
-                {EMOJI_REACTIONS.map((r) => {
-                  return (
-                    <button
-                      key={r.id}
-                      onClick={() => handleSendReaction(r.id, r.label, r.color)}
-                      className="p-1 sm:p-1.5 text-[22px] sm:text-2xl hover:scale-125 transition-transform flex items-center justify-center cursor-pointer active:scale-90 shrink-0"
-                      title={r.label}
-                    >
-                      {r.emoji}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
+          {/* Reactions Button */}
+          <button
+            data-reaction-trigger="true"
+            onClick={() => setIsReactionsOpen(!isReactionsOpen)}
+            className={`w-10 h-10 sm:w-11 sm:h-11 rounded-full flex items-center justify-center transition-all duration-200 hover:scale-105 active:scale-90 cursor-pointer ${isReactionsOpen
+              ? "bg-indigo-600 text-white shadow-[0_4px_16px_rgba(99,102,241,0.5)] ring-2 ring-indigo-400/40"
+              : "bg-white/10 hover:bg-white/20 text-slate-200 hover:text-white border border-white/10 backdrop-blur-md"
+              }`}
+            title="Reactions (Friends & Close Friends)"
+          >
+            <Smile size={18} />
+          </button>
 
           {/* Chat Toggle Button */}
           <button
