@@ -166,31 +166,6 @@ export function InviteFriendsModal({
           });
         }
 
-        // If no personal connections yet or guest, load popular community members so the list is always populated
-        if (map.size === 0) {
-          const query = supabase
-            .from("profiles")
-            .select("id, username, avatar, bio")
-            .limit(10);
-          if (currentUserId) {
-            query.neq("id", currentUserId);
-          }
-          const { data: popularProfiles } = await query;
-          if (popularProfiles) {
-            popularProfiles.forEach((p: any) => {
-              if (p && !map.has(p.id)) {
-                map.set(p.id, {
-                  id: p.id,
-                  username: p.username,
-                  avatar: p.avatar,
-                  bio: p.bio,
-                  relationshipTag: "Community",
-                });
-              }
-            });
-          }
-        }
-
         if (isMounted) {
           setContacts(Array.from(map.values()));
         }
@@ -393,12 +368,12 @@ export function InviteFriendsModal({
           ) : filteredContacts.length === 0 ? (
             <div className="py-12 text-center space-y-1.5">
               <p className="text-sm font-semibold text-slate-300">
-                {searchQuery ? "No matching contacts found" : "No followers or recent chats yet"}
+                {searchQuery ? "No matching friends found" : "No friends or followers yet"}
               </p>
               <p className="text-xs text-slate-500 max-w-xs mx-auto">
                 {searchQuery
                   ? "Try searching for a different username or copy the room link above."
-                  : "Follow other users or chat with people to invite them directly!"}
+                  : "Follow your friends or copy the room link above to invite them to this hangout!"}
               </p>
             </div>
           ) : (

@@ -1541,16 +1541,49 @@ export function JunctionRoom({
   ) => {
     if (!isCurrentModerator && !isStaff) return;
 
-    // Strict rule: Managers cannot ban users. Only Admins and Super Admins can ban.
-    if (modAction === "ban" && !isAdmin && !isSuperAdmin) {
-      alert("Unauthorized: Only Admins can ban participants. Managers do not have permission to suspend or ban users.");
-      return;
+    const targetParticipant = participants.find(
+      (p) => (p.identity || "").toLowerCase() === (targetIdentity || "").toLowerCase()
+    );
+    const targetRole = targetParticipant?.userRole || "user";
+
+    // Staff clearance for banning (Super Admin, Admin, and Manager)
+    if (modAction === "ban") {
+      if (!isStaff) {
+        alert("Unauthorized: Staff clearance required to ban participants.");
+        return;
+      }
+      if (targetRole === "super_admin") {
+        alert("Protected: The Main Admin cannot be banned.");
+        return;
+      }
+      if (targetRole === "admin" && !isSuperAdmin) {
+        alert("Only the Main Admin has authority to ban an Admin.");
+        return;
+      }
+      if (targetRole === "manager" && !isAdmin) {
+        alert("Admin clearance required to ban a Manager.");
+        return;
+      }
     }
 
-    // Only official Staff can kick participants.
-    if (modAction === "kick" && !isStaff) {
-      alert("Unauthorized: Only official Staff (Managers, Admins, Main Admin) can kick participants.");
-      return;
+    // Staff clearance for kicking (Super Admin, Admin, and Manager)
+    if (modAction === "kick") {
+      if (!isStaff) {
+        alert("Unauthorized: Only official Staff (Managers, Admins, Main Admin) can kick participants.");
+        return;
+      }
+      if (targetRole === "super_admin" && !isSuperAdmin) {
+        alert("Protected: The Main Admin cannot be kicked.");
+        return;
+      }
+      if (targetRole === "admin" && !isSuperAdmin) {
+        alert("Only the Main Admin has authority to kick an Admin.");
+        return;
+      }
+      if (targetRole === "manager" && !isAdmin) {
+        alert("Admin clearance required to kick a Manager.");
+        return;
+      }
     }
 
     // Optimistically update participants state case-insensitively
@@ -1623,8 +1656,13 @@ export function JunctionRoom({
     }
   };
 
-  // Staff Action: Platform Suspend / Ban Account
+  // Staff Action: Platform Suspend / Ban Account (Admins Only)
   const handlePlatformBanParticipant = async (targetParticipant: JunctionParticipant) => {
+    if (!isAdmin && !isSuperAdmin) {
+      alert("Unauthorized: Only Admins can suspend accounts platform-wide. Managers can ban users from junctions.");
+      return;
+    }
+
     const targetRole = targetParticipant.userRole || "user";
 
     if (targetRole === "super_admin") {
@@ -3955,7 +3993,13 @@ export function JunctionRoom({
               (isManager && targetRole === "user")
             );
 
-            const canStaffBan = (isAdmin || isSuperAdmin) && targetRole !== "super_admin" && targetRole !== "admin";
+            const canStaffBan = isStaff && targetRole !== "super_admin" && (
+              isSuperAdmin ||
+              (isAdmin && targetRole !== "admin") ||
+              (isManager && targetRole === "user")
+            );
+
+            const canStaffSuspendAccount = (isAdmin || isSuperAdmin) && targetRole !== "super_admin" && targetRole !== "admin";
 
             const canMute = isStaff && (
               isSuperAdmin ||
@@ -4062,8 +4106,8 @@ export function JunctionRoom({
                     </button>
                   )}
 
-                  {/* Suspend Account - Official Staff Only */}
-                  {canStaffBan && (
+                  {/* Suspend Account - Admins & Super Admin Only */}
+                  {canStaffSuspendAccount && (
                     <button
                       type="button"
                       onClick={() => {
@@ -4226,7 +4270,21 @@ export function JunctionRoom({
           })()}
 
           {/* Floating Instagram-Style Direct Messenger for Logged-In Users */}
-          <InRoomMessenger isOpen={isDirectMessengerOpen} onClose={() => setIsDirectMessengerOpen(false)} />
+          <InRoomMessenger
+            isOpen={isDirectMessengerOpen}
+            onClose={() => setIsDirectMessengerOpen(false)}
+            currentJunction={
+              junction
+                ? {
+                    id: junctionId,
+                    name: junction.name,
+                    description: junction.description,
+                    participantCount: participants.length,
+                    maxParticipants: junction.maxParticipants || 10,
+                  }
+                : undefined
+            }
+          />
 
           {/* Participant Report Modal with Required Reason */}
           {reportingTarget && (

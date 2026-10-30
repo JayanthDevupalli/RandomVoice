@@ -744,7 +744,7 @@ export default function MessagesPage() {
       }
 
       // Connection acceptance guard
-      if (activeConversation?.type !== "group" && targetRelationship && !targetRelationship.isAcceptedConnection) {
+      if (activeConversation?.type !== "group" && (!targetRelationship || !targetRelationship.isAcceptedConnection)) {
         alert("Messaging is locked until the follow request is accepted by both users.");
         return;
       }
@@ -993,7 +993,7 @@ export default function MessagesPage() {
     }
 
     // Connection acceptance guard
-    if (activeConversation?.type !== "group" && targetRelationship && !targetRelationship.isAcceptedConnection) {
+    if (activeConversation?.type !== "group" && (!targetRelationship || !targetRelationship.isAcceptedConnection)) {
       alert("Messaging is locked until the follow request is accepted by both users.");
       return;
     }
@@ -1030,7 +1030,7 @@ export default function MessagesPage() {
       return;
     }
 
-    if (activeConversation?.type !== "group" && targetRelationship && !targetRelationship.isAcceptedConnection) {
+    if (activeConversation?.type !== "group" && (!targetRelationship || !targetRelationship.isAcceptedConnection)) {
       alert("Messaging is locked until the follow request is accepted by both users.");
       return;
     }
@@ -1880,20 +1880,29 @@ export default function MessagesPage() {
                   );
                 }
 
-                if (!isGroup && otherUserId && targetRelationship && !targetRelationship.isAcceptedConnection) {
+                if (!isGroup && otherUserId && (isRelationshipLoading || !targetRelationship || !targetRelationship.isAcceptedConnection)) {
+                  if (isRelationshipLoading && !targetRelationship) {
+                    return (
+                      <div className="p-3 sm:p-4 border-t border-white/5 bg-black/40 backdrop-blur-md flex items-center justify-center gap-2 text-slate-400 text-xs">
+                        <Loader2 size={16} className="animate-spin text-indigo-400" />
+                        <span>Verifying connection status...</span>
+                      </div>
+                    );
+                  }
+
                   return (
                     <div className="p-3 sm:p-4 border-t border-white/5 bg-black/40 backdrop-blur-md flex flex-col sm:flex-row items-center justify-between gap-3 shrink-0 animate-in fade-in">
                       <div className="flex items-center gap-2.5 text-amber-300 text-xs sm:text-sm">
                         <Lock size={18} className="text-amber-400 shrink-0" />
                         <span>
-                          {targetRelationship.hasPendingRequestFromMe
+                          {targetRelationship?.hasPendingRequestFromMe
                             ? "Follow request sent. Messaging is locked until they accept."
-                            : targetRelationship.hasPendingRequestFromThem
+                            : targetRelationship?.hasPendingRequestFromThem
                             ? "This user sent you a follow request. Accept to start messaging."
                             : "Follow request must be accepted before you can send messages."}
                         </span>
                       </div>
-                      {targetRelationship.hasPendingRequestFromThem ? (
+                      {targetRelationship?.hasPendingRequestFromThem ? (
                         <div className="flex items-center gap-2 shrink-0">
                           <button
                             type="button"
@@ -1925,7 +1934,7 @@ export default function MessagesPage() {
                             Decline
                           </button>
                         </div>
-                      ) : targetRelationship.hasPendingRequestFromMe ? (
+                      ) : targetRelationship?.hasPendingRequestFromMe ? (
                         <button
                           type="button"
                           onClick={async () => {

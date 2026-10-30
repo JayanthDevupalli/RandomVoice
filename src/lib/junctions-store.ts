@@ -874,11 +874,18 @@ export async function moderateParticipant(
   const targetRole: UserRole = target.userRole || resolvePlatformRole(target.identity);
 
   // Hierarchy rules for moderating:
-  // 1. Only official Admins can ban participants. Managers CANNOT suspend or ban users.
-  if (action === "ban" && !isCallerAdmin) {
+  // 1. Super Admins, Admins, and Managers have authority to ban regular participants.
+  if (action === "ban" && !isCallerManager) {
     return {
       success: false,
-      error: "Unauthorized: Only Admins can ban participants. Managers do not have permission to suspend or ban users.",
+      error: "Unauthorized: Staff privileges required to ban participants.",
+    };
+  }
+  // Managers can only ban regular users (not fellow managers or admins)
+  if (action === "ban" && !isCallerAdmin && targetRole !== "user") {
+    return {
+      success: false,
+      error: "Unauthorized: Admin clearance required to ban staff members.",
     };
   }
   if (action === "kick" && !isCallerManager) {

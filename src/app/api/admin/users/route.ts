@@ -328,6 +328,12 @@ export async function PATCH(request: NextRequest) {
       }
 
       if (action === "toggle_ban") {
+        if (!isCallerAdmin) {
+          return NextResponse.json(
+            { error: "Unauthorized: Admin privileges required to suspend accounts platform-wide. Managers can ban users from voice junctions." },
+            { status: 403 }
+          );
+        }
         const guestIdentifier = targetUsername || targetUserId;
         if (guestIdentifier) {
           if (isBanned) {
@@ -503,10 +509,10 @@ export async function PATCH(request: NextRequest) {
         );
       }
 
-      // Target is regular user: ONLY Main Admin and Admins can ban/unban! Managers cannot suspend users!
+      // Target is regular user: ONLY Main Admin and Admins can suspend accounts platform-wide!
       if (!isCallerAdmin) {
         return NextResponse.json(
-          { error: "Unauthorized: Admin privileges required to suspend accounts. Managers do not have permission to suspend users." },
+          { error: "Unauthorized: Admin privileges required to suspend accounts platform-wide. Managers can ban users from voice junctions." },
           { status: 403 }
         );
       }

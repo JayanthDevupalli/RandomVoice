@@ -121,6 +121,13 @@ export default function AdminPortalPage() {
   const isManager = Boolean(isRegistered && user && user.role === "manager");
   const hasAdminAccess = isMainAdmin || isStaffAdmin || isManager;
 
+  // Platform suspension clearance: Admins and Main Admin only. Managers cannot suspend platform accounts.
+  const canSuspendPlatformUser = (target: AdminUserRecord) => {
+    if (target.role === "super_admin") return false;
+    if (target.role === "admin") return isMainAdmin;
+    return isMainAdmin || isStaffAdmin;
+  };
+
   // Maintenance Mode hook & local state
   const {
     isMaintenance,
@@ -650,7 +657,7 @@ export default function AdminPortalPage() {
                     </>
                   ) : (
                     <>
-                      Manager mode. Oversee deck stages and manage room participants.
+                      Manager mode. Oversee deck stages, ban or unban disruptive participants from rooms, and review the Moderation Desk.
                     </>
                   )}
                 </p>
@@ -986,11 +993,11 @@ export default function AdminPortalPage() {
                 <span>
                   {isManager ? (
                     <>
-                      <strong>Manager View:</strong> You have moderation authority inside voice junctions and the Moderation Desk. Platform-level user suspensions and deletions require Administrator clearance.
+                      <strong>Manager View:</strong> You have moderation authority inside voice junctions to ban and unban participants from rooms. Platform-level user suspensions and deletions require Administrator clearance.
                     </>
                   ) : (
                     <>
-                      <strong>Admin View:</strong> You can suspend accounts and terminate rooms. Role promotions are restricted to Main Admin.
+                      <strong>Admin View:</strong> You can suspend accounts, delete users, and terminate rooms. Role promotions are restricted to Main Admin.
                     </>
                   )}
                 </span>
@@ -1128,7 +1135,7 @@ export default function AdminPortalPage() {
                       {!isThisUserMainAdmin && (
                         <div className="flex items-center gap-1.5 shrink-0">
                           {/* Ban Button (Admins Only) */}
-                          {(isMainAdmin || isStaffAdmin) && (
+                          {canSuspendPlatformUser(u) && (
                             <button
                               onClick={() => {
                                 setPendingAction({
@@ -1341,7 +1348,7 @@ export default function AdminPortalPage() {
                             <div className="flex items-center justify-end gap-2">
                               {!isThisUserMainAdmin && (
                                 <>
-                                  {(isMainAdmin || isStaffAdmin) && (
+                                  {canSuspendPlatformUser(u) && (
                                     <button
                                       onClick={() => {
                                         setPendingAction({
@@ -1601,7 +1608,7 @@ export default function AdminPortalPage() {
               <div className="p-3.5 rounded-2xl bg-indigo-950/30 border border-indigo-500/20 flex items-center gap-2.5 text-xs text-indigo-200">
                 <Info size={16} className="text-indigo-400 shrink-0" />
                 <span>
-                  <strong>Manager Clearance:</strong> You have full visibility into platform bans, reported infractions, and the ability to unban users from rooms. Lifting platform-level suspensions requires an Admin or Super Admin.
+                  <strong>Manager Clearance:</strong> You have full visibility into platform infractions and the ability to unban users from rooms. Lifting platform-level suspensions requires Admin or Super Admin clearance.
                 </span>
               </div>
             )}
@@ -1684,7 +1691,7 @@ export default function AdminPortalPage() {
                           <div className="flex items-center justify-between border-t border-white/5 pt-2 text-[11px] text-slate-500">
                             <span>UID: {(bannedUser.id || "").slice(0, 8)}...</span>
 
-                            {isMainAdmin || isStaffAdmin ? (
+                            {canSuspendPlatformUser(bannedUser) ? (
                               <button
                                 onClick={() =>
                                   setPendingAction({

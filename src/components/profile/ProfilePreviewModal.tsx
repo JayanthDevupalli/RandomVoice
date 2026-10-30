@@ -294,7 +294,15 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
       // Dispatch in-room messenger trigger
       window.dispatchEvent(
         new CustomEvent("yapclub_open_inroom_dm", {
-          detail: { conversationId: convId, partnerId: profile.id },
+          detail: {
+            conversationId: convId,
+            partnerId: profile.id,
+            partnerProfile: {
+              id: profile.id,
+              username: profile.username,
+              avatar: profile.avatar || "user",
+            },
+          },
         })
       );
 
