@@ -19,10 +19,8 @@ function getAdminClient() {
 }
 
 // Helper to determine if an identity/username is Main Admin
-function isMainAdmin(username?: string): boolean {
-  if (!username) return false;
-  const clean = username.trim().toLowerCase();
-  return clean === "jayanthadmin" || clean === "jayanth";
+function isMainAdmin(username?: string, role?: string): boolean {
+  return role === "super_admin";
 }
 
 // Resilient profile fetcher (reads native columns with fallback to social_links JSON)
@@ -59,10 +57,11 @@ async function fetchTargetProfile(adminClient: any, targetUserId?: string, targe
   }
 
   if (profile) {
-    const isMain = isMainAdmin(profile.username);
+    const rawRole = profile.role || profile.social_links?.role || "user";
+    const isMain = rawRole === "super_admin";
     const resolvedRole = isMain
       ? "super_admin"
-      : (profile.role || profile.social_links?.role || "user");
+      : rawRole;
     const resolvedBanned = isMain
       ? false
       : Boolean(profile.is_banned ?? profile.social_links?.is_banned);
@@ -193,16 +192,6 @@ async function verifyAdminAuth(
           .maybeSingle();
 
         const username = profile?.username || authUser.user_metadata?.username || "";
-        const cleanName = username.trim().toLowerCase();
-        if (cleanName === "jayanthadmin" || cleanName === "jayanth" || isMainAdmin(cleanName)) {
-          return { authorized: true, role: "super_admin", username: username || "jayanthadmin" };
-        }
-
-        const email = (authUser.email || "").toLowerCase();
-        if (email.startsWith("jayanthadmin") || email.startsWith("jayanth")) {
-          return { authorized: true, role: "super_admin", username: username || "jayanthadmin" };
-        }
-
         const dbRole = profile?.role || profile?.social_links?.role;
         if (dbRole === "super_admin" || dbRole === "admin" || dbRole === "manager") {
           return { authorized: true, role: dbRole as UserRole, username };
@@ -210,49 +199,6 @@ async function verifyAdminAuth(
       }
     } catch (e) {
       console.error("verifyAdminAuth token check error in admin/users:", e);
-    }
-  }
-
-  // Resilient fallback authentication (via x-requester-username/role headers or payload params)
-  const reqUsername =
-    request.headers.get("x-requester-username") ||
-    fallbackUser?.username ||
-    request.nextUrl.searchParams.get("requesterUsername") ||
-    undefined;
-
-  const reqRole =
-    request.headers.get("x-requester-role") ||
-    fallbackUser?.role ||
-    request.nextUrl.searchParams.get("requesterRole") ||
-    undefined;
-
-  if (reqUsername) {
-    const cleanUser = reqUsername.trim().toLowerCase();
-    if (isMainAdmin(cleanUser)) {
-      return { authorized: true, role: "super_admin", username: reqUsername };
-    }
-
-    // Verify against DB profiles if staff role claimed
-    if (reqRole === "admin" || reqRole === "manager" || reqRole === "super_admin") {
-      try {
-        const { data: prof } = await adminClient
-          .from("profiles")
-          .select("*")
-          .ilike("username", reqUsername)
-          .maybeSingle();
-        if (prof) {
-          const isMain = isMainAdmin(prof.username);
-          if (isMain) {
-            return { authorized: true, role: "super_admin", username: prof.username };
-          }
-          const dbRole = prof.role || prof.social_links?.role;
-          if (dbRole === "super_admin" || dbRole === "admin" || dbRole === "manager") {
-            return { authorized: true, role: dbRole as UserRole, username: prof.username };
-          }
-        }
-      } catch (dbErr) {
-        console.error("verifyAdminAuth fallback DB error:", dbErr);
-      }
     }
   }
 
@@ -287,10 +233,11 @@ export async function GET(request: NextRequest) {
     }
 
     const normalized = (profiles || []).map((p: any) => {
-      const isMain = isMainAdmin(p.username);
+      const rawRole = p.role || p.social_links?.role || "user";
+      const isMain = rawRole === "super_admin";
       const resolvedRole = isMain
         ? "super_admin"
-        : (p.role || p.social_links?.role || "user");
+        : rawRole;
       const resolvedBanned = isMain
         ? false
         : Boolean(p.is_banned ?? p.social_links?.is_banned);
@@ -358,7 +305,7 @@ export async function PATCH(request: NextRequest) {
     const adminClient = getAdminClient();
 
     // Determine caller clearance from verified session
-    const isCallerMainAdmin = auth.role === "super_admin" || isMainAdmin(auth.username) || isMainAdmin(requesterUsername);
+    const isCallerMainAdmin = auth.role === "super_admin";
     const isCallerAdmin = isCallerMainAdmin || auth.role === "admin";
     const isCallerManager = isCallerAdmin || auth.role === "manager";
 
@@ -447,7 +394,7 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json({ error: "User not found" }, { status: 404 });
     }
 
-    const isTargetMainAdmin = isMainAdmin(targetProfile.username);
+    const isTargetMainAdmin = targetProfile.role === "super_admin";
 
     // ==========================================
     // ACTION 1: Role Promotion / Demotion
@@ -734,14 +681,10 @@ export async function DELETE(request: NextRequest) {
       role: requesterRole || undefined,
     });
 
-    const isCallerMainAdmin =
-      (auth.authorized && (auth.role === "super_admin" || isMainAdmin(auth.username))) ||
-      isMainAdmin(requesterUsername || undefined) ||
-      requesterRole === "super_admin";
+    const isCallerMainAdmin = auth.authorized && auth.role === "super_admin";
     const isCallerAdmin =
       isCallerMainAdmin ||
-      (auth.authorized && auth.role === "admin") ||
-      requesterRole === "admin";
+      (auth.authorized && auth.role === "admin");
 
     if (!isCallerAdmin) {
       return NextResponse.json({ error: "Unauthorized: Admin privileges required to delete accounts." }, { status: 403 });
@@ -774,7 +717,7 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json({ error: "User not found" }, { status: 404 });
     }
 
-    if (isMainAdmin(targetProfile.username)) {
+    if (targetProfile.role === "super_admin") {
       return NextResponse.json({ error: "The Main Admin (jayanthadmin) cannot be deleted." }, { status: 400 });
     }
 

@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { supabase as anonSupabase } from "@/lib/supabase";
+import { createClient } from "@supabase/supabase-js";
 import {
   getJunctionById,
   addParticipantToJunction,
@@ -27,9 +29,6 @@ export async function GET(
 
     if (action === "leave" && identity) {
       await removeParticipantFromJunction(params.id, identity);
-    } else if (identity) {
-      // Touch heartbeat to keep participant fresh and prevent accidental ghost purging
-      touchParticipantHeartbeat(params.id, identity).catch(() => {});
     }
 
     const junction = await getJunctionById(params.id);
@@ -84,6 +83,73 @@ export async function POST(
       if (!participant) {
         return NextResponse.json({ error: "Missing participant" }, { status: 400 });
       }
+
+      // Verify authentic Supabase session token if provided
+      const authHeader = request.headers.get("authorization");
+      const token = authHeader?.replace(/^Bearer\s+/i, "");
+      const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+      const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+      const sbAdmin = (serviceKey && url)
+        ? createClient(url, serviceKey, { auth: { autoRefreshToken: false, persistSession: false } })
+        : anonSupabase;
+
+      let authUser: any = null;
+      let userProfile: any = null;
+
+      if (token) {
+        try {
+          const { data: { user } } = await sbAdmin.auth.getUser(token);
+          if (user?.id) {
+            authUser = user;
+            const { data: prof } = await sbAdmin
+              .from("profiles")
+              .select("*")
+              .eq("id", user.id)
+              .maybeSingle();
+            userProfile = prof;
+          }
+        } catch (e) {
+          console.warn("Auth token check error on junction join:", e);
+        }
+      }
+
+      if (authUser && userProfile) {
+        // Verified registered user: enforce DB identity & user ID
+        participant.id = authUser.id;
+        participant.identity = userProfile.username || participant.identity;
+        participant.username = userProfile.username;
+        const dName = userProfile.display_name || userProfile.social_links?.display_name || userProfile.username;
+        participant.name = dName;
+        participant.displayName = dName;
+        if (userProfile.avatar) {
+          participant.avatar = userProfile.avatar;
+        }
+        const userDbRole = userProfile.role || userProfile.social_links?.role || "user";
+        participant.userRole = userDbRole;
+      } else {
+        // Guest user - enforced boundaries:
+        // 1. ID must be prefixed with "guest_"
+        if (!participant.id || !participant.id.startsWith("guest_")) {
+          participant.id = "guest_" + (participant.id || Date.now().toString());
+        }
+        // 2. Guest can NEVER have elevated platform roles
+        participant.userRole = "user";
+        // 3. Prevent guest from spoofing a registered user's username
+        if (participant.identity) {
+          const cleanIdent = participant.identity.trim().toLowerCase();
+          const { data: existingUser } = await sbAdmin
+            .from("profiles")
+            .select("id")
+            .ilike("username", cleanIdent)
+            .maybeSingle();
+          if (existingUser) {
+            // A registered user owns this handle. Append a random suffix so guest doesn't impersonate them
+            participant.identity = `${participant.identity}_guest`;
+            participant.username = participant.identity;
+          }
+        }
+      }
+
       const result = await addParticipantToJunction(params.id, participant);
       if (!result.success) {
         return NextResponse.json({ error: result.error }, { status: 400 });
@@ -92,12 +158,11 @@ export async function POST(
     }
 
     if (action === "leave") {
-      const { identity, identities, name, participantId, userId } = body;
+      const { identity, identities, participantId, userId } = body;
       const allIdentities: string[] = Array.from(
         new Set(
           [
             identity,
-            name,
             participantId,
             userId,
             ...(Array.isArray(identities) ? identities : []),
@@ -110,7 +175,6 @@ export async function POST(
       }
       await removeParticipantFromJunction(params.id, identity || allIdentities[0], {
         identities: allIdentities,
-        name,
         participantId,
         userId,
       });

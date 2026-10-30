@@ -15,20 +15,13 @@ const DEFAULT_MAINTENANCE_DATA: MaintenanceData = {
 };
 
 export function useMaintenanceMode() {
-  const { user, isLoaded } = useUser();
+  const { user, isLoaded, isRegistered } = useUser();
   const [maintenanceData, setMaintenanceData] = useState<MaintenanceData>(DEFAULT_MAINTENANCE_DATA);
   const [isLoading, setIsLoading] = useState(true);
   const [isUpdating, setIsUpdating] = useState(false);
   const [isDismissed, setIsDismissed] = useState(false);
 
-  const cleanName = user?.name?.trim().toLowerCase() || "";
-  const cleanUsername = user?.username?.trim().toLowerCase() || "";
-  const isSuperAdmin =
-    user?.role === "super_admin" ||
-    cleanName === "jayanthadmin" ||
-    cleanName === "jayanth" ||
-    cleanUsername === "jayanthadmin" ||
-    cleanUsername === "jayanth";
+  const isSuperAdmin = Boolean(isRegistered && user && user.role === "super_admin");
 
   // Fetch current maintenance status from API
   const fetchMaintenanceStatus = useCallback(async () => {

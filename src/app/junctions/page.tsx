@@ -129,7 +129,7 @@ export default function JunctionsPage() {
 
       await fetchJunctions(abortController.signal);
       setIsLoading(false);
-      timeoutId = setTimeout(poll, 10000);
+      timeoutId = setTimeout(poll, 45000);
     };
 
     poll();
@@ -199,6 +199,29 @@ export default function JunctionsPage() {
       }, 1500);
     };
 
+    // Instant global presence updates via WebSocket broadcast
+    const globalPresenceChannel = supabase
+      .channel("junctions_global_presence")
+      .on("broadcast", { event: "presence_updated" }, (msg: any) => {
+        const payload = msg?.payload;
+        if (!payload) return;
+        const { junctionId: updatedId, count: newCount, totalOnline: newTotal } = payload;
+        setJunctions((prev) => {
+          const updated = prev.map((j) => (j.id === updatedId ? { ...j, currentCount: newCount } : j));
+          try {
+            sessionStorage.setItem("yapclub_cached_junctions", JSON.stringify(updated));
+          } catch {}
+          return updated;
+        });
+        if (typeof newTotal === "number") {
+          setTotalOnline(newTotal);
+          try {
+            sessionStorage.setItem("yapclub_cached_total_online", String(newTotal));
+          } catch {}
+        }
+      })
+      .subscribe();
+
     const channelId = `junctions_hub_${Math.random().toString(36).substring(2, 7)}`;
     const channel = supabase
       .channel(channelId)
@@ -229,6 +252,7 @@ export default function JunctionsPage() {
       clearTimeout(timeoutId);
       window.removeEventListener("focus", handleFocus);
       window.removeEventListener("yapclub_junction_left", handleJunctionLeft);
+      supabase.removeChannel(globalPresenceChannel);
       supabase.removeChannel(channel);
     };
   }, [fetchJunctions]);

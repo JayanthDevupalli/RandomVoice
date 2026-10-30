@@ -15,12 +15,6 @@ const supabase = (serviceKey && url)
   : anonSupabase;
 
 export function resolvePlatformRole(username?: string, rawRole?: string): UserRole {
-  if (username) {
-    const clean = username.trim().toLowerCase();
-    if (clean === "jayanthadmin" || clean === "jayanth") {
-      return "super_admin";
-    }
-  }
   if (rawRole === "super_admin" || rawRole === "admin" || rawRole === "manager") {
     return rawRole as UserRole;
   }
@@ -125,9 +119,10 @@ function rowToParticipant(
   profileMap?: Record<string, ParticipantProfile>
 ): JunctionParticipant {
   const decoded = decodeParticipantColor(row.color);
+  const isGuest = !row.id || row.id.startsWith("guest_") || row.id.startsWith("p_");
   const cleanId = (row.identity || "").toLowerCase();
-  const cleanName = (row.name || "").toLowerCase();
-  const userProfile = profileMap?.[cleanId] || profileMap?.[cleanName];
+  const cleanDbId = (row.id || "").toLowerCase();
+  const userProfile = !isGuest ? (profileMap?.[cleanDbId] || profileMap?.[cleanId]) : undefined;
 
   // Resolve cardBgColor: userProfile theme > row.card_bg_color > decoded cardBgColor > default
   let cardBgColor = "#465B73";
@@ -141,10 +136,10 @@ function rowToParticipant(
     cardBgColor = row.card_bg_color || decoded.cardBgColor || "#465B73";
   }
 
-  const rawRole = roleMap?.[cleanId] || roleMap?.[cleanName] || userProfile?.role;
-  const userRole = resolvePlatformRole(row.name || row.identity, rawRole);
+  const rawRole = !isGuest ? (roleMap?.[cleanDbId] || roleMap?.[cleanId] || userProfile?.role) : "user";
+  const userRole = !isGuest ? resolvePlatformRole(row.identity, rawRole) : "user";
   const resolvedName = userProfile?.displayName || row.name || row.identity;
-  const resolvedUsername = userProfile?.username || row.name || row.identity;
+  const resolvedUsername = userProfile?.username || row.identity;
   const resolvedAvatar = userProfile?.avatar ? userProfile.avatar : (row.avatar || "zap");
 
   return {
@@ -167,69 +162,106 @@ function rowToParticipant(
   };
 }
 
+// ─── Platform Profiles Fast In-Memory Cache ────────────────────────────────
+interface CachedProfileEntry {
+  profile: ParticipantProfile;
+  role: UserRole;
+  isBanned: boolean;
+  timestamp: number;
+}
+const platformProfileCache = new Map<string, CachedProfileEntry>();
+const PROFILE_CACHE_TTL_MS = 60000;
+
 // ─── Fetch a junction with its participants ─────────────────────────────────
 
 async function fetchJunctionWithParticipants(junctionId: string): Promise<Junction | undefined> {
-  const { data: jRow, error } = await supabase
-    .from("junctions")
-    .select("*")
-    .eq("id", junctionId)
-    .single();
+  // Concurrent parallel fetch: junction metadata & participants
+  const [jRes, pRes] = await Promise.all([
+    supabase
+      .from("junctions")
+      .select("*")
+      .eq("id", junctionId)
+      .single(),
+    supabase
+      .from("junction_participants")
+      .select("*")
+      .eq("junction_id", junctionId)
+      .order("joined_at", { ascending: true }),
+  ]);
 
-  if (error || !jRow) return undefined;
+  const jRow = jRes.data;
+  if (jRes.error || !jRow) return undefined;
 
-  const { data: pRows } = await supabase
-    .from("junction_participants")
-    .select("*")
-    .eq("junction_id", junctionId)
-    .order("joined_at", { ascending: true });
+  const rawParticipants = (pRes.data || []) as ParticipantRow[];
 
-  const rawParticipants = (pRows || []) as ParticipantRow[];
-  const identities = Array.from(
+  // Only registered participants (non-guests) have authentic platform profiles
+  const registeredParticipants = rawParticipants.filter(
+    (p) => p.id && !p.id.startsWith("guest_") && !p.id.startsWith("p_")
+  );
+  const registeredUsernames = Array.from(
     new Set(
-      rawParticipants
-        .flatMap((p) => [p.identity, p.name])
+      registeredParticipants
+        .map((p) => (p.identity || "").trim().toLowerCase())
         .filter(Boolean)
     )
   );
-  
+  const registeredUserIds = Array.from(
+    new Set(
+      registeredParticipants
+        .map((p) => p.id)
+        .filter((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))
+    )
+  );
+
   const roleMap: Record<string, UserRole> = {};
   const profileMap: Record<string, ParticipantProfile> = {};
   const bannedUsernames = new Set<string>();
 
-  // Fetch verified platform profiles ONLY for current participants in this junction
-  const searchIdentities = Array.from(
-    new Set(
-      identities
-        .map((id) => (id || "").trim())
-        .filter((id) => /^[a-zA-Z0-9_.-]+$/.test(id))
-        .flatMap((id) => [id, id.toLowerCase()])
-    )
-  );
+  // Fetch verified platform profiles with fast 60s memory caching
+  const now = Date.now();
+  const missingUsernames: string[] = [];
 
-  if (searchIdentities.length > 0) {
+  for (const cleanId of registeredUsernames) {
+    if (!cleanId || !/^[a-zA-Z0-9_.-]+$/.test(cleanId)) continue;
+    const cached = platformProfileCache.get(cleanId);
+    if (cached && now - cached.timestamp < PROFILE_CACHE_TTL_MS) {
+      if (cached.isBanned) bannedUsernames.add(cleanId);
+      roleMap[cleanId] = cached.role;
+      profileMap[cleanId] = cached.profile;
+    } else {
+      missingUsernames.push(cleanId);
+    }
+  }
+
+  if (missingUsernames.length > 0 || registeredUserIds.length > 0) {
     try {
-      const { data: profs, error: profError } = await supabase
-        .from("profiles")
-        .select("*")
-        .in("username", searchIdentities);
-
-      if (profError) {
-        console.error("Error fetching participant platform profiles:", profError);
+      let query = supabase.from("profiles").select("*");
+      if (missingUsernames.length > 0 && registeredUserIds.length > 0) {
+        query = query.or(`id.in.(${registeredUserIds.map((id) => `"${id}"`).join(",")}),username.in.(${missingUsernames.map((u) => `"${u}"`).join(",")})`);
+      } else if (registeredUserIds.length > 0) {
+        query = query.in("id", registeredUserIds);
+      } else {
+        query = query.in("username", missingUsernames);
       }
+      const { data: profs } = await query;
 
       for (const pr of (profs as any[]) || []) {
         if (pr.username) {
+          const uLower = pr.username.toLowerCase();
+          const idLower = (pr.id || "").toLowerCase();
           const isBanned = Boolean(pr.is_banned ?? pr.social_links?.is_banned);
           if (isBanned) {
-            bannedUsernames.add(pr.username.toLowerCase());
+            bannedUsernames.add(uLower);
           }
 
+          const rawDbRole = pr.role || pr.social_links?.role;
           const resolved = resolvePlatformRole(
             pr.username,
-            pr.role || pr.social_links?.role
+            rawDbRole
           );
-          roleMap[pr.username.toLowerCase()] = resolved;
+          roleMap[uLower] = resolved;
+          if (idLower) roleMap[idLower] = resolved;
+
           const dName = pr.display_name || pr.social_links?.display_name || pr.username;
           const cardBg = (pr.card_bg_color && pr.card_bg_color !== "#465B73")
             ? pr.card_bg_color
@@ -243,11 +275,15 @@ async function fetchJunctionWithParticipants(junctionId: string): Promise<Juncti
             role: resolved,
           };
 
-          profileMap[pr.username.toLowerCase()] = pInfo;
-          if (dName) {
-            roleMap[dName.toLowerCase()] = resolved;
-            profileMap[dName.toLowerCase()] = pInfo;
-          }
+          profileMap[uLower] = pInfo;
+          if (idLower) profileMap[idLower] = pInfo;
+
+          platformProfileCache.set(uLower, {
+            profile: pInfo,
+            role: resolved,
+            isBanned,
+            timestamp: now,
+          });
         }
       }
     } catch (e) {
@@ -255,52 +291,46 @@ async function fetchJunctionWithParticipants(junctionId: string): Promise<Juncti
     }
   }
 
-  // Reconcile with LiveKit WebRTC state to purge ghost participants ONLY when:
-  // 1. LiveKit is active and has other participants (liveKitIdentities.size > 0), AND
-  // 2. The participant's heartbeat has been completely inactive for over 90 seconds (stale ghost).
-  // NEVER purge when LiveKit reports 0 participants or room not found, because LiveKit room
-  // might still be initializing, quiet/muted, or connecting.
-  let liveKitIdentities: Set<string> | null = null;
-  if (rawParticipants.length > 0) {
-    liveKitIdentities = await getActiveLiveKitParticipants(junctionId);
-  }
-
-  const now = Date.now();
-  const STALE_HEARTBEAT_PURGE_MS = 90000; // 90 seconds grace before ghost purge
-
-  let purgedAny = false;
+  // Only filter platform-banned users.
+  // Never purge active participants synchronously during room fetch!
   const participants = rawParticipants.filter((p) => {
-    if (bannedUsernames.has(p.identity.toLowerCase())) {
+    if (bannedUsernames.has((p.identity || "").toLowerCase())) {
       supabase.from("junction_participants").delete().eq("id", p.id).then();
-      purgedAny = true;
       return false;
     }
-
-    const timeSinceHeartbeat = now - (p.joined_at || 0);
-
-    // Only consider ghost-purging if the participant has been inactive for > 90s
-    // AND LiveKit room is actively running with other peers (size > 0)
-    if (timeSinceHeartbeat > STALE_HEARTBEAT_PURGE_MS && liveKitIdentities !== null && liveKitIdentities.size > 0) {
-      const pIdent = (p.identity || "").toLowerCase().trim();
-      const pName = (p.name || "").toLowerCase().trim();
-      const pId = (p.id || "").toLowerCase().trim();
-      const isConnected = liveKitIdentities.has(pIdent) || liveKitIdentities.has(pName) || liveKitIdentities.has(pId);
-      if (!isConnected) {
-        // Ghost participant verified absent from an active LiveKit room!
-        supabase.from("junction_participants").delete().eq("id", p.id).then();
-        purgedAny = true;
-        return false;
-      }
-    }
-
     return true;
   });
 
-  if (purgedAny) {
-    syncCount(junctionId).then();
-  }
-
   return rowToJunction(jRow as JunctionRow, participants, roleMap, profileMap);
+}
+
+// ─── Global Presence Realtime Broadcast ──────────────────────────────────────
+
+let globalPresenceChannel: any = null;
+function getGlobalPresenceChannel() {
+  if (!globalPresenceChannel) {
+    globalPresenceChannel = supabase.channel("junctions_global_presence");
+    globalPresenceChannel.subscribe();
+  }
+  return globalPresenceChannel;
+}
+
+export async function broadcastGlobalPresence(junctionId: string, count: number, totalOnline?: number) {
+  try {
+    const ch = getGlobalPresenceChannel();
+    await ch.send({
+      type: "broadcast",
+      event: "presence_updated",
+      payload: {
+        junctionId,
+        count,
+        totalOnline,
+        timestamp: Date.now(),
+      },
+    });
+  } catch (err) {
+    console.warn("Failed to broadcast global presence:", err);
+  }
 }
 
 // ─── Sync current_count helper ──────────────────────────────────────────────
@@ -321,18 +351,22 @@ async function syncCount(junctionId: string) {
     .from("junctions")
     .update(updatePayload)
     .eq("id", junctionId);
+
+  // Invalidate in-memory lobby cache immediately
+  invalidateJunctionsCache();
+
+  // Compute total online count and broadcast globally
+  const { count: totalOnline } = await supabase
+    .from("junction_participants")
+    .select("*", { count: "exact", head: true });
+
+  broadcastGlobalPresence(junctionId, newCount, totalOnline ?? newCount).catch(() => {});
 }
 
 // ─── Touch Heartbeat to Keep Active Participants Fresh ─────────────────────────
 
-const participantHeartbeats = new Map<string, number>();
-
 export async function touchParticipantHeartbeat(junctionId: string, identity: string) {
-  if (!junctionId || !identity) return;
-  const key = `${junctionId}:${identity.trim().toLowerCase()}`;
-  participantHeartbeats.set(key, Date.now());
-  // Notice: We intentionally do NOT mutate joined_at in the database.
-  // joined_at must remain the immutable arrival timestamp for sequential first-come first-served seating.
+  // No-op: ghost purging removed, immutable joined_at preserved
 }
 
 // ─── Fast In-Memory Cache for Lobby ──────────────────────────────────────────
@@ -439,49 +473,19 @@ export async function getAllJunctions(): Promise<Junction[]> {
     }
   }
 
-  // Reconcile with active LiveKit rooms to purge ghosts across junctions
-  let activeRooms: Map<string, number> | null = null;
-  if (rawParticipants.length > 0) {
-    activeRooms = await getActiveLiveKitRooms();
-  }
-
-  const STALE_LOBBY_PURGE_MS = 120000; // 2 minutes grace before lobby purge
-
-  // Filter out any suspended users or ghost participants from participant rows and purge from DB
+  // Group active participants by junction (filtering banned accounts)
   const participantsByJunction: Record<string, ParticipantRow[]> = {};
-  const junctionsNeedingSync = new Set<string>();
 
   for (const p of rawParticipants) {
-    if (bannedUsernames.has(p.identity.toLowerCase())) {
+    if (bannedUsernames.has((p.identity || "").toLowerCase())) {
       supabase.from("junction_participants").delete().eq("id", p.id).then();
-      junctionsNeedingSync.add(p.junction_id);
       continue;
-    }
-
-    // Purge ghost participants if room is empty in LiveKit (grace period of 20s after join)
-    const timeSinceJoin = now - (p.joined_at || 0);
-    const lastHb = participantHeartbeats.get(`${p.junction_id}:${p.identity.toLowerCase()}`) || (p.joined_at || 0);
-    const timeSinceHb = now - lastHb;
-
-    if (activeRooms !== null && timeSinceJoin > 20000) {
-      const roomCount = activeRooms.get(p.junction_id) ?? 0;
-      if (roomCount === 0 || timeSinceHb > 45000) {
-        supabase.from("junction_participants").delete().eq("id", p.id).then();
-        junctionsNeedingSync.add(p.junction_id);
-        continue;
-      }
     }
 
     if (!participantsByJunction[p.junction_id]) {
       participantsByJunction[p.junction_id] = [];
     }
     participantsByJunction[p.junction_id].push(p);
-  }
-
-  if (junctionsNeedingSync.size > 0) {
-    junctionsNeedingSync.forEach((jId) => {
-      syncCount(jId).then();
-    });
   }
 
   const result = (jRows as JunctionRow[])
@@ -600,17 +604,17 @@ export async function addParticipantToJunction(
     return { success: false, error: "You have been banned from this junction by the moderator." };
   }
 
-  // 0% Ghosting Guarantee: PREEMPTIVELY remove this identity from ALL OTHER junctions before joining this one.
+  // Remove this unique identity from any other junction before joining this one.
   const { data: prevRows } = await supabase
     .from("junction_participants")
     .select("junction_id")
-    .or(`identity.ilike.${cleanParticipantIdentity},name.ilike.${cleanParticipantIdentity}`)
+    .ilike("identity", cleanParticipantIdentity)
     .neq("junction_id", junctionId);
 
   await supabase
     .from("junction_participants")
     .delete()
-    .or(`identity.ilike.${cleanParticipantIdentity},name.ilike.${cleanParticipantIdentity}`)
+    .ilike("identity", cleanParticipantIdentity)
     .neq("junction_id", junctionId);
 
   if (prevRows && prevRows.length > 0) {
@@ -646,14 +650,14 @@ export async function addParticipantToJunction(
     finalBgColor !== "#465B73" ? finalBgColor : existing?.cardBgColor
   );
 
-  const participantId = existing?.id || ("p_" + Date.now() + "_" + Math.random().toString(36).substr(2, 5));
+  const participantId = participant.id || existing?.id || ("guest_" + Date.now() + "_" + Math.random().toString(36).substr(2, 5));
   // All room members are equal speakers; no room host concept
   const newRole = participant.role || existing?.role || "speaker";
   const newMuted = shouldKeepModMute ? true : (existing?.isMuted !== undefined ? existing.isMuted : (participant.isMuted !== undefined ? participant.isMuted : true));
-  const joinedAtTime = existing?.joinedAt || Date.now();
+  const joinedAtTime = existing?.joinedAt || (participant as any).joinedAt || (participant as any).joined_at || Date.now();
   const newCount = isAlreadyPresent ? junction.participants.length : junction.participants.length + 1;
 
-  // Execute database writes concurrently: upsert participant, remove ghost records, update count
+  // Execute database writes concurrently: upsert participant, remove duplicate records from other rooms
   const [upsertRes] = await Promise.all([
     supabase.from("junction_participants").upsert(
       {
@@ -678,18 +682,15 @@ export async function addParticipantToJunction(
       .delete()
       .eq("identity", participant.identity)
       .neq("junction_id", junctionId),
-    supabase
-      .from("junctions")
-      .update({
-        current_count: newCount,
-      })
-      .eq("id", junctionId),
   ]);
 
   if (upsertRes.error) {
     console.error("Failed to upsert participant:", upsertRes.error);
     return { success: false, error: "Database error: " + upsertRes.error.message };
   }
+
+  // Atomically sync exact room count
+  await syncCount(junctionId);
 
   // Invalidate in-memory lobby cache so callers get fresh counts immediately
   invalidateJunctionsCache();
@@ -740,14 +741,13 @@ export async function removeParticipantFromJunction(
 
   const targetSet = new Set<string>();
   if (identity) targetSet.add(identity.trim());
-  if (extra?.name) targetSet.add(extra.name.trim());
   if (extra?.participantId) targetSet.add(extra.participantId.trim());
   if (extra?.userId) targetSet.add(extra.userId.trim());
   if (Array.isArray(extra?.identities)) {
     extra.identities.forEach((id) => id && targetSet.add(id.trim()));
   }
 
-  // 1. Fetch current participants of this junction to find matches by identity, name, or id (case-insensitive)
+  // 1. Fetch current participants of this junction to find matches by unique identity or id
   const { data: currentParticipants } = await supabase
     .from("junction_participants")
     .select("id, identity, name")
@@ -756,11 +756,10 @@ export async function removeParticipantFromJunction(
   const matchedIds = (currentParticipants || [])
     .filter((p) => {
       const pIdent = (p.identity || "").toLowerCase().trim();
-      const pName = (p.name || "").toLowerCase().trim();
       const pId = (p.id || "").toLowerCase().trim();
       return Array.from(targetSet).some((t) => {
         const tLower = t.toLowerCase().trim();
-        return pIdent === tLower || pName === tLower || pId === tLower;
+        return pIdent === tLower || pId === tLower;
       });
     })
     .map((p) => p.id);
@@ -771,7 +770,7 @@ export async function removeParticipantFromJunction(
       .delete()
       .in("id", matchedIds);
   } else {
-    // 2. Direct fallback delete across candidate targets only if no match was found in step 1
+    // 2. Direct fallback delete strictly within this junctionId
     const candidates = Array.from(targetSet).filter(Boolean);
     if (candidates.length > 0) {
       await Promise.allSettled(
@@ -780,21 +779,9 @@ export async function removeParticipantFromJunction(
             .from("junction_participants")
             .delete()
             .eq("junction_id", junctionId)
-            .or(`identity.eq.${t},identity.ilike.${t},name.eq.${t},name.ilike.${t},id.eq.${t}`)
+            .or(`identity.eq.${t},identity.ilike.${t},id.eq.${t}`)
         )
       );
-    }
-  }
-
-  // Preemptively purge candidate identities from any other rooms as well to eliminate ghosts completely
-  const candidates = Array.from(targetSet).filter(Boolean);
-  if (candidates.length > 0) {
-    for (const c of candidates) {
-      supabase
-        .from("junction_participants")
-        .delete()
-        .or(`identity.ilike.${c},name.ilike.${c}`)
-        .then();
     }
   }
 
@@ -1117,9 +1104,7 @@ export async function deleteJunction(
 ): Promise<boolean> {
   const isStaff =
     callerRole === "super_admin" ||
-    callerRole === "admin" ||
-    creatorId?.toLowerCase() === "jayanthadmin" ||
-    creatorId?.toLowerCase() === "jayanth";
+    callerRole === "admin";
 
   // Prevent unauthenticated calls from deleting any rooms
   if (!creatorId && !isStaff) {

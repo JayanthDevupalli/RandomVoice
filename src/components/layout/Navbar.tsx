@@ -25,10 +25,9 @@ export function Navbar({ totalOnline: propTotalOnline, className = "" }: NavbarP
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
 
   const displayOnline = typeof propTotalOnline === "number" ? propTotalOnline : liveOnline;
-  const cleanName = user?.name?.trim().toLowerCase() || "";
-  const isSuperAdmin = user?.role === "super_admin" || cleanName === "jayanthadmin" || cleanName === "jayanth";
-  const isAdmin = isSuperAdmin || user?.role === "admin";
-  const isManager = user?.role === "manager";
+  const isSuperAdmin = Boolean(isRegistered && user && user.role === "super_admin");
+  const isAdmin = Boolean(isRegistered && user && (user.role === "super_admin" || user.role === "admin"));
+  const isManager = Boolean(isRegistered && user && user.role === "manager");
   const isStaff = isAdmin || isManager;
 
   return (

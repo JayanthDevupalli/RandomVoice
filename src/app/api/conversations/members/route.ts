@@ -60,15 +60,14 @@ export async function DELETE(request: NextRequest) {
 
       const { data: callerProfile } = await supabaseAdmin
         .from("profiles")
-        .select("username, role")
+        .select("username, role, social_links")
         .eq("id", effectiveCallerId)
         .maybeSingle();
 
+      const callerRole = callerProfile?.role || callerProfile?.social_links?.role;
       const isCallerStaff =
-        callerProfile?.username?.toLowerCase() === "jayanthadmin" ||
-        callerProfile?.username?.toLowerCase() === "jayanth" ||
-        callerProfile?.role === "super_admin" ||
-        callerProfile?.role === "admin";
+        callerRole === "super_admin" ||
+        callerRole === "admin";
 
       if (callerMember?.role !== "admin" && !isCallerStaff) {
         return NextResponse.json(
@@ -159,15 +158,14 @@ export async function PATCH(request: NextRequest) {
 
       const { data: callerProfile } = await supabaseAdmin
         .from("profiles")
-        .select("username, role")
+        .select("username, role, social_links")
         .eq("id", effectiveCallerId)
         .maybeSingle();
 
+      const callerRole = callerProfile?.role || callerProfile?.social_links?.role;
       const isCallerStaff =
-        callerProfile?.username?.toLowerCase() === "jayanthadmin" ||
-        callerProfile?.username?.toLowerCase() === "jayanth" ||
-        callerProfile?.role === "super_admin" ||
-        callerProfile?.role === "admin";
+        callerRole === "super_admin" ||
+        callerRole === "admin";
 
       if (callerMember?.role !== "admin" && !isCallerStaff) {
         return NextResponse.json(

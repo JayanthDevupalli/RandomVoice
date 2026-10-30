@@ -16,12 +16,6 @@ function getAdminClient() {
   return anonSupabase;
 }
 
-function isMainAdmin(username?: string): boolean {
-  if (!username) return false;
-  const clean = username.trim().toLowerCase();
-  return clean === "jayanthadmin" || clean === "jayanth";
-}
-
 async function verifyAdminAuth(
   request: NextRequest,
   fallbackUser?: { username?: string; role?: string }
@@ -54,16 +48,6 @@ async function verifyAdminAuth(
           .maybeSingle();
 
         const username = profile?.username || authUser.user_metadata?.username || "";
-        const cleanName = username.trim().toLowerCase();
-        if (cleanName === "jayanthadmin" || cleanName === "jayanth" || isMainAdmin(cleanName)) {
-          return { authorized: true, role: "super_admin", username: username || "jayanthadmin" };
-        }
-
-        const email = (authUser.email || "").toLowerCase();
-        if (email.startsWith("jayanthadmin") || email.startsWith("jayanth")) {
-          return { authorized: true, role: "super_admin", username: username || "jayanthadmin" };
-        }
-
         const dbRole = profile?.role || profile?.social_links?.role;
         if (dbRole === "super_admin" || dbRole === "admin" || dbRole === "manager") {
           return { authorized: true, role: dbRole, username };
@@ -71,48 +55,6 @@ async function verifyAdminAuth(
       }
     } catch (e) {
       console.error("verifyAdminAuth error in admin/rooms:", e);
-    }
-  }
-
-  // Fallback via x-requester headers or query params
-  const reqUsername =
-    request.headers.get("x-requester-username") ||
-    fallbackUser?.username ||
-    request.nextUrl.searchParams.get("requesterUsername") ||
-    undefined;
-
-  const reqRole =
-    request.headers.get("x-requester-role") ||
-    fallbackUser?.role ||
-    request.nextUrl.searchParams.get("requesterRole") ||
-    undefined;
-
-  if (reqUsername) {
-    const cleanUser = reqUsername.trim().toLowerCase();
-    if (isMainAdmin(cleanUser)) {
-      return { authorized: true, role: "super_admin", username: reqUsername };
-    }
-
-    if (reqRole === "admin" || reqRole === "manager" || reqRole === "super_admin") {
-      try {
-        const { data: prof } = await adminClient
-          .from("profiles")
-          .select("*")
-          .ilike("username", reqUsername)
-          .maybeSingle();
-        if (prof) {
-          const isMain = isMainAdmin(prof.username);
-          if (isMain) {
-            return { authorized: true, role: "super_admin", username: prof.username };
-          }
-          const dbRole = prof.role || prof.social_links?.role;
-          if (dbRole === "super_admin" || dbRole === "admin" || dbRole === "manager") {
-            return { authorized: true, role: dbRole, username: prof.username };
-          }
-        }
-      } catch (dbErr) {
-        console.error("verifyAdminAuth rooms fallback DB error:", dbErr);
-      }
     }
   }
 

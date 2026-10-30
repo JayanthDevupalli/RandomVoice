@@ -168,11 +168,10 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
           ? data.card_bg_color
           : (safeSocialLinks?.card_bg_color || data.card_bg_color || "#465B73");
 
-        const cleanName = data.username?.trim().toLowerCase() || "";
         const rawRole = data.role || safeSocialLinks?.role;
-        const userRole = (cleanName === "jayanthadmin" || cleanName === "jayanth")
-          ? "super_admin"
-          : (rawRole || "user");
+        const userRole = (rawRole === "super_admin" || rawRole === "admin" || rawRole === "manager")
+          ? rawRole
+          : "user";
         const resolvedDisplayName = data.display_name || safeSocialLinks?.display_name || data.username || "";
 
         setProfile({
@@ -779,11 +778,7 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
 
                 {/* Avatar with Ring */}
                 {(() => {
-                  const isMainAdminProfile = (
-                    profile.username?.trim().toLowerCase() === "jayanthadmin" ||
-                    profile.username?.trim().toLowerCase() === "jayanth" ||
-                    profile.role === "super_admin"
-                  );
+                  const isMainAdminProfile = profile.role === "super_admin";
                   const profileRole = isMainAdminProfile
                     ? "super_admin"
                     : (profile.role === "admin" ? "admin" : profile.role === "manager" ? "manager" : "user");

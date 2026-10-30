@@ -62,6 +62,18 @@ export function useLiveStats(): LiveStats {
       }, 2000);
     };
 
+    // Instant global presence updates via WebSocket broadcast
+    const presenceChannel = supabase
+      .channel("junctions_global_presence_stats")
+      .on("broadcast", { event: "presence_updated" }, (msg: any) => {
+        const payload = msg?.payload;
+        if (!payload || !isMountedRef.current) return;
+        if (typeof payload.totalOnline === "number") {
+          setTotalOnline(payload.totalOnline);
+        }
+      })
+      .subscribe();
+
     // Set up Supabase Realtime channel for live updates across the whole app
     const channelId = `live_stats_${Math.random().toString(36).substring(2, 9)}`;
     const channel = supabase
@@ -96,12 +108,12 @@ export function useLiveStats(): LiveStats {
     };
     window.addEventListener("yapclub_junction_left", handleJunctionLeft);
 
-    // Fallback polling every 10s (realtime handles immediate changes)
+    // Fallback safety polling every 45s (realtime handles immediate changes)
     const pollInterval = setInterval(() => {
       if (document.visibilityState === "visible") {
         fetchStats();
       }
-    }, 10000);
+    }, 45000);
 
     return () => {
       isMountedRef.current = false;
@@ -110,6 +122,7 @@ export function useLiveStats(): LiveStats {
       window.removeEventListener("focus", handleVisibility);
       window.removeEventListener("visibilitychange", handleVisibility);
       window.removeEventListener("yapclub_junction_left", handleJunctionLeft);
+      supabase.removeChannel(presenceChannel);
       supabase.removeChannel(channel);
     };
   }, [fetchStats]);

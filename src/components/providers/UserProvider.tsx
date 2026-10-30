@@ -31,12 +31,6 @@ export interface UserContextType {
 }
 
 function resolveUserRole(username?: string, dbRole?: string): UserRole {
-  if (username) {
-    const clean = username.trim().toLowerCase();
-    if (clean === "jayanthadmin" || clean === "jayanth") {
-      return "super_admin";
-    }
-  }
   if (dbRole === "super_admin" || dbRole === "admin" || dbRole === "manager") {
     return dbRole;
   }

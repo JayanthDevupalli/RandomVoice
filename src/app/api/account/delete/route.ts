@@ -25,8 +25,13 @@ export async function POST(request: NextRequest) {
     }
 
     // Only allow users to delete their own account (or verified admins)
-    const cleanName = (authUser.user_metadata?.username || "").toLowerCase();
-    const isStaff = cleanName === "jayanthadmin" || cleanName === "jayanth";
+    const { data: callerProfile } = await supabase
+      .from("profiles")
+      .select("role, social_links")
+      .eq("id", authUser.id)
+      .maybeSingle();
+    const callerRole = callerProfile?.role || callerProfile?.social_links?.role;
+    const isStaff = callerRole === "super_admin" || callerRole === "admin";
     if (authUser.id !== userId && !isStaff) {
       return NextResponse.json({ error: "Forbidden: Cannot delete another user's account" }, { status: 403 });
     }

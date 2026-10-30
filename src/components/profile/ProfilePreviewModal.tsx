@@ -416,11 +416,11 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
               // Registered User View
               (() => {
                 const profRole = profile.role || profile.social_links?.role;
-                const isMain = profile.username?.trim().toLowerCase() === "jayanthadmin" || profile.username?.trim().toLowerCase() === "jayanth" || profRole === "super_admin";
+                const isMain = profRole === "super_admin";
                 const modalRole = isMain ? "super_admin" : (profRole === "admin" ? "admin" : profRole === "manager" ? "manager" : participant.userRole || "user");
 
-                const isCallerMain = currentUser?.name?.trim().toLowerCase() === "jayanthadmin" || currentUser?.name?.trim().toLowerCase() === "jayanth" || currentUser?.role === "super_admin";
-                const isCallerStaff = isCallerMain || currentUser?.role === "admin";
+                const isCallerMain = Boolean(currentUser?.isRegistered && currentUser?.role === "super_admin");
+                const isCallerStaff = isCallerMain || Boolean(currentUser?.isRegistered && currentUser?.role === "admin");
                 const canEditName = Boolean(currentUser && (currentUser.id === profile.id || isCallerStaff));
 
                 return (

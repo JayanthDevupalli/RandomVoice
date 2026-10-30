@@ -47,10 +47,8 @@ export function getAdminClient() {
   return anonSupabase;
 }
 
-export function isMainAdmin(username?: string): boolean {
-  if (!username) return false;
-  const clean = username.trim().toLowerCase();
-  return clean === "jayanthadmin" || clean === "jayanth";
+export function isMainAdmin(username?: string, role?: string): boolean {
+  return role === "super_admin";
 }
 
 export async function verifySuperAdminAuth(
@@ -87,16 +85,6 @@ export async function verifySuperAdminAuth(
           .maybeSingle();
 
         const username = profile?.username || authUser.user_metadata?.username || "";
-        const cleanName = username.trim().toLowerCase();
-        if (cleanName === "jayanthadmin" || cleanName === "jayanth" || isMainAdmin(cleanName)) {
-          return { authorized: true, username: username || "jayanthadmin" };
-        }
-
-        const email = (authUser.email || "").toLowerCase();
-        if (email.startsWith("jayanthadmin") || email.startsWith("jayanth")) {
-          return { authorized: true, username: username || "jayanthadmin" };
-        }
-
         const dbRole = profile?.role || profile?.social_links?.role;
         if (dbRole === "super_admin") {
           return { authorized: true, username };
@@ -104,44 +92,6 @@ export async function verifySuperAdminAuth(
       }
     } catch (e) {
       console.warn("verifySuperAdminAuth token check warning:", e);
-    }
-  }
-
-  // Fallback checks via custom headers
-  const reqUsername =
-    request.headers.get("x-requester-username") ||
-    fallbackUser?.username ||
-    request.nextUrl.searchParams.get("requesterUsername") ||
-    undefined;
-
-  const reqRole =
-    request.headers.get("x-requester-role") ||
-    fallbackUser?.role ||
-    request.nextUrl.searchParams.get("requesterRole") ||
-    undefined;
-
-  if (reqUsername) {
-    const cleanUser = reqUsername.trim().toLowerCase();
-    if (isMainAdmin(cleanUser)) {
-      return { authorized: true, username: reqUsername };
-    }
-
-    if (reqRole === "super_admin") {
-      try {
-        const { data: prof } = await adminClient
-          .from("profiles")
-          .select("role, social_links")
-          .ilike("username", reqUsername)
-          .maybeSingle();
-        if (prof) {
-          const dbRole = prof.role || prof.social_links?.role;
-          if (dbRole === "super_admin" || isMainAdmin(reqUsername)) {
-            return { authorized: true, username: reqUsername };
-          }
-        }
-      } catch (dbErr) {
-        console.warn("verifySuperAdminAuth fallback DB warning:", dbErr);
-      }
     }
   }
 

@@ -115,11 +115,10 @@ export default function AdminPortalPage() {
   const [newDisplayNameInput, setNewDisplayNameInput] = useState("");
   const [isSavingName, setIsSavingName] = useState(false);
 
-  // Determine permissions
-  const cleanName = user?.name?.trim().toLowerCase() || "";
-  const isMainAdmin = user?.role === "super_admin" || cleanName === "jayanthadmin" || cleanName === "jayanth";
-  const isStaffAdmin = user?.role === "admin";
-  const isManager = user?.role === "manager";
+  // Determine permissions - strictly require registered authenticated user with verified role
+  const isMainAdmin = Boolean(isRegistered && user && user.role === "super_admin");
+  const isStaffAdmin = Boolean(isRegistered && user && user.role === "admin");
+  const isManager = Boolean(isRegistered && user && user.role === "manager");
   const hasAdminAccess = isMainAdmin || isStaffAdmin || isManager;
 
   // Maintenance Mode hook & local state
@@ -1018,8 +1017,7 @@ export default function AdminPortalPage() {
             {!isLoadingData && (
               <div className="grid grid-cols-1 gap-3 md:hidden">
                 {filteredUsers.map((u) => {
-                const cleanU = (u.username || "").trim().toLowerCase();
-                const isThisUserMainAdmin = cleanU === "jayanthadmin" || cleanU === "jayanth";
+                const isThisUserMainAdmin = u.role === "super_admin";
 
                 return (
                   <div
@@ -1196,8 +1194,7 @@ export default function AdminPortalPage() {
                   </thead>
                   <tbody className="divide-y divide-white/5">
                     {filteredUsers.map((u) => {
-                      const cleanU = (u.username || "").trim().toLowerCase();
-                      const isThisUserMainAdmin = cleanU === "jayanthadmin" || cleanU === "jayanth";
+                      const isThisUserMainAdmin = u.role === "super_admin";
 
                       return (
                         <tr key={u.id} className="hover:bg-white/[0.02] transition-colors">
