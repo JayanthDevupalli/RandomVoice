@@ -195,14 +195,13 @@ export const JunctionCard = React.memo(
               <div className="flex items-center gap-2 min-w-0">
                 <div className="flex items-center -space-x-1.5 shrink-0">
                   {junction.participants.slice(0, 3).map((p, idx) => {
-                    const isMod = p.role === "moderator";
                     const userRole = p.userRole;
-                    const badgeRole = userRole && userRole !== "user" ? userRole : isMod ? "moderator" : undefined;
+                    const badgeRole = userRole && userRole !== "user" ? userRole : undefined;
                     return (
                       <div
                         key={p.id || idx}
                         className="relative rounded-full ring-2 ring-[#12131A] shrink-0"
-                        title={`${p.name}${isMod ? " (Host)" : ""}${p.isSpeaking ? " (Speaking)" : ""}`}
+                        title={`${p.name}${p.isSpeaking ? " (Speaking)" : ""}`}
                       >
                         <UserAvatar
                           avatar={p.avatar}
@@ -226,7 +225,13 @@ export const JunctionCard = React.memo(
                     {firstParticipant?.name}
                   </span>
                   <span className="text-[10.5px] text-slate-400 shrink-0">
-                    {firstParticipant?.role === "moderator" ? "Host" : "Speaker"}
+                    {firstParticipant?.userRole === "super_admin"
+                      ? "Founder"
+                      : firstParticipant?.userRole === "admin"
+                      ? "Admin"
+                      : firstParticipant?.userRole === "manager"
+                      ? "Manager"
+                      : "Speaker"}
                   </span>
                 </div>
               </div>

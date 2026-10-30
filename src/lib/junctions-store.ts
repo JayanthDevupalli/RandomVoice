@@ -89,7 +89,7 @@ function rowToJunction(
     createdAt: row.created_at,
     isCustom: row.is_custom,
     creatorId: row.creator_id || undefined,
-    moderatorIdentity: row.moderator_identity,
+    moderatorIdentity: participants.length === 0 ? "" : row.moderator_identity,
     isLocked: row.is_locked,
     bannedIdentities: row.banned_identities || [],
     participants: participants.map((p) => rowToParticipant(p, roleMap, profileMap)),
@@ -311,25 +311,28 @@ async function syncCount(junctionId: string) {
     .select("*", { count: "exact", head: true })
     .eq("junction_id", junctionId);
 
+  const newCount = count || 0;
+  const updatePayload: Record<string, any> = { current_count: newCount };
+  if (newCount === 0) {
+    updatePayload.moderator_identity = "";
+  }
+
   await supabase
     .from("junctions")
-    .update({ current_count: count || 0 })
+    .update(updatePayload)
     .eq("id", junctionId);
 }
 
 // ─── Touch Heartbeat to Keep Active Participants Fresh ─────────────────────────
 
+const participantHeartbeats = new Map<string, number>();
+
 export async function touchParticipantHeartbeat(junctionId: string, identity: string) {
   if (!junctionId || !identity) return;
-  const now = Date.now();
-  const clean = identity.trim();
-  try {
-    await supabase
-      .from("junction_participants")
-      .update({ joined_at: now })
-      .eq("junction_id", junctionId)
-      .or(`identity.ilike.${clean},name.ilike.${clean},id.eq.${clean}`);
-  } catch {}
+  const key = `${junctionId}:${identity.trim().toLowerCase()}`;
+  participantHeartbeats.set(key, Date.now());
+  // Notice: We intentionally do NOT mutate joined_at in the database.
+  // joined_at must remain the immutable arrival timestamp for sequential first-come first-served seating.
 }
 
 // ─── Fast In-Memory Cache for Lobby ──────────────────────────────────────────
@@ -455,11 +458,14 @@ export async function getAllJunctions(): Promise<Junction[]> {
       continue;
     }
 
-    // Only purge ghosts if participant heartbeat is stale (> 2 mins) AND LiveKit actively returned active rooms
-    const timeSinceHeartbeat = now - (p.joined_at || 0);
-    if (timeSinceHeartbeat > STALE_LOBBY_PURGE_MS && activeRooms !== null && activeRooms.size > 0) {
-      const roomParticipantCount = activeRooms.get(p.junction_id);
-      if (roomParticipantCount === undefined || roomParticipantCount === 0) {
+    // Purge ghost participants if room is empty in LiveKit (grace period of 20s after join)
+    const timeSinceJoin = now - (p.joined_at || 0);
+    const lastHb = participantHeartbeats.get(`${p.junction_id}:${p.identity.toLowerCase()}`) || (p.joined_at || 0);
+    const timeSinceHb = now - lastHb;
+
+    if (activeRooms !== null && timeSinceJoin > 20000) {
+      const roomCount = activeRooms.get(p.junction_id) ?? 0;
+      if (roomCount === 0 || timeSinceHb > 45000) {
         supabase.from("junction_participants").delete().eq("id", p.id).then();
         junctionsNeedingSync.add(p.junction_id);
         continue;
@@ -595,11 +601,24 @@ export async function addParticipantToJunction(
   }
 
   // 0% Ghosting Guarantee: PREEMPTIVELY remove this identity from ALL OTHER junctions before joining this one.
+  const { data: prevRows } = await supabase
+    .from("junction_participants")
+    .select("junction_id")
+    .or(`identity.ilike.${cleanParticipantIdentity},name.ilike.${cleanParticipantIdentity}`)
+    .neq("junction_id", junctionId);
+
   await supabase
     .from("junction_participants")
     .delete()
-    .eq("identity", participant.identity)
+    .or(`identity.ilike.${cleanParticipantIdentity},name.ilike.${cleanParticipantIdentity}`)
     .neq("junction_id", junctionId);
+
+  if (prevRows && prevRows.length > 0) {
+    const prevJunctionIds = Array.from(new Set(prevRows.map((r) => r.junction_id)));
+    prevJunctionIds.forEach((pId) => {
+      syncCount(pId).catch(() => {});
+    });
+  }
 
   const existing = junction.participants.find(
     (p) => (p.identity || "").trim().toLowerCase() === cleanParticipantIdentity
@@ -616,19 +635,6 @@ export async function addParticipantToJunction(
     return { success: false, error: "This room is locked by the moderator." };
   }
 
-  // Dynamic host assignment: first person to join an empty room becomes the moderator/host.
-  const isRoomEmpty = junction.participants.length === 0;
-  const currentModPresent = junction.participants.some((p) => p.role === "moderator");
-  
-  let isMod = false;
-  if (isCreator) {
-    isMod = true;
-  } else if (isAlreadyPresent && existing?.role === "moderator") {
-    isMod = true;
-  } else if (isRoomEmpty || !currentModPresent) {
-    isMod = true;
-  }
-
   // Determine avatar and cardBgColor from participant or existing
   const resolvedAvatar = participant.avatar || existing?.avatar || "zap";
   const finalBgColor = participant.cardBgColor || existing?.cardBgColor || "#465B73";
@@ -641,12 +647,13 @@ export async function addParticipantToJunction(
   );
 
   const participantId = existing?.id || ("p_" + Date.now() + "_" + Math.random().toString(36).substr(2, 5));
-  const newRole = isMod ? "moderator" : (existing?.role || participant.role || "speaker");
+  // All room members are equal speakers; no room host concept
+  const newRole = participant.role || existing?.role || "speaker";
   const newMuted = shouldKeepModMute ? true : (existing?.isMuted !== undefined ? existing.isMuted : (participant.isMuted !== undefined ? participant.isMuted : true));
   const joinedAtTime = existing?.joinedAt || Date.now();
   const newCount = isAlreadyPresent ? junction.participants.length : junction.participants.length + 1;
 
-  // Execute database writes concurrently: upsert participant, remove ghost records, update count & moderator
+  // Execute database writes concurrently: upsert participant, remove ghost records, update count
   const [upsertRes] = await Promise.all([
     supabase.from("junction_participants").upsert(
       {
@@ -675,7 +682,6 @@ export async function addParticipantToJunction(
       .from("junctions")
       .update({
         current_count: newCount,
-        ...(isMod && junction.moderatorIdentity !== participant.identity ? { moderator_identity: participant.identity } : {}),
       })
       .eq("id", junctionId),
   ]);
@@ -719,7 +725,7 @@ export async function addParticipantToJunction(
     ...junction,
     currentCount: updatedParticipants.length,
     participants: updatedParticipants,
-    moderatorIdentity: isMod ? participant.identity : junction.moderatorIdentity,
+    moderatorIdentity: "",
   };
 
   return { success: true, junction: updatedJunction };
@@ -730,6 +736,8 @@ export async function removeParticipantFromJunction(
   identity: string,
   extra?: { identities?: string[]; name?: string; participantId?: string; userId?: string }
 ) {
+  invalidateJunctionsCache();
+
   const targetSet = new Set<string>();
   if (identity) targetSet.add(identity.trim());
   if (extra?.name) targetSet.add(extra.name.trim());
@@ -778,26 +786,29 @@ export async function removeParticipantFromJunction(
     }
   }
 
+  // Preemptively purge candidate identities from any other rooms as well to eliminate ghosts completely
+  const candidates = Array.from(targetSet).filter(Boolean);
+  if (candidates.length > 0) {
+    for (const c of candidates) {
+      supabase
+        .from("junction_participants")
+        .delete()
+        .or(`identity.ilike.${c},name.ilike.${c}`)
+        .then();
+    }
+  }
+
   await syncCount(junctionId);
 
-  // Check if any moderators are left — if none, promote oldest remaining
+  // Clear moderator_identity if room is empty
   const junction = await fetchJunctionWithParticipants(junctionId);
-  if (!junction) return;
-
-  const modsLeft = junction.participants.filter(p => p.role === "moderator");
-  if (modsLeft.length === 0 && junction.participants.length > 0) {
-    const newMod = junction.participants[0];
-    await supabase
-      .from("junction_participants")
-      .update({ role: "moderator" })
-      .eq("junction_id", junctionId)
-      .eq("identity", newMod.identity);
-
+  if (junction && junction.participants.length === 0) {
     await supabase
       .from("junctions")
-      .update({ moderator_identity: newMod.identity })
+      .update({ moderator_identity: "", current_count: 0 })
       .eq("id", junctionId);
   }
+
   invalidateJunctionsCache();
 }
 
@@ -876,11 +887,17 @@ export async function moderateParticipant(
   const targetRole: UserRole = target.userRole || resolvePlatformRole(target.identity);
 
   // Hierarchy rules for moderating:
-  // 1. Only official Staff (Managers, Admins, Main Admin) can kick or ban participants. Room hosts/regular users cannot force kick.
-  if ((action === "kick" || action === "ban") && !isCallerManager) {
+  // 1. Only official Admins can ban participants. Managers CANNOT suspend or ban users.
+  if (action === "ban" && !isCallerAdmin) {
     return {
       success: false,
-      error: "Unauthorized: Only official Staff (Managers, Admins, Main Admin) can kick or ban participants.",
+      error: "Unauthorized: Only Admins can ban participants. Managers do not have permission to suspend or ban users.",
+    };
+  }
+  if (action === "kick" && !isCallerManager) {
+    return {
+      success: false,
+      error: "Unauthorized: Staff privileges required to kick participants.",
     };
   }
 
@@ -960,52 +977,13 @@ export async function moderateParticipant(
 
 
 export async function claimModeratorRole(
-  junctionId: string,
-  identity: string
+  _junctionId: string,
+  _identity: string
 ): Promise<{ success: boolean; error?: string; junction?: Junction }> {
-  const junction = await fetchJunctionWithParticipants(junctionId);
-
-  if (!junction) {
-    return { success: false, error: "Junction not found" };
-  }
-
-  const cleanId = (identity || "").trim().toLowerCase();
-  const participant = junction.participants.find(
-    (p) => (p.identity || "").trim().toLowerCase() === cleanId
-  );
-  if (!participant) {
-    return { success: false, error: "Participant not found in junction" };
-  }
-
-  if (participant.role === "moderator") {
-    return { success: true, junction };
-  }
-
-  // Check 3-minute timer (180,000 ms with 5s clock drift tolerance)
-  const timeInRoom = Date.now() - (participant.joinedAt || Date.now());
-  const MIN_CLAIM_TIME_MS = 175000;
-
-  if (timeInRoom < MIN_CLAIM_TIME_MS) {
-    const remainingSecs = Math.ceil((180000 - timeInRoom) / 1000);
-    return {
-      success: false,
-      error: `You must wait 3 minutes before claiming Moderator privileges (${remainingSecs}s remaining).`,
-    };
-  }
-
-  // Promote participant to moderator
-  const { error: updateError } = await supabase
-    .from("junction_participants")
-    .update({ role: "moderator" })
-    .eq("id", participant.id);
-
-  if (updateError) {
-    console.error("Failed to promote to moderator:", updateError);
-    return { success: false, error: "Failed to promote to moderator" };
-  }
-
-  const updated = await fetchJunctionWithParticipants(junctionId);
-  return { success: true, junction: updated };
+  return {
+    success: false,
+    error: "Room Host concept has been decommissioned. All participants are equal speakers.",
+  };
 }
 
 export async function updateParticipantProfile(
@@ -1107,11 +1085,15 @@ export async function toggleRoomLock(
   }
 
   const cleanModId = (moderatorIdentity || "").trim().toLowerCase();
-  const modParticipant = junction.participants.find(
-    (p) => (p.identity || "").trim().toLowerCase() === cleanModId
+  const callerRole = resolvePlatformRole(moderatorIdentity);
+  const isCreator = Boolean(
+    junction.creatorId &&
+    cleanModId === junction.creatorId.toLowerCase()
   );
-  if (!modParticipant || modParticipant.role !== "moderator") {
-    return { success: false, error: "Unauthorized: Only Moderators can lock/unlock the room" };
+  const isStaff = callerRole === "super_admin" || callerRole === "admin" || callerRole === "manager";
+
+  if (!isCreator && !isStaff) {
+    return { success: false, error: "Unauthorized: Only the room creator or platform staff can lock/unlock the room" };
   }
 
   if (!junction.isCustom) {
@@ -1169,11 +1151,19 @@ export async function deleteJunction(
   return false;
 }
 
+// In-memory room reports tracker: Map<room:target, Array<{ reporter: string; reason: string; timestamp: number }>>
+const roomReportLog = new Map<string, Array<{ reporter: string; reason: string; timestamp: number }>>();
+
 export async function reportParticipant(
   junctionId: string,
   reporterIdentity: string,
-  targetIdentity: string
+  targetIdentity: string,
+  reason?: string
 ): Promise<{ success: boolean; error?: string; junction?: Junction; banned?: boolean }> {
+  if (!reason || typeof reason !== "string" || !reason.trim()) {
+    return { success: false, error: "Please enter a reason for reporting this participant." };
+  }
+
   const junction = await fetchJunctionWithParticipants(junctionId);
   if (!junction) {
     return { success: false, error: "Junction not found" };
@@ -1193,18 +1183,58 @@ export async function reportParticipant(
     return { success: false, error: "Cannot report yourself" };
   }
 
-  const currentReports = target.reportedBy || [];
-  if (currentReports.some((r) => (r || "").trim().toLowerCase() === cleanReporterId)) {
-    return { success: false, error: "You have already reported this user" };
+  const reportKey = `${junctionId}:${cleanTargetId}`;
+  const existingReports = roomReportLog.get(reportKey) || [];
+
+  if (existingReports.some((r) => r.reporter.toLowerCase() === cleanReporterId)) {
+    return { success: false, error: "You have already reported this user in this room." };
   }
 
-  const newReports = [...currentReports, reporterIdentity];
+  const reportEntry = {
+    reporter: reporterIdentity,
+    reason: reason.trim(),
+    timestamp: Date.now(),
+  };
+  const newReports = [...existingReports, reportEntry];
+  roomReportLog.set(reportKey, newReports);
+
+  // Persist report record to target user's profile social_links for admin review
+  try {
+    const { data: prof } = await supabase
+      .from("profiles")
+      .select("id, social_links")
+      .ilike("username", target.identity)
+      .maybeSingle();
+
+    if (prof) {
+      const links = prof.social_links || {};
+      const profileReports = Array.isArray(links.reports) ? links.reports : [];
+      profileReports.push({
+        reporter: reporterIdentity,
+        reason: reason.trim(),
+        junctionId,
+        junctionName: junction.name,
+        timestamp: Date.now(),
+      });
+      await supabase
+        .from("profiles")
+        .update({
+          social_links: {
+            ...links,
+            reports: profileReports,
+            last_reported_at: Date.now(),
+          },
+        })
+        .eq("id", prof.id);
+    }
+  } catch (err) {
+    console.warn("Failed to persist report to profile:", err);
+  }
 
   // Require majority of the room to ban (min 2 reports for small rooms)
   const requiredReports = Math.max(2, Math.ceil(junction.participants.length / 2));
 
   if (newReports.length >= requiredReports) {
-    // Execute ban directly without requiring a specific moderator auth
     const currentBanned = junction.bannedIdentities || [];
     if (!currentBanned.some((b) => (b || "").trim().toLowerCase() === cleanTargetId)) {
       currentBanned.push(target.identity);
@@ -1224,13 +1254,7 @@ export async function reportParticipant(
     const updated = await fetchJunctionWithParticipants(junctionId);
     return { success: true, junction: updated, banned: true };
   } else {
-    await supabase
-      .from("junction_participants")
-      .update({ reported_by: newReports })
-      .eq("id", target.id);
-      
-    const updated = await fetchJunctionWithParticipants(junctionId);
-    return { success: true, junction: updated, banned: false };
+    return { success: true, junction, banned: false };
   }
 }
 

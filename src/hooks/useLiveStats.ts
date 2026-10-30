@@ -89,21 +89,27 @@ export function useLiveStats(): LiveStats {
       }
     };
     window.addEventListener("focus", handleVisibility);
-    document.addEventListener("visibilitychange", handleVisibility);
+    window.addEventListener("visibilitychange", handleVisibility);
 
-    // Fallback polling every 30s (realtime handles immediate changes)
+    const handleJunctionLeft = () => {
+      fetchStats();
+    };
+    window.addEventListener("yapclub_junction_left", handleJunctionLeft);
+
+    // Fallback polling every 10s (realtime handles immediate changes)
     const pollInterval = setInterval(() => {
       if (document.visibilityState === "visible") {
         fetchStats();
       }
-    }, 30000);
+    }, 10000);
 
     return () => {
       isMountedRef.current = false;
       if (debounceTimer) clearTimeout(debounceTimer);
       clearInterval(pollInterval);
       window.removeEventListener("focus", handleVisibility);
-      document.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("yapclub_junction_left", handleJunctionLeft);
       supabase.removeChannel(channel);
     };
   }, [fetchStats]);

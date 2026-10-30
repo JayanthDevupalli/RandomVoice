@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
 import { useUser } from "@/hooks/useUser";
-import type { MaintenanceData } from "@/app/api/maintenance/route";
+import type { MaintenanceData } from "@/lib/maintenance";
 
 const DEFAULT_MAINTENANCE_DATA: MaintenanceData = {
   enabled: false,

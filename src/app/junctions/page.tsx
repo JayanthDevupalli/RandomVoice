@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
+import Image from "next/image";
 import { useGuestUser } from "@/hooks/useGuestUser";
 import { useUser } from "@/hooks/useUser";
 import { Navbar } from "@/components/layout/Navbar";
@@ -22,7 +22,6 @@ import {
   Coffee,
   Music,
   Languages,
-  Mic,
   MapPin,
   Compass,
   Shield,
@@ -55,8 +54,6 @@ export default function JunctionsPage() {
     guest,
     hasCompletedOnboarding,
     isLoaded,
-    updateGuest,
-    clearProfile,
   } = useGuestUser();
 
   const [junctions, setJunctions] = useState<Junction[]>([]);
@@ -66,6 +63,14 @@ export default function JunctionsPage() {
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [activeTab, setActiveTab] = useState<"public" | "private">("public");
+
+  const userRef = useRef(user);
+  const guestRef = useRef(guest);
+
+  useEffect(() => {
+    userRef.current = user;
+    guestRef.current = guest;
+  }, [user, guest]);
 
   // Hydrate cached lobby data cleanly on client mount without hydration mismatch
   useEffect(() => {
@@ -89,7 +94,7 @@ export default function JunctionsPage() {
     }
   }, [isLoaded, hasCompletedOnboarding, router]);
 
-  const fetchJunctions = async (signal?: AbortSignal) => {
+  const fetchJunctions = useCallback(async (signal?: AbortSignal) => {
     try {
       const res = await fetch("/api/junctions", { signal, cache: "no-store" });
       const data = await res.json();
@@ -108,10 +113,11 @@ export default function JunctionsPage() {
           sessionStorage.setItem("yapclub_cached_junctions", JSON.stringify(data.junctions));
         } catch { }
       }
-    } catch (e: any) {
-      if (e.name !== "AbortError") console.warn("Failed to fetch junctions:", e);
+    } catch (e: unknown) {
+      const err = e as { name?: string };
+      if (err?.name !== "AbortError") console.warn("Failed to fetch junctions:", e);
     }
-  };
+  }, []);
 
   useEffect(() => {
     let abortController: AbortController | null = null;
@@ -123,10 +129,66 @@ export default function JunctionsPage() {
 
       await fetchJunctions(abortController.signal);
       setIsLoading(false);
-      timeoutId = setTimeout(poll, 30000);
+      timeoutId = setTimeout(poll, 10000);
     };
 
     poll();
+
+    // Instant local cleanup & fetch when user leaves a junction
+    const handleJunctionLeft = (e: Event) => {
+      const customEvent = e as CustomEvent<{ junctionId?: string }>;
+      const leftId = customEvent.detail?.junctionId;
+      if (leftId) {
+        const currentUser = userRef.current;
+        const currentGuest = guestRef.current;
+        const myIdentities = new Set(
+          [
+            currentUser?.username,
+            currentUser?.name,
+            currentUser?.id,
+            currentGuest?.username,
+            currentGuest?.name,
+            currentGuest?.id,
+          ]
+            .filter(Boolean)
+            .map((s) => (s as string).toLowerCase().trim())
+        );
+
+        setJunctions((prev) => {
+          const updated = prev.map((j) => {
+            if (j.id === leftId) {
+              const remaining = (j.participants || []).filter((p) => {
+                const pIdent = (p.identity || "").toLowerCase().trim();
+                const pName = (p.name || "").toLowerCase().trim();
+                const pUser = (p.username || "").toLowerCase().trim();
+                const pId = (p.id || "").toLowerCase().trim();
+                return (
+                  !myIdentities.has(pIdent) &&
+                  !myIdentities.has(pName) &&
+                  !myIdentities.has(pUser) &&
+                  !myIdentities.has(pId)
+                );
+              });
+              return {
+                ...j,
+                participants: remaining,
+                currentCount: remaining.length,
+                moderatorIdentity: remaining.length === 0 ? "" : j.moderatorIdentity,
+              };
+            }
+            return j;
+          });
+          try {
+            sessionStorage.setItem("yapclub_cached_junctions", JSON.stringify(updated));
+            const newTotal = updated.reduce((acc, it) => acc + (it.participants?.length || it.currentCount || 0), 0);
+            sessionStorage.setItem("yapclub_cached_total_online", String(newTotal));
+          } catch {}
+          return updated;
+        });
+      }
+      fetchJunctions();
+    };
+    window.addEventListener("yapclub_junction_left", handleJunctionLeft);
 
     // Debounced Realtime updates when users join/leave any room or rooms change
     let debounceTimer: NodeJS.Timeout | null = null;
@@ -166,9 +228,10 @@ export default function JunctionsPage() {
       if (debounceTimer) clearTimeout(debounceTimer);
       clearTimeout(timeoutId);
       window.removeEventListener("focus", handleFocus);
+      window.removeEventListener("yapclub_junction_left", handleJunctionLeft);
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [fetchJunctions]);
 
   const handleManualRefresh = async () => {
     await fetchJunctions();
@@ -194,12 +257,12 @@ export default function JunctionsPage() {
       const matchesCategory =
         activeTab === "private"
           ? selectedCategory === "all" || j.category === selectedCategory
-          : selectedCategory === "all" || j.tags.includes(selectedCategory); // public filters match region tag
+          : selectedCategory === "all" || (Array.isArray(j.tags) && j.tags.includes(selectedCategory)); // public filters match region tag
 
       const matchesSearch =
-        j.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        j.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        j.tags.some((t) => t.toLowerCase().includes(searchQuery.toLowerCase()));
+        (j.name || "").toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (j.description || "").toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (Array.isArray(j.tags) && j.tags.some((t) => t.toLowerCase().includes(searchQuery.toLowerCase())));
       return matchesCategory && matchesSearch;
     })
     .sort((a, b) => (b.participants?.length ?? b.currentCount) - (a.participants?.length ?? a.currentCount));
@@ -212,7 +275,14 @@ export default function JunctionsPage() {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center px-4 text-slate-400">
         <div className="h-12 w-auto flex items-center justify-center animate-pulse mb-3">
-          <img src="/webIcon.png" alt="YapClub" className="h-10 w-auto object-contain filter drop-shadow-[0_4px_16px_rgba(99,102,241,0.4)]" />
+          <Image
+            src="/webIcon.png"
+            alt="YapClub"
+            width={40}
+            height={40}
+            className="h-10 w-auto object-contain filter drop-shadow-[0_4px_16px_rgba(99,102,241,0.4)]"
+            priority
+          />
         </div>
         <p className="text-xs font-medium tracking-wide text-slate-400">Loading YapClub...</p>
       </div>

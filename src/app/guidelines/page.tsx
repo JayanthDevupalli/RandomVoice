@@ -47,7 +47,7 @@ export default function GuidelinesPage() {
               <h2 className="text-xl font-bold text-white">1. Be Polite and Respectful</h2>
             </div>
             <p className="text-slate-400 text-sm leading-relaxed">
-              Treat everyone with respect. Disagreements happen, but personal attacks, harassment, hate speech, and bullying are completely unacceptable. Remember there's a real person behind every avatar.
+              Treat everyone with respect. Disagreements happen, but personal attacks, harassment, hate speech, and bullying are completely unacceptable. Remember there&apos;s a real person behind every avatar.
             </p>
           </section>
 

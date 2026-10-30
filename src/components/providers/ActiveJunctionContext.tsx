@@ -96,16 +96,20 @@ export function ActiveJunctionProvider({ children }: { children: React.ReactNode
 
   // Completely leave the junction
   const leaveJunction = useCallback(() => {
+    const leftId = activeJunctionId;
     isMinimizingRef.current = false;
     setActiveJunctionId(null);
     setIsMinimized(false);
     if (typeof window !== "undefined") {
       sessionStorage.removeItem("yapclub_active_junction_id");
+      window.dispatchEvent(
+        new CustomEvent("yapclub_junction_left", { detail: { junctionId: leftId } })
+      );
     }
     if (pathname.startsWith("/junction/")) {
       router.replace("/junctions");
     }
-  }, [pathname, router, setActiveJunctionId]);
+  }, [pathname, router, setActiveJunctionId, activeJunctionId]);
 
   // Auto-sync minimization with current route:
   useEffect(() => {

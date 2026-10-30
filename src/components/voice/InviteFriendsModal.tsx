@@ -52,117 +52,144 @@ export function InviteFriendsModal({
   }, []);
 
   useEffect(() => {
-    if (!isOpen || !currentUserId) return;
+    if (!isOpen) return;
 
     let isMounted = true;
 
     async function loadContacts() {
       setIsLoading(true);
       try {
-        // 1. Fetch blocked users to exclude
-        const { blockedByMeIds, blockedMeIds } = await socialService.getBlockLists(currentUserId!);
-        const blockedSet = new Set([...blockedByMeIds, ...blockedMeIds]);
-
-        // 2. Fetch people following me
-        const { data: followers } = await supabase
-          .from("connections")
-          .select(`
-            requester:profiles!connections_requester_id_fkey(id, username, avatar, bio)
-          `)
-          .eq("receiver_id", currentUserId)
-          .eq("status", "accepted");
-
-        // 3. Fetch people I follow
-        const { data: following } = await supabase
-          .from("connections")
-          .select(`
-            receiver:profiles!connections_receiver_id_fkey(id, username, avatar, bio)
-          `)
-          .eq("requester_id", currentUserId)
-          .eq("status", "accepted");
-
-        // 4. Fetch recent direct conversations
-        const { data: myConvs } = await supabase
-          .from("conversation_members")
-          .select("conversation_id, conversations!inner(type)")
-          .eq("user_id", currentUserId)
-          .eq("conversations.type", "direct");
-
-        let convUserMap = new Map<string, any>();
-        if (myConvs && myConvs.length > 0) {
-          const convIds = myConvs.map((c: any) => c.conversation_id);
-          const { data: otherMembers } = await supabase
-            .from("conversation_members")
-            .select(`
-              user_id,
-              profiles:profiles!conversation_members_user_id_fkey(id, username, avatar, bio)
-            `)
-            .in("conversation_id", convIds)
-            .neq("user_id", currentUserId);
-
-          if (otherMembers) {
-            otherMembers.forEach((m: any) => {
-              const p = Array.isArray(m.profiles) ? m.profiles[0] : m.profiles;
-              if (p && !blockedSet.has(p.id)) {
-                convUserMap.set(p.id, p);
-              }
-            });
-          }
-        }
-
         const map = new Map<string, InviteContact>();
 
-        // Add following
-        if (following) {
-          following.forEach((f: any) => {
-            const p = Array.isArray(f.receiver) ? f.receiver[0] : f.receiver;
-            if (p && !blockedSet.has(p.id)) {
-              map.set(p.id, {
-                id: p.id,
-                username: p.username,
-                avatar: p.avatar,
-                bio: p.bio,
-                relationshipTag: "Following",
+        if (currentUserId) {
+          // 1. Fetch blocked users to exclude
+          const { blockedByMeIds, blockedMeIds } = await socialService.getBlockLists(currentUserId);
+          const blockedSet = new Set([...blockedByMeIds, ...blockedMeIds]);
+
+          // 2. Fetch people following me
+          const { data: followers } = await supabase
+            .from("connections")
+            .select(`
+              requester:profiles!connections_requester_id_fkey(id, username, avatar, bio)
+            `)
+            .eq("receiver_id", currentUserId)
+            .eq("status", "accepted");
+
+          // 3. Fetch people I follow
+          const { data: following } = await supabase
+            .from("connections")
+            .select(`
+              receiver:profiles!connections_receiver_id_fkey(id, username, avatar, bio)
+            `)
+            .eq("requester_id", currentUserId)
+            .eq("status", "accepted");
+
+          // 4. Fetch recent direct conversations
+          const { data: myConvs } = await supabase
+            .from("conversation_members")
+            .select("conversation_id, conversations!inner(type)")
+            .eq("user_id", currentUserId)
+            .eq("conversations.type", "direct");
+
+          let convUserMap = new Map<string, any>();
+          if (myConvs && myConvs.length > 0) {
+            const convIds = myConvs.map((c: any) => c.conversation_id);
+            const { data: otherMembers } = await supabase
+              .from("conversation_members")
+              .select(`
+                user_id,
+                profiles:profiles!conversation_members_user_id_fkey(id, username, avatar, bio)
+              `)
+              .in("conversation_id", convIds)
+              .neq("user_id", currentUserId);
+
+            if (otherMembers) {
+              otherMembers.forEach((m: any) => {
+                const p = Array.isArray(m.profiles) ? m.profiles[0] : m.profiles;
+                if (p && !blockedSet.has(p.id)) {
+                  convUserMap.set(p.id, p);
+                }
               });
             }
-          });
-        }
+          }
 
-        // Add followers
-        if (followers) {
-          followers.forEach((f: any) => {
-            const p = Array.isArray(f.requester) ? f.requester[0] : f.requester;
-            if (p && !blockedSet.has(p.id)) {
-              if (map.has(p.id)) {
-                map.set(p.id, {
-                  ...map.get(p.id)!,
-                  relationshipTag: "Mutual",
-                });
-              } else {
+          // Add following
+          if (following) {
+            following.forEach((f: any) => {
+              const p = Array.isArray(f.receiver) ? f.receiver[0] : f.receiver;
+              if (p && !blockedSet.has(p.id)) {
                 map.set(p.id, {
                   id: p.id,
                   username: p.username,
                   avatar: p.avatar,
                   bio: p.bio,
-                  relationshipTag: "Follower",
+                  relationshipTag: "Following",
                 });
               }
+            });
+          }
+
+          // Add followers
+          if (followers) {
+            followers.forEach((f: any) => {
+              const p = Array.isArray(f.requester) ? f.requester[0] : f.requester;
+              if (p && !blockedSet.has(p.id)) {
+                if (map.has(p.id)) {
+                  map.set(p.id, {
+                    ...map.get(p.id)!,
+                    relationshipTag: "Mutual",
+                  });
+                } else {
+                  map.set(p.id, {
+                    id: p.id,
+                    username: p.username,
+                    avatar: p.avatar,
+                    bio: p.bio,
+                    relationshipTag: "Follower",
+                  });
+                }
+              }
+            });
+          }
+
+          // Add recent DM contacts
+          convUserMap.forEach((p, id) => {
+            if (!map.has(id)) {
+              map.set(id, {
+                id: p.id,
+                username: p.username,
+                avatar: p.avatar,
+                bio: p.bio,
+                relationshipTag: "Recent Chat",
+              });
             }
           });
         }
 
-        // Add recent DM contacts
-        convUserMap.forEach((p, id) => {
-          if (!map.has(id)) {
-            map.set(id, {
-              id: p.id,
-              username: p.username,
-              avatar: p.avatar,
-              bio: p.bio,
-              relationshipTag: "Recent Chat",
+        // If no personal connections yet or guest, load popular community members so the list is always populated
+        if (map.size === 0) {
+          const query = supabase
+            .from("profiles")
+            .select("id, username, avatar, bio")
+            .limit(10);
+          if (currentUserId) {
+            query.neq("id", currentUserId);
+          }
+          const { data: popularProfiles } = await query;
+          if (popularProfiles) {
+            popularProfiles.forEach((p: any) => {
+              if (p && !map.has(p.id)) {
+                map.set(p.id, {
+                  id: p.id,
+                  username: p.username,
+                  avatar: p.avatar,
+                  bio: p.bio,
+                  relationshipTag: "Community",
+                });
+              }
             });
           }
-        });
+        }
 
         if (isMounted) {
           setContacts(Array.from(map.values()));

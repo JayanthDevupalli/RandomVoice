@@ -9,6 +9,7 @@ import { UserAvatar } from "@/components/ui/UserAvatar";
 import {
   Shield,
   ShieldCheck,
+  ShieldAlert,
   Crown,
   Ban,
   Trash2,
@@ -31,6 +32,7 @@ import {
   ChevronDown,
   ChevronUp,
   X,
+  Flag,
 } from "lucide-react";
 import Link from "next/link";
 import { useMaintenanceMode } from "@/hooks/useMaintenanceMode";
@@ -64,8 +66,10 @@ interface AdminRoomRecord {
     name: string;
     avatar: string;
     role: string;
+    reportedBy?: string[];
   }>;
   createdAt: number;
+  bannedIdentities?: string[];
 }
 
 export default function AdminPortalPage() {
@@ -77,7 +81,7 @@ export default function AdminPortalPage() {
     setMounted(true);
   }, []);
 
-  const [activeTab, setActiveTab] = useState<"users" | "rooms" | "stats">("users");
+  const [activeTab, setActiveTab] = useState<"users" | "rooms" | "desk" | "stats">("users");
   const [users, setUsers] = useState<AdminUserRecord[]>([]);
   const [rooms, setRooms] = useState<AdminRoomRecord[]>([]);
   const [isLoadingData, setIsLoadingData] = useState(true);
@@ -88,6 +92,8 @@ export default function AdminPortalPage() {
   const [userSearch, setUserSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState<"all" | UserRole | "banned">("all");
   const [roomFilter, setRoomFilter] = useState<"all" | "locked" | "public">("all");
+  const [deskSubFilter, setDeskSubFilter] = useState<"all" | "platform" | "rooms" | "reports">("all");
+  const [deskSearch, setDeskSearch] = useState("");
 
   // Confirmation Modals
   const [pendingAction, setPendingAction] = useState<{
@@ -224,6 +230,7 @@ export default function AdminPortalPage() {
       return;
     }
     fetchData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLoaded, user?.id, hasAdminAccess, isRegistered]);
 
   // Handle Role Change
@@ -242,6 +249,7 @@ export default function AdminPortalPage() {
     showToast("success", `Role updated to ${newRole}`);
 
     try {
+      setIsSubmittingAction(true);
       const headers = await getAuthHeaders();
       const res = await fetch("/api/admin/users", {
         method: "PATCH",
@@ -280,6 +288,7 @@ export default function AdminPortalPage() {
     showToast("success", shouldBan ? "User account suspended" : "User suspension lifted");
 
     try {
+      setIsSubmittingAction(true);
       const headers = await getAuthHeaders();
       const res = await fetch("/api/admin/users", {
         method: "PATCH",
@@ -321,6 +330,7 @@ export default function AdminPortalPage() {
     showToast("success", `Shown name updated to "${trimmed}"`);
 
     try {
+      setIsSubmittingAction(true);
       const headers = await getAuthHeaders();
       const res = await fetch("/api/admin/users", {
         method: "PATCH",
@@ -348,6 +358,7 @@ export default function AdminPortalPage() {
   const handleDeleteUser = async (targetUserId: string) => {
     setIsSubmittingAction(true);
     try {
+      setIsSubmittingAction(true);
       const headers = await getAuthHeaders();
       const res = await fetch(
         `/api/admin/users?targetUserId=${encodeURIComponent(targetUserId)}`,
@@ -373,6 +384,7 @@ export default function AdminPortalPage() {
   const handleDeleteRoom = async (junctionId: string) => {
     setIsSubmittingAction(true);
     try {
+      setIsSubmittingAction(true);
       const headers = await getAuthHeaders();
       const res = await fetch(
         `/api/admin/rooms?junctionId=${encodeURIComponent(junctionId)}`,
@@ -394,19 +406,115 @@ export default function AdminPortalPage() {
     }
   };
 
+  // Handle Room-Level Unban
+  const handleRoomUnban = async (roomId: string, targetIdentity: string) => {
+    try {
+      const res = await fetch(`/api/junctions/${roomId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "moderate",
+          modAction: "unban",
+          targetIdentity,
+          moderatorIdentity: user?.username || user?.name || "admin",
+          moderatorUserId: user?.id,
+          requesterRole: user?.role,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to unban from room");
+      }
+      setRooms((prev) =>
+        prev.map((r) =>
+          r.id === roomId
+            ? {
+                ...r,
+                bannedIdentities: (r.bannedIdentities || []).filter(
+                  (b) => (b || "").trim().toLowerCase() !== targetIdentity.trim().toLowerCase()
+                ),
+              }
+            : r
+        )
+      );
+      showToast("success", `Unbanned @${targetIdentity} from room`);
+    } catch (err: any) {
+      showToast("error", err.message || "Failed to unban from room");
+    }
+  };
+
+  // Moderation Desk: Platform Banned Users
+  const platformBannedUsers = useMemo(() => {
+    return users.filter((u) => u.is_banned);
+  }, [users]);
+
+  // Moderation Desk: Room-level bans across all junctions
+  const roomBans = useMemo(() => {
+    const list: Array<{ roomId: string; roomName: string; roomCategory: string; bannedIdentity: string }> = [];
+    rooms.forEach((r) => {
+      (r.bannedIdentities || []).forEach((b) => {
+        if (b) {
+          list.push({
+            roomId: r.id,
+            roomName: r.name,
+            roomCategory: r.category,
+            bannedIdentity: b,
+          });
+        }
+      });
+    });
+    return list;
+  }, [rooms]);
+
+  // Moderation Desk: Reported active participants
+  const reportedParticipants = useMemo(() => {
+    const list: Array<{
+      roomId: string;
+      roomName: string;
+      identity: string;
+      name: string;
+      avatar: string;
+      reportedBy: string[];
+    }> = [];
+    rooms.forEach((r) => {
+      (r.participants || []).forEach((p) => {
+        if (p.reportedBy && p.reportedBy.length > 0) {
+          list.push({
+            roomId: r.id,
+            roomName: r.name,
+            identity: p.identity,
+            name: p.name,
+            avatar: p.avatar,
+            reportedBy: p.reportedBy,
+          });
+        }
+      });
+    });
+    return list;
+  }, [rooms]);
+
+  const totalDeskCount = platformBannedUsers.length + roomBans.length + reportedParticipants.length;
+
   // Filtered Users
   const filteredUsers = useMemo(() => {
+    const q = (userSearch || "").toLowerCase();
     return users.filter((u) => {
+      const uName = (u.username || "").toLowerCase();
+      const uDisplay = (u.displayName || "").toLowerCase();
+      const uBio = (u.bio || "").toLowerCase();
+      const uId = (u.id || "").toLowerCase();
+
       const matchesSearch =
-        u.username.toLowerCase().includes(userSearch.toLowerCase()) ||
-        (u.displayName && u.displayName.toLowerCase().includes(userSearch.toLowerCase())) ||
-        (u.bio && u.bio.toLowerCase().includes(userSearch.toLowerCase())) ||
-        u.id.toLowerCase().includes(userSearch.toLowerCase());
+        !q ||
+        uName.includes(q) ||
+        uDisplay.includes(q) ||
+        uBio.includes(q) ||
+        uId.includes(q);
 
       if (!matchesSearch) return false;
 
       if (roleFilter === "all") return true;
-      if (roleFilter === "banned") return u.is_banned;
+      if (roleFilter === "banned") return Boolean(u.is_banned);
       return u.role === roleFilter;
     });
   }, [users, userSearch, roleFilter]);
@@ -452,7 +560,7 @@ export default function AdminPortalPage() {
         <main className="flex-1 flex items-center justify-center p-6">
           <div className="max-w-md w-full bg-[#12131A] border border-rose-500/20 rounded-3xl p-8 text-center shadow-2xl backdrop-blur-xl">
             <div className="w-16 h-16 rounded-2xl bg-rose-500/10 border border-rose-500/20 flex items-center justify-center mx-auto mb-4 text-rose-400">
-              <ShieldAlertIcon size={32} />
+              <ShieldAlert size={32} />
             </div>
             <h1 className="text-xl font-bold text-white mb-2">Access Restricted</h1>
             <p className="text-slate-400 text-sm mb-6 leading-relaxed">
@@ -774,10 +882,10 @@ export default function AdminPortalPage() {
         </section>
 
         {/* MODERN SEGMENTED TABS NAVIGATION */}
-        <div className="grid grid-cols-3 gap-1.5 bg-[#12131C] border border-white/10 p-1 rounded-2xl shadow-lg">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 bg-[#12131C] border border-white/10 p-1 rounded-2xl shadow-lg">
           <button
             onClick={() => setActiveTab("users")}
-            className={`flex items-center justify-center gap-1.5 py-2 px-2 sm:px-4 rounded-xl text-xs sm:text-sm font-semibold transition-all cursor-pointer ${
+            className={`flex items-center justify-center gap-1.5 py-2 px-2 sm:px-3 rounded-xl text-xs sm:text-sm font-semibold transition-all cursor-pointer ${
               activeTab === "users"
                 ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
                 : "text-slate-400 hover:text-white hover:bg-white/5"
@@ -789,7 +897,7 @@ export default function AdminPortalPage() {
 
           <button
             onClick={() => setActiveTab("rooms")}
-            className={`flex items-center justify-center gap-1.5 py-2 px-2 sm:px-4 rounded-xl text-xs sm:text-sm font-semibold transition-all cursor-pointer ${
+            className={`flex items-center justify-center gap-1.5 py-2 px-2 sm:px-3 rounded-xl text-xs sm:text-sm font-semibold transition-all cursor-pointer ${
               activeTab === "rooms"
                 ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
                 : "text-slate-400 hover:text-white hover:bg-white/5"
@@ -800,8 +908,25 @@ export default function AdminPortalPage() {
           </button>
 
           <button
+            onClick={() => setActiveTab("desk")}
+            className={`flex items-center justify-center gap-1.5 py-2 px-2 sm:px-3 rounded-xl text-xs sm:text-sm font-semibold transition-all cursor-pointer ${
+              activeTab === "desk"
+                ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
+                : "text-slate-400 hover:text-white hover:bg-white/5"
+            }`}
+          >
+            <ShieldAlert size={14} className="shrink-0 text-rose-400" />
+            <span className="truncate">Desk</span>
+            {totalDeskCount > 0 && (
+              <span className="ml-0.5 px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/30">
+                {totalDeskCount}
+              </span>
+            )}
+          </button>
+
+          <button
             onClick={() => setActiveTab("stats")}
-            className={`flex items-center justify-center gap-1.5 py-2 px-2 sm:px-4 rounded-xl text-xs sm:text-sm font-semibold transition-all cursor-pointer ${
+            className={`flex items-center justify-center gap-1.5 py-2 px-2 sm:px-3 rounded-xl text-xs sm:text-sm font-semibold transition-all cursor-pointer ${
               activeTab === "stats"
                 ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
                 : "text-slate-400 hover:text-white hover:bg-white/5"
@@ -860,22 +985,40 @@ export default function AdminPortalPage() {
               <div className="px-3.5 py-2.5 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-200 text-xs flex items-center gap-2">
                 <Info size={14} className="text-amber-400 shrink-0" />
                 <span>
-                  <strong>Admin View:</strong> You can suspend accounts and terminate rooms. Role promotions are restricted to Main Admin.
+                  {isManager ? (
+                    <>
+                      <strong>Manager View:</strong> You have moderation authority inside voice junctions and the Moderation Desk. Platform-level user suspensions and deletions require Administrator clearance.
+                    </>
+                  ) : (
+                    <>
+                      <strong>Admin View:</strong> You can suspend accounts and terminate rooms. Role promotions are restricted to Main Admin.
+                    </>
+                  )}
                 </span>
               </div>
             )}
 
+            {/* Loading Skeleton */}
+            {isLoadingData && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {[1, 2, 3, 4, 5, 6].map((i) => (
+                  <div key={i} className="h-36 rounded-2xl bg-[#11121A] border border-white/5 animate-pulse p-4 space-y-3" />
+                ))}
+              </div>
+            )}
+
             {/* Empty state */}
-            {filteredUsers.length === 0 && (
+            {!isLoadingData && filteredUsers.length === 0 && (
               <div className="py-12 text-center text-slate-500 bg-[#11121A] border border-white/5 rounded-3xl text-sm">
                 No members found matching &quot;{userSearch}&quot;
               </div>
             )}
 
             {/* MOBILE VIEW: RESPONSIVE CARDS (ZERO HORIZONTAL SCROLL) */}
-            <div className="grid grid-cols-1 gap-3 md:hidden">
-              {filteredUsers.map((u) => {
-                const cleanU = u.username.trim().toLowerCase();
+            {!isLoadingData && (
+              <div className="grid grid-cols-1 gap-3 md:hidden">
+                {filteredUsers.map((u) => {
+                const cleanU = (u.username || "").trim().toLowerCase();
                 const isThisUserMainAdmin = cleanU === "jayanthadmin" || cleanU === "jayanth";
 
                 return (
@@ -887,10 +1030,10 @@ export default function AdminPortalPage() {
                     <div className="flex items-start justify-between gap-2.5">
                       <div className="flex items-center gap-2.5 min-w-0">
                         <div className="w-10 h-10 rounded-full overflow-hidden bg-indigo-900/40 border border-white/10 shrink-0 flex items-center justify-center">
-                          {u.avatar.includes("http") ? (
-                            <img src={u.avatar} alt={u.username} className="w-full h-full object-cover" />
+                          {u.avatar && typeof u.avatar === "string" && u.avatar.includes("http") ? (
+                            <img src={u.avatar} alt={u.username || "user"} className="w-full h-full object-cover" />
                           ) : (
-                            <UserAvatar avatar={u.avatar} color="#6366F1" size="md" className="!rounded-full" />
+                            <UserAvatar avatar={u.avatar || "user"} color="#6366F1" size="md" className="!rounded-full" />
                           )}
                         </div>
 
@@ -986,25 +1129,27 @@ export default function AdminPortalPage() {
                       {/* Action buttons (Ban / Delete) */}
                       {!isThisUserMainAdmin && (
                         <div className="flex items-center gap-1.5 shrink-0">
-                          {/* Ban Button */}
-                          <button
-                            onClick={() => {
-                              setPendingAction({
-                                type: "toggle_ban",
-                                targetId: u.id,
-                                targetName: u.username,
-                                newBanState: !u.is_banned,
-                              });
-                            }}
-                            className={`p-2 rounded-xl text-xs font-semibold flex items-center gap-1 transition-colors ${
-                              u.is_banned
-                                ? "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
-                                : "bg-rose-500/15 text-rose-300 border border-rose-500/30"
-                            }`}
-                            title={u.is_banned ? "Lift Ban" : "Suspend Account"}
-                          >
-                            {u.is_banned ? <Unlock size={13} /> : <Ban size={13} />}
-                          </button>
+                          {/* Ban Button (Admins Only) */}
+                          {(isMainAdmin || isStaffAdmin) && (
+                            <button
+                              onClick={() => {
+                                setPendingAction({
+                                  type: "toggle_ban",
+                                  targetId: u.id,
+                                  targetName: u.username,
+                                  newBanState: !u.is_banned,
+                                });
+                              }}
+                              className={`p-2 rounded-xl text-xs font-semibold flex items-center gap-1 transition-colors ${
+                                u.is_banned
+                                  ? "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+                                  : "bg-rose-500/15 text-rose-300 border border-rose-500/30"
+                              }`}
+                              title={u.is_banned ? "Lift Ban" : "Suspend Account"}
+                            >
+                              {u.is_banned ? <Unlock size={13} /> : <Ban size={13} />}
+                            </button>
+                          )}
 
                           {/* Delete Account */}
                           {(isMainAdmin || isStaffAdmin) && (
@@ -1022,6 +1167,10 @@ export default function AdminPortalPage() {
                               <Trash2 size={13} />
                             </button>
                           )}
+
+                          {isManager && !isStaffAdmin && !isMainAdmin && (
+                            <span className="text-[10px] text-slate-500 italic">View Only</span>
+                          )}
                         </div>
                       )}
                     </div>
@@ -1029,9 +1178,11 @@ export default function AdminPortalPage() {
                 );
               })}
             </div>
+            )}
 
             {/* DESKTOP VIEW: POLISHED MODERN DATA TABLE */}
-            <div className="hidden md:block bg-[#11121A] border border-white/10 rounded-3xl overflow-hidden shadow-xl">
+            {!isLoadingData && (
+              <div className="hidden md:block bg-[#11121A] border border-white/10 rounded-3xl overflow-hidden shadow-xl">
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs sm:text-sm border-collapse">
                   <thead>
@@ -1045,7 +1196,7 @@ export default function AdminPortalPage() {
                   </thead>
                   <tbody className="divide-y divide-white/5">
                     {filteredUsers.map((u) => {
-                      const cleanU = u.username.trim().toLowerCase();
+                      const cleanU = (u.username || "").trim().toLowerCase();
                       const isThisUserMainAdmin = cleanU === "jayanthadmin" || cleanU === "jayanth";
 
                       return (
@@ -1054,10 +1205,10 @@ export default function AdminPortalPage() {
                           <td className="px-5 py-4">
                             <div className="flex items-center gap-3">
                               <div className="w-10 h-10 rounded-full overflow-hidden bg-indigo-900/40 border border-white/10 shrink-0 flex items-center justify-center">
-                                {u.avatar.includes("http") ? (
-                                  <img src={u.avatar} alt={u.username} className="w-full h-full object-cover" />
+                                {u.avatar && typeof u.avatar === "string" && u.avatar.includes("http") ? (
+                                  <img src={u.avatar} alt={u.username || "user"} className="w-full h-full object-cover" />
                                 ) : (
-                                  <UserAvatar avatar={u.avatar} color="#6366F1" size="md" className="!rounded-full" />
+                                  <UserAvatar avatar={u.avatar || "user"} color="#6366F1" size="md" className="!rounded-full" />
                                 )}
                               </div>
                               <div className="min-w-0">
@@ -1193,33 +1344,35 @@ export default function AdminPortalPage() {
                             <div className="flex items-center justify-end gap-2">
                               {!isThisUserMainAdmin && (
                                 <>
-                                  <button
-                                    onClick={() => {
-                                      setPendingAction({
-                                        type: "toggle_ban",
-                                        targetId: u.id,
-                                        targetName: u.username,
-                                        newBanState: !u.is_banned,
-                                      });
-                                    }}
-                                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
-                                      u.is_banned
-                                        ? "bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/20"
-                                        : "bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/20"
-                                    }`}
-                                  >
-                                    {u.is_banned ? (
-                                      <>
-                                        <Unlock size={12} />
-                                        <span>Lift Ban</span>
-                                      </>
-                                    ) : (
-                                      <>
-                                        <Ban size={12} />
-                                        <span>Suspend</span>
-                                      </>
-                                    )}
-                                  </button>
+                                  {(isMainAdmin || isStaffAdmin) && (
+                                    <button
+                                      onClick={() => {
+                                        setPendingAction({
+                                          type: "toggle_ban",
+                                          targetId: u.id,
+                                          targetName: u.username,
+                                          newBanState: !u.is_banned,
+                                        });
+                                      }}
+                                      className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
+                                        u.is_banned
+                                          ? "bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/20"
+                                          : "bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/20"
+                                      }`}
+                                    >
+                                      {u.is_banned ? (
+                                        <>
+                                          <Unlock size={12} />
+                                          <span>Lift Ban</span>
+                                        </>
+                                      ) : (
+                                        <>
+                                          <Ban size={12} />
+                                          <span>Suspend</span>
+                                        </>
+                                      )}
+                                    </button>
+                                  )}
 
                                   {(isMainAdmin || isStaffAdmin) && (
                                     <button
@@ -1236,6 +1389,10 @@ export default function AdminPortalPage() {
                                       <Trash2 size={14} />
                                     </button>
                                   )}
+
+                                  {isManager && !isStaffAdmin && !isMainAdmin && (
+                                    <span className="text-[11px] text-slate-500 italic">View Only</span>
+                                  )}
                                 </>
                               )}
                             </div>
@@ -1247,6 +1404,7 @@ export default function AdminPortalPage() {
                 </table>
               </div>
             </div>
+            )}
 
           </div>
         )}
@@ -1339,10 +1497,10 @@ export default function AdminPortalPage() {
                                   className="w-6 h-6 rounded-full bg-indigo-900/40 border border-white/10 overflow-hidden flex items-center justify-center text-[9px]"
                                   title={`${p.name} (${p.role})`}
                                 >
-                                  {p.avatar.includes("http") ? (
-                                    <img src={p.avatar} alt={p.name} className="w-full h-full object-cover" />
+                                  {p.avatar && typeof p.avatar === "string" && p.avatar.includes("http") ? (
+                                    <img src={p.avatar} alt={p.name || "speaker"} className="w-full h-full object-cover" />
                                   ) : (
-                                    <UserAvatar avatar={p.avatar} color="#6366F1" size="sm" className="!rounded-full" />
+                                    <UserAvatar avatar={p.avatar || "user"} color="#6366F1" size="sm" className="!rounded-full" />
                                   )}
                                 </div>
                               ))
@@ -1377,6 +1535,334 @@ export default function AdminPortalPage() {
               )}
             </div>
 
+          </div>
+        )}
+
+        {/* TAB: MODERATION DESK (MANAGERS, ADMINS & SUPER ADMINS) */}
+        {activeTab === "desk" && (
+          <div className="space-y-4">
+            {/* Desk Top Navigation Bar & Sub-Filters */}
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 bg-[#11121A] border border-white/10 p-3.5 rounded-2xl shadow-md">
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0">
+                <button
+                  onClick={() => setDeskSubFilter("all")}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${
+                    deskSubFilter === "all"
+                      ? "bg-indigo-600 text-white shadow-sm"
+                      : "bg-black/30 text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  All Infractions ({totalDeskCount})
+                </button>
+                <button
+                  onClick={() => setDeskSubFilter("platform")}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${
+                    deskSubFilter === "platform"
+                      ? "bg-rose-600 text-white shadow-sm"
+                      : "bg-black/30 text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  Platform Suspensions ({platformBannedUsers.length})
+                </button>
+                <button
+                  onClick={() => setDeskSubFilter("rooms")}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${
+                    deskSubFilter === "rooms"
+                      ? "bg-amber-600 text-white shadow-sm"
+                      : "bg-black/30 text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  Room-Level Bans ({roomBans.length})
+                </button>
+                <button
+                  onClick={() => setDeskSubFilter("reports")}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${
+                    deskSubFilter === "reports"
+                      ? "bg-purple-600 text-white shadow-sm"
+                      : "bg-black/30 text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  Reports & Flags ({reportedParticipants.length})
+                </button>
+              </div>
+
+              {/* Search Box */}
+              <div className="relative w-full md:w-64">
+                <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+                <input
+                  type="text"
+                  placeholder="Search desk by handle or room..."
+                  value={deskSearch}
+                  onChange={(e) => setDeskSearch(e.target.value)}
+                  className="w-full pl-8 pr-3 py-1.5 bg-black/40 border border-white/10 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+            </div>
+
+            {/* Clearance Notice for Managers */}
+            {isManager && !isStaffAdmin && !isMainAdmin && (
+              <div className="p-3.5 rounded-2xl bg-indigo-950/30 border border-indigo-500/20 flex items-center gap-2.5 text-xs text-indigo-200">
+                <Info size={16} className="text-indigo-400 shrink-0" />
+                <span>
+                  <strong>Manager Clearance:</strong> You have full visibility into platform bans, reported infractions, and the ability to unban users from rooms. Lifting platform-level suspensions requires an Admin or Super Admin.
+                </span>
+              </div>
+            )}
+
+            {/* SECTION 1: PLATFORM SUSPENSIONS */}
+            {(deskSubFilter === "all" || deskSubFilter === "platform") && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    <ShieldAlert size={16} className="text-rose-400" />
+                    <span>Platform Suspensions</span>
+                    <span className="text-[11px] font-normal text-slate-400">({platformBannedUsers.length})</span>
+                  </h3>
+                </div>
+
+                {platformBannedUsers
+                  .filter((u) => {
+                    if (!deskSearch) return true;
+                    const q = deskSearch.toLowerCase();
+                    return (
+                      (u.username || "").toLowerCase().includes(q) ||
+                      (u.displayName || "").toLowerCase().includes(q) ||
+                      (u.banned_reason || "").toLowerCase().includes(q)
+                    );
+                  })
+                  .length === 0 ? (
+                  <div className="p-6 rounded-2xl bg-[#11121A] border border-white/5 text-center text-xs text-slate-500">
+                    No platform-level suspensions matching this view.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {platformBannedUsers
+                      .filter((u) => {
+                        if (!deskSearch) return true;
+                        const q = deskSearch.toLowerCase();
+                        return (
+                          (u.username || "").toLowerCase().includes(q) ||
+                          (u.displayName || "").toLowerCase().includes(q) ||
+                          (u.banned_reason || "").toLowerCase().includes(q)
+                        );
+                      })
+                      .map((bannedUser) => (
+                        <div
+                          key={bannedUser.id}
+                          className="bg-[#11121A] border border-rose-500/20 rounded-2xl p-4 shadow-lg flex flex-col justify-between gap-3 hover:border-rose-500/40 transition-all"
+                        >
+                          <div className="flex items-start gap-3">
+                            <div className="relative shrink-0">
+                              <UserAvatar
+                                avatar={bannedUser.avatar || "user"}
+                                color="#F43F5E"
+                                size="md"
+                                className="!rounded-full border border-rose-500/30"
+                              />
+                              <div className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-rose-600 border border-black flex items-center justify-center text-white">
+                                <Ban size={10} />
+                              </div>
+                            </div>
+
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 mb-0.5">
+                                <span className="text-sm font-bold text-white truncate">
+                                  {bannedUser.displayName || bannedUser.username}
+                                </span>
+                                <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/30 shrink-0 uppercase">
+                                  Suspended
+                                </span>
+                              </div>
+                              <div className="text-xs text-slate-400 font-mono">@{bannedUser.username}</div>
+
+                              {/* Ban Reason */}
+                              <div className="mt-2 p-2 rounded-xl bg-black/40 border border-white/5 text-xs text-rose-200/90 leading-relaxed">
+                                <span className="font-semibold text-rose-400">Reason: </span>
+                                {bannedUser.banned_reason || "Violation of YapClub community guidelines"}
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Action row */}
+                          <div className="flex items-center justify-between border-t border-white/5 pt-2 text-[11px] text-slate-500">
+                            <span>UID: {(bannedUser.id || "").slice(0, 8)}...</span>
+
+                            {isMainAdmin || isStaffAdmin ? (
+                              <button
+                                onClick={() =>
+                                  setPendingAction({
+                                    type: "toggle_ban",
+                                    targetId: bannedUser.id,
+                                    targetName: bannedUser.username,
+                                    newBanState: false,
+                                  })
+                                }
+                                className="px-3 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-xs font-semibold cursor-pointer active:scale-95 transition-all flex items-center gap-1.5"
+                              >
+                                <CheckCircle2 size={13} />
+                                <span>Lift Suspension</span>
+                              </button>
+                            ) : (
+                              <span className="text-[10px] text-slate-400 italic">
+                                Admin clearance required to unban
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* SECTION 2: ROOM-LEVEL BANS */}
+            {(deskSubFilter === "all" || deskSubFilter === "rooms") && (
+              <div className="space-y-3 pt-2">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    <Radio size={16} className="text-amber-400" />
+                    <span>Room-Level Bans</span>
+                    <span className="text-[11px] font-normal text-slate-400">({roomBans.length})</span>
+                  </h3>
+                </div>
+
+                {roomBans
+                  .filter((b) => {
+                    if (!deskSearch) return true;
+                    const q = deskSearch.toLowerCase();
+                    return (b.bannedIdentity || "").toLowerCase().includes(q) || (b.roomName || "").toLowerCase().includes(q);
+                  })
+                  .length === 0 ? (
+                  <div className="p-6 rounded-2xl bg-[#11121A] border border-white/5 text-center text-xs text-slate-500">
+                    No active room-level bans across live junctions.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                    {roomBans
+                      .filter((b) => {
+                        if (!deskSearch) return true;
+                        const q = deskSearch.toLowerCase();
+                        return (b.bannedIdentity || "").toLowerCase().includes(q) || (b.roomName || "").toLowerCase().includes(q);
+                      })
+                      .map((banItem, idx) => (
+                        <div
+                          key={`${banItem.roomId}-${banItem.bannedIdentity}-${idx}`}
+                          className="bg-[#11121A] border border-amber-500/20 rounded-2xl p-4 shadow-lg flex flex-col justify-between gap-3"
+                        >
+                          <div>
+                            <div className="flex items-center justify-between gap-2 mb-1.5">
+                              <span className="text-[10px] font-bold uppercase tracking-wider text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-full border border-amber-500/20">
+                                {banItem.roomCategory}
+                              </span>
+                              <span className="text-[10px] text-slate-400">Room Ban</span>
+                            </div>
+
+                            <div className="text-sm font-bold text-white mb-0.5 truncate">{banItem.roomName}</div>
+                            <div className="text-xs text-rose-300 font-mono flex items-center gap-1.5 mt-2 p-2 bg-black/40 rounded-xl border border-white/5">
+                              <Ban size={12} className="text-rose-400 shrink-0" />
+                              <span className="truncate">@{banItem.bannedIdentity}</span>
+                            </div>
+                          </div>
+
+                          <button
+                            onClick={() => handleRoomUnban(banItem.roomId, banItem.bannedIdentity)}
+                            className="w-full py-1.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer transition-all active:scale-95"
+                          >
+                            <Unlock size={12} />
+                            <span>Unban from Room</span>
+                          </button>
+                        </div>
+                      ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* SECTION 3: REPORTS & FLAGGED ACTIVITY */}
+            {(deskSubFilter === "all" || deskSubFilter === "reports") && (
+              <div className="space-y-3 pt-2">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    <Flag size={16} className="text-purple-400" />
+                    <span>Reported Users in Active Rooms</span>
+                    <span className="text-[11px] font-normal text-slate-400">({reportedParticipants.length})</span>
+                  </h3>
+                </div>
+
+                {reportedParticipants
+                  .filter((p) => {
+                    if (!deskSearch) return true;
+                    const q = deskSearch.toLowerCase();
+                    return (
+                      (p.identity || "").toLowerCase().includes(q) ||
+                      (p.name || "").toLowerCase().includes(q) ||
+                      (p.roomName || "").toLowerCase().includes(q)
+                    );
+                  })
+                  .length === 0 ? (
+                  <div className="p-6 rounded-2xl bg-[#11121A] border border-white/5 text-center text-xs text-slate-500">
+                    No active reported participants inside rooms right now.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {reportedParticipants
+                      .filter((p) => {
+                        if (!deskSearch) return true;
+                        const q = deskSearch.toLowerCase();
+                        return (
+                          (p.identity || "").toLowerCase().includes(q) ||
+                          (p.name || "").toLowerCase().includes(q) ||
+                          (p.roomName || "").toLowerCase().includes(q)
+                        );
+                      })
+                      .map((reported, idx) => (
+                        <div
+                          key={`${reported.roomId}-${reported.identity}-${idx}`}
+                          className="bg-[#11121A] border border-purple-500/20 rounded-2xl p-4 shadow-lg flex items-start justify-between gap-3"
+                        >
+                          <div className="flex items-start gap-3">
+                            <UserAvatar
+                              avatar={reported.avatar || "user"}
+                              color="#A855F7"
+                              size="md"
+                              className="!rounded-full border border-purple-500/30 shrink-0"
+                            />
+                            <div>
+                              <div className="text-sm font-bold text-white">{reported.name}</div>
+                              <div className="text-xs text-slate-400 font-mono">@{reported.identity}</div>
+                              <div className="text-[11px] text-slate-400 mt-1">
+                                Room: <strong className="text-purple-300">{reported.roomName}</strong>
+                              </div>
+                              <div className="text-[11px] text-rose-300 font-semibold mt-1 flex items-center gap-1">
+                                <Flag size={11} className="text-rose-400" />
+                                <span>Reported by {reported.reportedBy.length} member(s)</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-col gap-1.5 shrink-0">
+                            {isMainAdmin || isStaffAdmin ? (
+                              <button
+                                onClick={() =>
+                                  setPendingAction({
+                                    type: "toggle_ban",
+                                    targetId: reported.identity,
+                                    targetName: reported.name,
+                                    newBanState: true,
+                                  })
+                                }
+                                className="px-3 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 text-xs font-semibold cursor-pointer transition-all"
+                              >
+                                Suspend Account
+                              </button>
+                            ) : null}
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -1432,7 +1918,7 @@ export default function AdminPortalPage() {
                     <li>Deck and speaker moderation authority.</li>
                     <li>Can mute, kick, and organize stage speakers.</li>
                     <li>Distinguished with a ⭐ Manager profile badge.</li>
-                    <li>No access to global admin panel or account deletion.</li>
+                    <li>Access to Staff Desk to inspect bans and unban from rooms.</li>
                   </ul>
                 </div>
               </div>
@@ -1589,26 +2075,5 @@ export default function AdminPortalPage() {
         </div>
       )}
     </div>
-  );
-}
-
-function ShieldAlertIcon(props: any) {
-  return (
-    <svg
-      {...props}
-      xmlns="http://www.w3.org/2000/svg"
-      width="24"
-      height="24"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10" />
-      <line x1="12" x2="12" y1="8" y2="12" />
-      <line x1="12" x2="12.01" y1="16" y2="16" />
-    </svg>
   );
 }

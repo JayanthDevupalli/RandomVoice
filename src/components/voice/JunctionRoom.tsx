@@ -1,12 +1,11 @@
 "use client";
 
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { GuestUser, Junction, JunctionParticipant, RoomChatMessage, UserRole } from "@/lib/types";
 import { useAudioVisualizer } from "@/hooks/useAudioVisualizer";
 import { useUser } from "@/hooks/useUser";
 import { useUnreadMessages } from "@/hooks/useUnreadMessages";
-import { ModeratorControlModal } from "./ModeratorControlModal";
 import { UserAvatar, AVATAR_ICON_MAP } from "@/components/ui/UserAvatar";
 import { ProfilePreviewModal } from "@/components/profile/ProfilePreviewModal";
 import { InRoomMessenger } from "./InRoomMessenger";
@@ -48,6 +47,7 @@ import {
   Trash2,
   ChevronDown,
   Lock,
+  Loader2,
   Check,
   Compass,
   LogIn,
@@ -499,6 +499,8 @@ export function JunctionRoom({
   const joinedJunctionIdRef = useRef<string | null>(null);
   const isJoiningRef = useRef<boolean>(false);
   const hasJoinedSuccessfullyRef = useRef<boolean>(false);
+  const localJoinedAtRef = useRef<number>(Date.now());
+  const seatMapRef = useRef<Map<string, number>>(new Map());
 
   // User platform clearance & identity - seamlessly inherits promoted role instantly
   const myParticipant = participants.find((p) => isLocalParticipant(p));
@@ -595,6 +597,12 @@ export function JunctionRoom({
     left: number;
     participantIdentity: string;
   } | null>(null);
+
+  // Participant Report Modal state
+  const [reportingTarget, setReportingTarget] = useState<JunctionParticipant | null>(null);
+  const [reportCategory, setReportCategory] = useState<string>("Inappropriate Audio");
+  const [reportReasonText, setReportReasonText] = useState<string>("");
+  const [isSubmittingReport, setIsSubmittingReport] = useState<boolean>(false);
 
   // Close participant moderation dropdown on Escape key or window resize
   useEffect(() => {
@@ -829,49 +837,8 @@ export function JunctionRoom({
   const [previewParticipant, setPreviewParticipant] = useState<JunctionParticipant | null>(null);
 
   // Web Audio Visualizer for local mic
-  const isCurrentModerator = (
-    participants.some((p) => isLocalParticipant(p) && p.role === "moderator") ||
-    junction?.participants.some((p) => isLocalParticipant(p) && p.role === "moderator") ||
-    Boolean(junction?.moderatorIdentity && isLocalIdentity(junction.moderatorIdentity)) ||
-    (typeof window !== "undefined" && sessionStorage.getItem(`junction_role_${junctionId}`) === "moderator")
-  ) || false;
-
-  // 3-Minute Moderator Claim Timer logic
-  useEffect(() => {
-    if (isCurrentModerator || isStaff) {
-      setCanClaimMod(false);
-      setClaimTimerSeconds(0);
-      return;
-    }
-
-    const localP = participants.find((p) => isLocalParticipant(p));
-    if (!localP || !localP.joinedAt) return;
-
-    // If there is NO other moderator in the room, allow claiming immediately
-    const anyModPresent = participants.some((p) => p.role === "moderator");
-    if (!anyModPresent) {
-      setClaimTimerSeconds(0);
-      setCanClaimMod(true);
-      return;
-    }
-
-    const updateClaimTimer = () => {
-      const elapsed = Date.now() - localP.joinedAt;
-      const remainingMs = Math.max(0, 180000 - elapsed);
-      const remainingSecs = Math.ceil(remainingMs / 1000);
-      setClaimTimerSeconds(remainingSecs);
-
-      if (remainingSecs <= 0) {
-        setCanClaimMod(true);
-      } else {
-        setCanClaimMod(false);
-      }
-    };
-
-    updateClaimTimer();
-    const interval = setInterval(updateClaimTimer, 1000);
-    return () => clearInterval(interval);
-  }, [isCurrentModerator, isStaff, participants, isLocalParticipant]);
+  // Room host concept removed — all participants are equal speakers
+  const isCurrentModerator = false;
 
   const handleClaimModerator = async () => {
     if (isClaimingMod || isCurrentModerator) return;
@@ -1201,11 +1168,20 @@ export function JunctionRoom({
             if (typeof window !== "undefined") {
               sessionStorage.removeItem(`junction_mod_muted_${junctionId}`);
               sessionStorage.removeItem(`junction_role_${junctionId}`);
+              sessionStorage.removeItem("yapclub_active_junction_id");
+            }
+            if (liveKitRoomRef.current) {
+              try {
+                liveKitRoomRef.current.disconnect();
+              } catch {}
+            }
+            if (mediaStream) {
+              mediaStream.getTracks().forEach((t) => t.stop());
             }
             setKickedNotice(
               action === "ban"
                 ? "You have been banned by YapClub moderation staff."
-                : "You were kicked from this junction by the room moderator."
+                : "You were removed from this junction by platform staff."
             );
           }
         }
@@ -1533,6 +1509,7 @@ export function JunctionRoom({
     loadAndJoinJunction();
 
     return () => {
+      const wasJoined = hasJoinedSuccessfullyRef.current;
       isMounted = false;
       isRealUnmount.current = true;
       isJoiningRef.current = false;
@@ -1556,6 +1533,36 @@ export function JunctionRoom({
 
       if (mediaStream) {
         mediaStream.getTracks().forEach((t) => t.stop());
+      }
+
+      // If user navigated away without clicking Leave button, guarantee database exit
+      if (wasJoined) {
+        const payload = JSON.stringify({
+          action: "leave",
+          identity: myIdentity,
+          identities: [
+            myIdentity,
+            guest.name,
+            guest.username,
+            user?.username,
+            user?.name,
+            myDisplayName,
+          ].filter(Boolean),
+          name: myDisplayName,
+          participantId: guest.id,
+          userId: user?.id,
+        });
+
+        if (typeof navigator !== "undefined" && navigator.sendBeacon) {
+          navigator.sendBeacon(`/api/junctions/${junctionId}`, new Blob([payload], { type: "text/plain" }));
+        } else {
+          fetch(`/api/junctions/${junctionId}`, {
+            method: "POST",
+            headers: { "Content-Type": "text/plain" },
+            body: payload,
+            keepalive: true,
+          }).catch(() => {});
+        }
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1634,8 +1641,14 @@ export function JunctionRoom({
   ) => {
     if (!isCurrentModerator && !isStaff) return;
 
-    // Strict rule: Room hosts / regular users cannot kick fellow participants. Only official Staff can kick.
-    if ((modAction === "kick" || modAction === "ban") && !isStaff) {
+    // Strict rule: Managers cannot ban users. Only Admins and Super Admins can ban.
+    if (modAction === "ban" && !isAdmin && !isSuperAdmin) {
+      alert("Unauthorized: Only Admins can ban participants. Managers do not have permission to suspend or ban users.");
+      return;
+    }
+
+    // Only official Staff can kick participants.
+    if (modAction === "kick" && !isStaff) {
       alert("Unauthorized: Only official Staff (Managers, Admins, Main Admin) can kick participants.");
       return;
     }
@@ -1984,8 +1997,13 @@ export function JunctionRoom({
     }
   };
 
-  const handleReportParticipant = async (targetIdentity: string) => {
+  const handleReportParticipant = async (targetIdentity: string, reason: string) => {
     setActiveModMenuParticipant(null);
+    if (!reason || !reason.trim()) {
+      alert("Please provide a reason for the report.");
+      return;
+    }
+    setIsSubmittingReport(true);
     try {
       const res = await fetch(`/api/junctions/${junctionId}`, {
         method: "POST",
@@ -1994,6 +2012,7 @@ export function JunctionRoom({
           action: "report",
           identity: myIdentity,
           targetIdentity,
+          reason: reason.trim(),
         }),
       });
       const data = await res.json();
@@ -2001,7 +2020,9 @@ export function JunctionRoom({
         console.error(data.error || "Failed to report user");
         alert(data.error || "Failed to report user");
       } else {
-        alert("User has been reported.");
+        alert("Report submitted successfully. Thank you for keeping YapClub safe.");
+        setReportingTarget(null);
+        setReportReasonText("");
         if (data.banned) {
           broadcastRoomUpdate({
             type: "moderation_event",
@@ -2011,6 +2032,9 @@ export function JunctionRoom({
       }
     } catch (err) {
       console.error("Report error:", err);
+      alert("Failed to submit report. Please check your connection.");
+    } finally {
+      setIsSubmittingReport(false);
     }
   };
 
@@ -2042,10 +2066,11 @@ export function JunctionRoom({
 
   const handleToggleRoomLock = async (isLocked: boolean) => {
     if (!isCurrentModerator) return;
-    const res = await fetch(`/api/junctions/${junctionId}/lock`, {
+    const res = await fetch(`/api/junctions/${junctionId}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        action: "lock",
         moderatorIdentity: myIdentity,
         isLocked,
       }),
@@ -2257,13 +2282,15 @@ export function JunctionRoom({
           const updatedList = list.map((j) => {
             if (j.id === junctionId) {
               const remaining = j.participants.filter(
-                (p) => (p.identity || "").toLowerCase() !== myIdentity.toLowerCase()
+                (p) => { const pIdent = (p.identity || "").toLowerCase().trim(); const pName = (p.name || "").toLowerCase().trim(); const pUser = (p.username || "").toLowerCase().trim(); const pDisp = (p.displayName || "").toLowerCase().trim(); const myIdent = myIdentity.toLowerCase().trim(); const myDisp = myDisplayName.toLowerCase().trim(); return pIdent !== myIdent && pName !== myDisp && pUser !== myIdent && pDisp !== myDisp; }
               );
-              return { ...j, participants: remaining, currentCount: remaining.length };
+              return { ...j, participants: remaining, currentCount: remaining.length, moderatorIdentity: remaining.length === 0 ? "" : j.moderatorIdentity };
             }
             return j;
           });
           sessionStorage.setItem("yapclub_cached_junctions", JSON.stringify(updatedList));
+          const newTotal = updatedList.reduce((acc, it) => acc + (it.participants?.length || it.currentCount || 0), 0);
+          sessionStorage.setItem("yapclub_cached_total_online", String(newTotal));
         }
       } catch {}
     }
@@ -2307,6 +2334,9 @@ export function JunctionRoom({
 
     // 7. Reassuring confirmation: show Clean End state
     setExitStep("ended");
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("yapclub_junction_left", { detail: { junctionId } }));
+    }
     await new Promise((r) => setTimeout(r, 600));
 
     // Clear joined refs so component won't re-join
@@ -2391,7 +2421,126 @@ export function JunctionRoom({
   };
 
 
-  // Kicked / Banned / Ended Modal
+  // Compute speech & effective participants with useMemo unconditionally (React Rules of Hooks)
+  const isLocalSpeaking = activeSpeakers.some((s) => isLocalIdentity(s));
+  const isSomeoneSpeaking = activeSpeakers.length > 0;
+  const isLocalInParticipants = participants.some((p) => isLocalParticipant(p));
+  const effectiveParticipants: JunctionParticipant[] = useMemo(() => {
+    let list: JunctionParticipant[];
+    if (hasJoinedSuccessfullyRef.current && !isLocalInParticipants) {
+      list = [
+        {
+          id: isRegistered && user ? user.id : guest?.id || "local",
+          identity: myIdentity,
+          name: myDisplayName,
+          displayName: myDisplayName,
+          username: myIdentity,
+          avatar: user?.avatar || guest?.avatar || "zap",
+          color: user?.color || guest?.color || "#6366F1",
+          cardBgColor: user?.cardBgColor || guest?.cardBgColor || "#465B73",
+          role: "speaker",
+          userRole: myEffectiveRole,
+          isMuted: isMuted,
+          isMutedByMod: isMutedByMod,
+          isSpeaking: isLocalSpeaking,
+          joinedAt: localJoinedAtRef.current,
+          connectionQuality: "excellent",
+        },
+        ...participants,
+      ];
+    } else {
+      list = [...participants];
+    }
+
+    // Deduplicate by identity / id
+    const seen = new Set<string>();
+    const deduped: JunctionParticipant[] = [];
+    for (const p of list) {
+      const key = (p.identity || p.name || p.id || "").toLowerCase().trim();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(p);
+    }
+
+    // Deterministic first-come first-served sequential sort by immutable arrival time with stable tie-breaker
+    return deduped.sort((a, b) => {
+      const timeA = a.joinedAt || 0;
+      const timeB = b.joinedAt || 0;
+      if (timeA !== timeB) return timeA - timeB;
+      return (a.identity || a.name || "").localeCompare(b.identity || b.name || "");
+    });
+  }, [
+    isLocalInParticipants,
+    participants,
+    myIdentity,
+    myDisplayName,
+    user,
+    guest,
+    myEffectiveRole,
+    isMuted,
+    isMutedByMod,
+    isLocalSpeaking,
+    isRegistered,
+  ]);
+  const speakingParticipant = effectiveParticipants.find((p) => activeSpeakers.some((s) => s.toLowerCase() === p.identity?.toLowerCase())) || effectiveParticipants[0];
+  const SEAT_SLOTS = Array.from({ length: junction?.maxParticipants || 10 });
+
+  // Deterministic, completely stable sequential first-come first-served seating assignments
+  const seatedParticipants: (JunctionParticipant | null)[] = useMemo(() => {
+    const maxSeats = junction?.maxParticipants || 10;
+    const seatMap = seatMapRef.current;
+
+    const getPKey = (p: JunctionParticipant) =>
+      (p.identity || p.username || p.name || p.id || "").toLowerCase().trim();
+
+    // 1. Deterministically sort all active participants by arrival time (FCFS)
+    const sorted = [...effectiveParticipants].sort((a, b) => {
+      const timeA = typeof a.joinedAt === "number" ? a.joinedAt : Number(a.joinedAt) || 0;
+      const timeB = typeof b.joinedAt === "number" ? b.joinedAt : Number(b.joinedAt) || 0;
+      if (timeA !== timeB) return timeA - timeB;
+      return getPKey(a).localeCompare(getPKey(b));
+    });
+
+    const activeKeys = new Set(sorted.map(getPKey));
+
+    // 2. Free seats of participants who have left
+    for (const [key] of Array.from(seatMap.entries())) {
+      if (!activeKeys.has(key)) {
+        seatMap.delete(key);
+      }
+    }
+
+    // 3. Track currently occupied seat indices
+    const occupiedSeats = new Set(seatMap.values());
+
+    // 4. Assign lowest available seat sequentially to participants without one
+    for (const p of sorted) {
+      const key = getPKey(p);
+      if (!seatMap.has(key)) {
+        for (let seat = 0; seat < maxSeats; seat++) {
+          if (!occupiedSeats.has(seat)) {
+            seatMap.set(key, seat);
+            occupiedSeats.add(seat);
+            break;
+          }
+        }
+      }
+    }
+
+    // 5. Populate fixed seat array
+    const seats: (JunctionParticipant | null)[] = Array.from({ length: maxSeats }, () => null);
+    for (const p of sorted) {
+      const key = getPKey(p);
+      const seat = seatMap.get(key);
+      if (seat !== undefined && seat < maxSeats) {
+        seats[seat] = p;
+      }
+    }
+
+    return seats;
+  }, [effectiveParticipants, junction?.maxParticipants]);
+
+  // Kicked / Banned / Ended Modal (Rendered strictly AFTER all hooks to adhere to React Rules of Hooks)
   if (kickedNotice) {
     return (
       <div className="min-h-[70vh] flex flex-col items-center justify-center p-4 bg-background">
@@ -2464,34 +2613,6 @@ export function JunctionRoom({
       </div>
     );
   }
-
-  const isLocalSpeaking = activeSpeakers.some((s) => isLocalIdentity(s));
-  const isSomeoneSpeaking = activeSpeakers.length > 0;
-  const isLocalInParticipants = participants.some((p) => isLocalParticipant(p));
-  const effectiveParticipants: JunctionParticipant[] = (hasJoinedSuccessfullyRef.current && !isLocalInParticipants)
-    ? [
-        {
-          id: isRegistered && user ? user.id : guest?.id || "local",
-          identity: myIdentity,
-          name: myDisplayName,
-          displayName: myDisplayName,
-          username: myIdentity,
-          avatar: user?.avatar || guest?.avatar || "zap",
-          color: user?.color || guest?.color || "#6366F1",
-          cardBgColor: user?.cardBgColor || guest?.cardBgColor || "#465B73",
-          role: (typeof window !== "undefined" && (sessionStorage.getItem(`junction_role_${junctionId}`) as any)) || "speaker",
-          userRole: myEffectiveRole,
-          isMuted: isMuted,
-          isMutedByMod: isMutedByMod,
-          isSpeaking: isLocalSpeaking,
-          joinedAt: Date.now(),
-          connectionQuality: "excellent",
-        },
-        ...participants,
-      ]
-    : participants;
-  const speakingParticipant = effectiveParticipants.find((p) => activeSpeakers.some((s) => s.toLowerCase() === p.identity?.toLowerCase())) || effectiveParticipants[0];
-  const SEAT_SLOTS = Array.from({ length: junction?.maxParticipants || 10 });
 
   return (
     <>
@@ -2781,7 +2902,7 @@ export function JunctionRoom({
       {isMutedByMod && (
         <div className="fixed top-16 sm:top-20 inset-x-4 max-w-md mx-auto bg-rose-950/95 border border-rose-500/50 text-rose-200 px-4 py-2.5 rounded-2xl text-center text-xs font-semibold flex items-center justify-center gap-2 shadow-2xl backdrop-blur-xl z-50 animate-fadeIn pointer-events-auto">
           <AlertCircle size={16} className="text-rose-400 shrink-0" />
-          <span>You have been force-muted by the Junction Moderator.</span>
+          <span>You have been force-muted by YapClub Moderation.</span>
         </div>
       )}
 
@@ -2805,9 +2926,9 @@ export function JunctionRoom({
             <div className="min-w-0 flex items-center gap-2 sm:gap-3">
               <button
                 type="button"
-                onClick={handleMinimize}
+                onClick={handleLeave}
                 className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 flex items-center justify-center text-slate-400 hover:text-white transition-all cursor-pointer shrink-0 active:scale-95"
-                title="Back / Minimize Room"
+                title="Leave Room"
               >
                 <ChevronLeft size={16} />
               </button>
@@ -2851,36 +2972,6 @@ export function JunctionRoom({
                 </button>
               )}
 
-              {/* Moderator Deck Trigger or 3-Min Claim Timer */}
-              {isCurrentModerator ? (
-                <button
-                  onClick={() => setIsModDeckOpen(true)}
-                  className="h-8 sm:h-9 w-8 sm:w-auto px-0 sm:px-3 rounded-full bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-xs font-bold transition-all cursor-pointer shadow-sm flex items-center justify-center gap-1.5 active:scale-95 shrink-0"
-                  title="Mod Deck"
-                >
-                  <Shield size={14} className="text-amber-400" />
-                  <span className="hidden sm:inline text-xs">Mod Deck</span>
-                </button>
-              ) : !isStaff && claimTimerSeconds > 0 ? (
-                <div
-                  className="h-8 sm:h-9 px-2.5 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[10px] sm:text-xs font-semibold flex items-center gap-1.5 shadow-sm shrink-0"
-                  title="3-minute timer to get Moderator privileges"
-                >
-                  <Shield size={13} className="text-amber-400 animate-pulse" />
-                  <span className="font-mono text-[10px] sm:text-xs">{formatTimerMinutes(claimTimerSeconds)}</span>
-                </div>
-              ) : !isStaff ? (
-                <button
-                  onClick={handleClaimModerator}
-                  disabled={isClaimingMod}
-                  className="h-8 sm:h-9 px-2 sm:px-3 rounded-full bg-gradient-to-r from-amber-500 to-yellow-500 hover:from-amber-400 hover:to-yellow-400 text-slate-950 text-xs font-bold transition-all cursor-pointer shadow-md shadow-amber-500/20 animate-bounce active:scale-95 flex items-center gap-1 shrink-0"
-                  title="Claim Moderator Privileges"
-                >
-                  <Crown size={14} className="fill-slate-950" />
-                  <span className="hidden sm:inline text-xs">{isClaimingMod ? "Claiming..." : "Claim Mod"}</span>
-                </button>
-              ) : null}
-
               {/* Invite Friends */}
               <button
                 type="button"
@@ -2894,9 +2985,9 @@ export function JunctionRoom({
               {/* Minimize Room */}
               <button
                 type="button"
-                onClick={handleMinimize}
                 className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95"
                 title="Minimize Room (Browse YapClub while in voice)"
+                onClick={handleMinimize}
               >
                 <Minimize2 size={14} className="text-indigo-400" />
               </button>
@@ -2921,7 +3012,7 @@ export function JunctionRoom({
             "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6"
           }`}>
             {SEAT_SLOTS.map((_, index) => {
-              const participant = effectiveParticipants[index];
+              const participant = seatedParticipants[index];
               const isLocal = isLocalParticipant(participant);
               const isParticipantMod = participant?.role === "moderator";
               const participantRole = isLocal
@@ -2961,8 +3052,6 @@ export function JunctionRoom({
                         ? "ring-1.5 ring-rose-400/80 shadow-[0_0_25px_rgba(244,63,94,0.25)]"
                         : participantRole === "manager"
                         ? "ring-1.5 ring-cyan-400/80 shadow-[0_0_25px_rgba(6,182,212,0.25)]"
-                        : isParticipantMod
-                        ? "ring-1.5 ring-amber-400/60 shadow-[0_0_20px_rgba(245,158,11,0.2)]"
                         : speaking
                         ? "ring-2 ring-emerald-400/90 shadow-[0_0_25px_rgba(52,211,153,0.35)]"
                         : "border-white/10 hover:border-white/20"
@@ -3003,16 +3092,6 @@ export function JunctionRoom({
                       </div>
 
                       <div className="flex items-center gap-1 shrink-0 justify-end">
-                        {isParticipantMod && participantRole === "user" ? (
-                          <span
-                            className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 shadow-xs shrink-0 backdrop-blur-md text-[8px] sm:text-[9px] font-bold tracking-wider uppercase"
-                            title="Room Moderator"
-                          >
-                            <Crown size={10} className="fill-amber-400 text-amber-400" />
-                            <span>HOST</span>
-                          </span>
-                        ) : null}
-
                         {isLocal ? (
                           <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/35 text-[8px] sm:text-[9px] font-extrabold tracking-wider shrink-0 backdrop-blur-md shadow-xs uppercase">
                             YOU
@@ -3226,7 +3305,10 @@ export function JunctionRoom({
               return (
                 <div
                   key={`vacant-${index}`}
-                  onClick={handleCopyLink}
+                  onClick={() => {
+                    handleCopyLink();
+                    setIsInviteModalOpen(true);
+                  }}
                   className={`relative w-full min-w-0 p-3 sm:p-4 rounded-2xl sm:rounded-[1.4rem] border border-dashed border-white/15 hover:border-indigo-400/50 bg-[#0E1017]/40 hover:bg-indigo-950/20 backdrop-blur-xl flex flex-col justify-between items-center text-center group cursor-pointer transition-all duration-200 active:scale-98 shadow-sm hover:shadow-[0_0_25px_rgba(99,102,241,0.15)] overflow-hidden ${
                     SEAT_SLOTS.length <= 2
                       ? "min-h-[175px] sm:min-h-[285px]"
@@ -3513,13 +3595,9 @@ export function JunctionRoom({
                           <UserAvatar avatar={msg.senderAvatar} size="sm" className="!w-full !h-full" badgeRole={senderRole} />
                         </div>
                         <span className="text-[11px] font-semibold text-slate-300">{msg.senderName}</span>
-                        {senderRole && senderRole !== "user" ? (
+                        {senderRole && senderRole !== "user" && (
                           <RoleBadge role={senderRole} size="xs" />
-                        ) : msg.isModerator ? (
-                          <span className="flex items-center gap-0.5 px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                            <Crown size={9} /> Mod
-                          </span>
-                        ) : null}
+                        )}
                         {isPrivate && (
                           <span className="flex items-center gap-0.5 px-1.5 py-0.2 rounded text-[9px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30">
                             <Lock size={9} /> Whisper
@@ -3545,7 +3623,7 @@ export function JunctionRoom({
                           <Reply size={10} /> Replying to {msg.replyTo.senderName}
                         </span>
                         <span className="truncate opacity-75 italic text-[11px]">
-                          "{msg.replyTo.text}"
+                          &ldquo;{msg.replyTo.text}&rdquo;
                         </span>
                       </div>
                     )}
@@ -3661,7 +3739,7 @@ export function JunctionRoom({
                       Replying to {replyingToMessage.senderName}:
                     </span>
                     <span className="text-slate-400 truncate italic text-[11px]">
-                      "{replyingToMessage.text}"
+                      &ldquo;{replyingToMessage.text}&rdquo;
                     </span>
                   </div>
                 </div>
@@ -3916,7 +3994,7 @@ export function JunctionRoom({
                 ? "bg-gradient-to-tr from-rose-600 to-rose-500 hover:from-rose-500 hover:to-rose-400 text-white shadow-[0_4px_18px_rgba(244,63,94,0.45)] ring-2 ring-rose-400/30"
                 : "bg-gradient-to-tr from-emerald-500 to-teal-400 hover:from-emerald-400 text-white shadow-[0_4px_20px_rgba(16,185,129,0.5)] ring-2 ring-emerald-400/40 animate-[pulse_2s_cubic-bezier(0.4,0,0.6,1)_infinite]"
               }`}
-            title={isMutedByMod ? "Muted by Moderator" : isMuted ? "Unmute Mic" : "Mute Mic"}
+            title={isMutedByMod ? "Muted by Moderation" : isMuted ? "Unmute Mic" : "Mute Mic"}
           >
             {isMuted || isMutedByMod ? <MicOff size={19} /> : <Mic size={19} />}
           </button>
@@ -4026,22 +4104,6 @@ export function JunctionRoom({
         </div>
       </div>
 
-      {/* Moderator Control Modal */}
-      {junction && isCurrentModerator && (
-        <ModeratorControlModal
-          isOpen={isModDeckOpen}
-          onClose={() => setIsModDeckOpen(false)}
-          junction={junction}
-          participants={participants}
-          currentModerator={myIdentity}
-          isStaff={isStaff}
-          onModerateParticipant={handleModerateParticipant}
-          onClearChat={handleClearChat}
-          onEndJunction={handleEndJunction}
-          onToggleRoomLock={handleToggleRoomLock}
-          onUpdateJunctionDetails={handleUpdateJunctionDetails}
-        />
-      )}
 
       {/* Profile Preview Popover */}
       <ProfilePreviewModal
@@ -4081,17 +4143,12 @@ export function JunctionRoom({
           (isManager && targetRole === "user")
         );
 
-        const canStaffBan = isStaff && (
-          isSuperAdmin ||
-          (isAdmin && targetRole !== "super_admin" && targetRole !== "admin") ||
-          (isManager && targetRole === "user")
-        );
+        const canStaffBan = (isAdmin || isSuperAdmin) && targetRole !== "super_admin" && targetRole !== "admin";
 
-        const canMute = (isStaff || isCurrentModerator) && (
+        const canMute = isStaff && (
           isSuperAdmin ||
           (isAdmin && targetRole !== "super_admin") ||
-          (isManager && targetRole !== "super_admin" && targetRole !== "admin") ||
-          (!isStaff && isCurrentModerator && targetRole === "user")
+          (isManager && targetRole !== "super_admin" && targetRole !== "admin")
         );
 
         const closeMenu = () => {
@@ -4174,8 +4231,8 @@ export function JunctionRoom({
                 </button>
               )}
 
-              {/* Ban from Room - Official Staff Only */}
-              {canStaffKick && (
+              {/* Ban from Room - Official Staff Only (Admin/Super Admin only) */}
+              {canStaffBan && (
                 <button
                   type="button"
                   onClick={() => {
@@ -4292,37 +4349,6 @@ export function JunctionRoom({
                 </div>
               )}
 
-              {/* Section 3: Room Moderator Co-Host delegation */}
-              {isCurrentModerator && !isStaff && targetRole === "user" && (
-                <div className="pt-1 mt-0.5 border-t border-white/10 flex flex-col gap-0.5">
-                  {target.role === "moderator" ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        handleModerateParticipant(target.identity, "demote_mod");
-                        closeMenu();
-                      }}
-                      className="w-full px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-rose-400 hover:bg-rose-950/60 flex items-center gap-2 transition-colors cursor-pointer"
-                    >
-                      <Shield size={13} />
-                      <span>Remove Co-Host</span>
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        handleModerateParticipant(target.identity, "promote_mod");
-                        closeMenu();
-                      }}
-                      className="w-full px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-amber-400 hover:bg-amber-950/60 flex items-center gap-2 transition-colors cursor-pointer"
-                    >
-                      <Crown size={13} />
-                      <span>Make Co-Host</span>
-                    </button>
-                  )}
-                </div>
-              )}
-
               {/* Section 4: Inline Volume Slider */}
               <div className="px-2.5 py-2 border-t border-white/10 flex items-center gap-2">
                 <button
@@ -4371,7 +4397,9 @@ export function JunctionRoom({
                 <button
                   type="button"
                   onClick={() => {
-                    handleReportParticipant(target.identity);
+                    setReportingTarget(target);
+                    setReportCategory("Inappropriate Audio");
+                    setReportReasonText("");
                     closeMenu();
                   }}
                   className="px-2 py-1 rounded-lg text-[10px] font-semibold text-slate-400 hover:text-rose-400 hover:bg-white/10 flex items-center justify-center gap-1 transition-colors cursor-pointer"
@@ -4388,6 +4416,123 @@ export function JunctionRoom({
       {/* Floating Instagram-Style Direct Messenger for Logged-In Users */}
       <InRoomMessenger isOpen={isDirectMessengerOpen} onClose={() => setIsDirectMessengerOpen(false)} />
 
+      {/* Participant Report Modal with Required Reason */}
+      {reportingTarget && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-fadeIn">
+          <div className="w-full max-w-md bg-[#131522] border border-white/15 rounded-3xl p-5 shadow-2xl flex flex-col gap-4 text-left">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between pb-3 border-b border-white/10">
+              <div className="flex items-center gap-2">
+                <div className="w-9 h-9 rounded-xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-rose-400">
+                  <AlertCircle size={18} />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">Report Participant</h3>
+                  <p className="text-[11px] text-slate-400">Reporting <span className="font-semibold text-rose-300">@{reportingTarget.name || reportingTarget.identity}</span></p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setReportingTarget(null);
+                  setReportReasonText("");
+                }}
+                className="w-8 h-8 rounded-full bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            {/* Common Category Chips */}
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                Reason Category
+              </label>
+              <div className="flex flex-wrap gap-1.5">
+                {[
+                  "Inappropriate Audio",
+                  "Harassment / Abuse",
+                  "Spam / Echo / Noise",
+                  "Hate Speech",
+                  "Underage Concern",
+                  "Other",
+                ].map((cat) => (
+                  <button
+                    key={cat}
+                    type="button"
+                    onClick={() => setReportCategory(cat)}
+                    className={`px-2.5 py-1 rounded-full text-xs font-semibold transition-all cursor-pointer ${
+                      reportCategory === cat
+                        ? "bg-rose-500/25 text-rose-300 border border-rose-500/50 shadow-sm"
+                        : "bg-white/5 text-slate-400 border border-white/10 hover:bg-white/10 hover:text-slate-200"
+                    }`}
+                  >
+                    {cat}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Description Textarea (Required) */}
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center justify-between">
+                <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                  Detailed Reason <span className="text-rose-400">*</span>
+                </label>
+                <span className="text-[10px] text-slate-500 font-mono">Required</span>
+              </div>
+              <textarea
+                value={reportReasonText}
+                onChange={(e) => setReportReasonText(e.target.value)}
+                placeholder="Please describe why you are reporting this participant (e.g. offensive language, loud disturbance)..."
+                rows={3}
+                className="w-full px-3 py-2.5 rounded-xl bg-black/40 border border-white/15 focus:border-rose-500/60 focus:ring-1 focus:ring-rose-500/50 text-white placeholder-slate-500 text-xs resize-none outline-none transition-all"
+              />
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-white/10">
+              <button
+                type="button"
+                onClick={() => {
+                  setReportingTarget(null);
+                  setReportReasonText("");
+                }}
+                disabled={isSubmittingReport}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isSubmittingReport || !reportReasonText.trim()}
+                onClick={() => {
+                  const fullReason = `[${reportCategory}] ${reportReasonText.trim()}`;
+                  handleReportParticipant(reportingTarget.identity, fullReason);
+                }}
+                className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                  !reportReasonText.trim() || isSubmittingReport
+                    ? "bg-rose-500/30 text-rose-300/50 border border-rose-500/20 cursor-not-allowed"
+                    : "bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-600/30 active:scale-95"
+                }`}
+              >
+                {isSubmittingReport ? (
+                  <>
+                    <Loader2 size={13} className="animate-spin" />
+                    <span>Submitting...</span>
+                  </>
+                ) : (
+                  <>
+                    <AlertCircle size={13} />
+                    <span>Submit Report</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Direct Room Invite to Friends Modal */}
       {isInviteModalOpen && junction && (
         <InviteFriendsModal
@@ -4398,8 +4543,8 @@ export function JunctionRoom({
           description={junction.description}
           participantCount={participants.length}
           maxParticipants={junction.maxParticipants || 10}
-          currentUserId={user?.id}
-          currentUsername={user?.name || guest.name}
+          currentUserId={user?.id || guest?.id}
+          currentUsername={user?.name || guest?.name}
         />
       )}
 

@@ -50,17 +50,6 @@ export const ROLE_CONFIGS: Record<string, RoleConfig> = {
     dotColor: "bg-cyan-400",
     glowShadow: "shadow-[0_0_12px_rgba(34,211,238,0.5)]",
   },
-  moderator: {
-    label: "Room Host",
-    shortLabel: "Host",
-    icon: Mic,
-    pillClass: "bg-gradient-to-r from-purple-500/25 via-indigo-500/20 to-purple-500/10 text-purple-300 border-purple-400/50 shadow-purple-500/20",
-    textClass: "text-purple-300 font-bold",
-    borderClass: "border-purple-400/60",
-    bgGradient: "bg-gradient-to-br from-purple-500 to-indigo-600 text-white",
-    dotColor: "bg-purple-400",
-    glowShadow: "shadow-[0_0_12px_rgba(168,85,247,0.5)]",
-  },
 };
 
 export function getRoleConfig(role?: string): RoleConfig | null {

@@ -1,0 +1,22 @@
+{
+  "name": "YapClub - Talk with Strangers & Anonymous Voice Chat",
+  "short_name": "YapClub",
+  "description": "Drop into free 10-seat anonymous voice rooms. Talk with strangers and anonymous voices worldwide with zero signups.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0B0C10",
+  "theme_color": "#6366F1",
+  "icons": [
+    {
+      "src": "/webIcon.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/webIcon.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
+

@@ -556,10 +556,10 @@ export async function PATCH(request: NextRequest) {
         );
       }
 
-      // Target is regular user: Main Admin, Admins, and Managers can ban/unban!
-      if (!isCallerManager) {
+      // Target is regular user: ONLY Main Admin and Admins can ban/unban! Managers cannot suspend users!
+      if (!isCallerAdmin) {
         return NextResponse.json(
-          { error: "Unauthorized: Staff clearance required to ban users." },
+          { error: "Unauthorized: Admin privileges required to suspend accounts. Managers do not have permission to suspend users." },
           { status: 403 }
         );
       }

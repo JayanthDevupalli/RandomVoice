@@ -1858,7 +1858,7 @@ export default function MessagesPage() {
                   return (
                     <div className="p-4 border-t border-white/5 bg-black/40 backdrop-blur-md flex items-center justify-center gap-2 text-slate-400 text-xs sm:text-sm shrink-0">
                       <ShieldAlert size={16} className="text-slate-500" />
-                      <span>You can't message this account.</span>
+                      <span>You can&apos;t message this account.</span>
                     </div>
                   );
                 }

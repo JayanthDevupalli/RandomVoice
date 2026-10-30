@@ -10,6 +10,7 @@ import {
   reportParticipant,
   updateJunctionDetails,
   touchParticipantHeartbeat,
+  toggleRoomLock,
 } from "@/lib/junctions-store";
 
 export const dynamic = "force-dynamic";
@@ -158,25 +159,30 @@ export async function POST(
     }
 
     if (action === "report") {
+      const { reason } = body;
       if (!identity || !targetIdentity) {
         return NextResponse.json({ error: "Missing required parameters for reporting" }, { status: 400 });
       }
-      const result = await reportParticipant(params.id, identity, targetIdentity);
+      if (!reason || typeof reason !== "string" || !reason.trim()) {
+        return NextResponse.json({ error: "A report reason is required." }, { status: 400 });
+      }
+      const result = await reportParticipant(params.id, identity, targetIdentity, reason.trim());
       if (!result.success) {
         return NextResponse.json({ error: result.error }, { status: 400 });
       }
       return NextResponse.json({ junction: result.junction, banned: result.banned, success: true });
     }
 
-    if (action === "claim_mod") {
-      if (!identity) {
-        return NextResponse.json({ error: "Missing identity parameter" }, { status: 400 });
-      }
-      const result = await claimModeratorRole(params.id, identity);
+    if (action === "lock") {
+      const result = await toggleRoomLock(params.id, moderatorIdentity || identity || "", Boolean(isLocked));
       if (!result.success) {
         return NextResponse.json({ error: result.error }, { status: 400 });
       }
       return NextResponse.json({ junction: result.junction, success: true });
+    }
+
+    if (action === "claim_mod") {
+      return NextResponse.json({ error: "Room host role has been decommissioned." }, { status: 400 });
     }
 
     return NextResponse.json({ error: "Invalid action" }, { status: 400 });
