@@ -84,3 +84,20 @@ export type ModerationActionType =
   | 'demote_mod' 
   | 'end_junction';
 
+export interface UserReportRecord {
+  id: string;
+  reporterIdentity: string;
+  reporterName: string;
+  targetIdentity: string;
+  targetName: string;
+  targetUsername?: string;
+  targetAvatar?: string;
+  targetIsGuest?: boolean;
+  junctionId: string;
+  junctionName: string;
+  category: string;
+  reason: string;
+  timestamp: number;
+  createdAt?: string;
+  status: 'pending' | 'resolved' | 'dismissed';
+}

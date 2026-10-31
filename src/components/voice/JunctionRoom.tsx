@@ -33,6 +33,7 @@ import {
   X,
   Volume1,
   UserPlus,
+  GripVertical,
   Flame,
   Rocket,
   Heart,
@@ -523,6 +524,97 @@ export function JunctionRoom({
   }, [router]);
 
   const [isDirectMessengerOpen, setIsDirectMessengerOpen] = useState(false);
+  const [isLeaveModalOpen, setIsLeaveModalOpen] = useState(false);
+
+  // Floating Minimized Draggable Pill State & Handlers
+  const [minimizedPillPos, setMinimizedPillPos] = useState<{ x: number; y: number } | null>(null);
+  const [isDraggingPill, setIsDraggingPill] = useState(false);
+  const pillDragRef = useRef<{
+    startX: number;
+    startY: number;
+    initialX: number;
+    initialY: number;
+    hasMoved: boolean;
+    pillWidth: number;
+    pillHeight: number;
+  }>({ startX: 0, startY: 0, initialX: 0, initialY: 0, hasMoved: false, pillWidth: 0, pillHeight: 0 });
+  const minimizedPillRef = useRef<HTMLDivElement | null>(null);
+
+  const handlePillPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    const rect = minimizedPillRef.current?.getBoundingClientRect();
+    if (!rect) return;
+
+    pillDragRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      initialX: rect.left,
+      initialY: rect.top,
+      hasMoved: false,
+      pillWidth: rect.width,
+      pillHeight: rect.height,
+    };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+
+  const handlePillPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
+    const dx = e.clientX - pillDragRef.current.startX;
+    const dy = e.clientY - pillDragRef.current.startY;
+
+    if (!pillDragRef.current.hasMoved && Math.hypot(dx, dy) > 4) {
+      pillDragRef.current.hasMoved = true;
+      setIsDraggingPill(true);
+    }
+
+    if (pillDragRef.current.hasMoved) {
+      const margin = 12;
+      const maxX = Math.max(margin, window.innerWidth - pillDragRef.current.pillWidth - margin);
+      const maxY = Math.max(margin, window.innerHeight - pillDragRef.current.pillHeight - margin);
+
+      const newX = Math.max(margin, Math.min(maxX, pillDragRef.current.initialX + dx));
+      const newY = Math.max(margin, Math.min(maxY, pillDragRef.current.initialY + dy));
+      setMinimizedPillPos({ x: newX, y: newY });
+    }
+  };
+
+  const handlePillPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch {}
+    }
+    if (isDraggingPill) {
+      setIsDraggingPill(false);
+    }
+  };
+
+  const handlePillClick = (e: React.MouseEvent) => {
+    if (pillDragRef.current.hasMoved) {
+      pillDragRef.current.hasMoved = false;
+      return;
+    }
+    onMaximize?.();
+  };
+
+  useEffect(() => {
+    const handleResize = () => {
+      setMinimizedPillPos((prev) => {
+        if (!prev) return null;
+        const margin = 12;
+        const width = minimizedPillRef.current?.offsetWidth || 300;
+        const height = minimizedPillRef.current?.offsetHeight || 52;
+        const maxX = Math.max(margin, window.innerWidth - width - margin);
+        const maxY = Math.max(margin, window.innerHeight - height - margin);
+        return {
+          x: Math.max(margin, Math.min(prev.x, maxX)),
+          y: Math.max(margin, Math.min(prev.y, maxY)),
+        };
+      });
+    };
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
   const [participantVolumes, setParticipantVolumes] = useState<Record<string, number>>(() => {
     if (typeof window !== "undefined") {
       try {
@@ -2644,131 +2736,159 @@ export function JunctionRoom({
       )}
 
       {isMinimized ? (
-        /* Floating Picture-in-Picture Mini-Player Bar */
-        <div className="fixed bottom-3 inset-x-3 sm:inset-x-auto sm:right-6 sm:bottom-6 z-[120] pointer-events-auto animate-in fade-in slide-in-from-bottom-5 duration-200">
+        /* Floating Picture-in-Picture Mini-Player Capsule (Draggable & Circled Fluid) */
+        <div
+          ref={minimizedPillRef}
+          onPointerDown={handlePillPointerDown}
+          onPointerMove={handlePillPointerMove}
+          onPointerUp={handlePillPointerUp}
+          onPointerCancel={handlePillPointerUp}
+          onClick={handlePillClick}
+          style={
+            minimizedPillPos
+              ? { left: `${minimizedPillPos.x}px`, top: `${minimizedPillPos.y}px`, transform: "none" }
+              : { bottom: "24px", left: "50%", transform: "translateX(-50%)" }
+          }
+          className={`fixed z-[120] pointer-events-auto touch-none select-none transition-transform duration-100 animate-in fade-in zoom-in-95 duration-200 ${
+            isDraggingPill ? "cursor-grabbing scale-[1.04]" : "cursor-grab hover:scale-[1.01]"
+          }`}
+          title="Drag to reposition, tap to expand"
+        >
           <div
-            onClick={onMaximize}
-            className="group flex items-center justify-between gap-3 sm:gap-4 p-2.5 sm:p-3 bg-[#0B0C12]/95 hover:bg-[#12141F]/95 backdrop-blur-2xl border border-white/10 hover:border-indigo-500/40 rounded-2xl sm:rounded-3xl shadow-[0_12px_45px_rgba(0,0,0,0.85)] cursor-pointer transition-all active:scale-[0.99] select-none max-w-md"
+            className={`flex items-center gap-2 sm:gap-2.5 py-1.5 pl-2 pr-2.5 rounded-full bg-[#0B0C15]/95 hover:bg-[#101220]/95 backdrop-blur-2xl border border-white/15 hover:border-indigo-500/40 shadow-[0_12px_40px_rgba(0,0,0,0.85)] transition-shadow duration-200 ${
+              isDraggingPill ? "shadow-[0_16px_50px_rgba(99,102,241,0.35)] ring-2 ring-indigo-500/60" : ""
+            }`}
           >
-            {/* Left: Speaker Avatar + Halo + Soundwave */}
-            <div className="flex items-center gap-2.5 min-w-0">
-              <div className="relative shrink-0">
-                <div
-                  className={`w-10 h-10 sm:w-11 sm:h-11 rounded-2xl flex items-center justify-center overflow-hidden transition-all duration-300 ${isSomeoneSpeaking
-                      ? "ring-2 ring-emerald-400 shadow-[0_0_20px_rgba(52,211,153,0.5)] animate-pulse"
-                      : "ring-1 ring-white/15"
-                    }`}
-                  style={{ backgroundColor: speakingParticipant?.color || "#6366F1" }}
-                >
-                  <UserAvatar
-                    avatar={speakingParticipant?.avatar}
-                    color={speakingParticipant?.color}
-                    size="sm"
-                    isSpeaking={isSomeoneSpeaking}
-                  />
-                </div>
+            {/* Drag Grip Handle */}
+            <div className="pl-0.5 text-slate-500 hover:text-slate-300 transition-colors shrink-0">
+              <GripVertical size={13} />
+            </div>
 
-                {/* Live Pill Badge on Avatar */}
-                <div className="absolute -top-1 -right-1 px-1 py-0.2 bg-emerald-500 text-[8px] font-black tracking-wider text-slate-950 rounded-full border border-black shadow-xs flex items-center gap-0.5">
+            {/* Speaker Avatar + Live Ripple */}
+            <div className="relative shrink-0">
+              <div
+                className={`w-9 h-9 rounded-full flex items-center justify-center overflow-hidden transition-all duration-300 ${
+                  isSomeoneSpeaking
+                    ? "ring-2 ring-emerald-400 shadow-[0_0_15px_rgba(52,211,153,0.6)] animate-pulse"
+                    : "ring-1 ring-white/15"
+                }`}
+                style={{ backgroundColor: speakingParticipant?.color || "#6366F1" }}
+              >
+                <UserAvatar
+                  avatar={speakingParticipant?.avatar}
+                  color={speakingParticipant?.color}
+                  size="sm"
+                  isSpeaking={isSomeoneSpeaking}
+                />
+              </div>
+
+              {/* Live Badge or Mic Status */}
+              {isMuted ? (
+                <div className="absolute -bottom-0.5 -right-0.5 p-0.5 rounded-full bg-rose-600 text-white border border-black shadow-xs">
+                  <MicOff size={7} />
+                </div>
+              ) : (
+                <div className="absolute -top-0.5 -right-0.5 px-1 py-[1px] bg-emerald-500 text-[7px] font-black tracking-wider text-slate-950 rounded-full border border-black shadow-xs flex items-center gap-0.5">
                   <span className="w-1 h-1 rounded-full bg-slate-950 animate-ping" />
                   <span>LIVE</span>
                 </div>
+              )}
+            </div>
 
-                {/* Mic Muted indicator on local participant */}
-                {isMuted && (
-                  <div className="absolute -bottom-1 -right-1 p-1 rounded-full bg-rose-600 text-white border border-black shadow-xs">
-                    <MicOff size={8} />
-                  </div>
-                )}
-              </div>
+            {/* Room & Occupant / Speaking Status */}
+            <div className="min-w-0 flex flex-col justify-center pr-1">
+              <span className="font-bold text-xs text-white truncate max-w-[95px] sm:max-w-[130px] leading-tight group-hover:text-indigo-300 transition-colors">
+                {junction?.name || "Voice Room"}
+              </span>
 
-              {/* Title & Live Status */}
-              <div className="min-w-0 flex flex-col justify-center">
-                <div className="flex items-center gap-1.5">
-                  <span className="font-bold text-xs sm:text-sm text-white truncate max-w-[120px] xs:max-w-[150px] sm:max-w-[180px] group-hover:text-indigo-300 transition-colors">
-                    {junction?.name || "Voice Room"}
-                  </span>
-                </div>
-
-                <div className="flex items-center gap-1.5 text-[10px] sm:text-xs">
-                  {isSomeoneSpeaking ? (
-                    <div className="flex items-center gap-1 text-emerald-400 font-medium">
-                      <div className="flex items-center gap-0.5 h-2">
-                        <span className="w-0.5 bg-emerald-400 rounded-full soundwave-bar-1" />
-                        <span className="w-0.5 bg-emerald-400 rounded-full soundwave-bar-2" />
-                        <span className="w-0.5 bg-emerald-400 rounded-full soundwave-bar-3" />
-                      </div>
-                      <span className="truncate max-w-[90px] xs:max-w-[120px]">
-                        {isLocalSpeaking ? "You are speaking" : `${speakingParticipant?.name} speaking`}
-                      </span>
+              <div className="flex items-center gap-1 text-[10px] leading-none mt-0.5">
+                {isSomeoneSpeaking ? (
+                  <div className="flex items-center gap-1 text-emerald-400 font-medium">
+                    <div className="flex items-center gap-0.5 h-2">
+                      <span className="w-0.5 h-2 bg-emerald-400 rounded-full soundwave-bar-1" />
+                      <span className="w-0.5 h-2 bg-emerald-400 rounded-full soundwave-bar-2" />
+                      <span className="w-0.5 h-2 bg-emerald-400 rounded-full soundwave-bar-3" />
                     </div>
-                  ) : (
-                    <span className="text-slate-400 truncate">
-                      {effectiveParticipants.length}/{junction?.maxParticipants || 10} in room
+                    <span className="truncate max-w-[70px] sm:max-w-[90px]">
+                      {isLocalSpeaking ? "You" : speakingParticipant?.name || "Talking"}
                     </span>
-                  )}
-                </div>
+                  </div>
+                ) : (
+                  <span className="text-slate-400 flex items-center gap-1 font-medium">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    <span>{effectiveParticipants.length}/{junction?.maxParticipants || 10}</span>
+                  </span>
+                )}
               </div>
             </div>
 
-            {/* Right: Quick Controls Dock */}
-            <div className="flex items-center gap-1 sm:gap-1.5 shrink-0 ml-1">
+            {/* Micro Divider */}
+            <div className="h-5 w-px bg-white/10 shrink-0" />
+
+            {/* Circular Action Buttons */}
+            <div className="flex items-center gap-1 shrink-0">
               {/* Mic Toggle Button */}
               <button
                 type="button"
+                onPointerDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
                   e.stopPropagation();
                   handleToggleMic();
                 }}
-                className={`p-2 sm:p-2.5 rounded-xl text-xs font-semibold transition-all active:scale-95 cursor-pointer flex items-center justify-center ${isMuted || isMutedByMod
-                    ? "bg-rose-500/20 text-rose-300 border border-rose-500/30 hover:bg-rose-500/30"
-                    : "bg-white/10 text-emerald-300 hover:bg-white/15 border border-white/10"
-                  }`}
+                className={`w-8 h-8 rounded-full flex items-center justify-center transition-all active:scale-90 cursor-pointer ${
+                  isMuted || isMutedByMod
+                    ? "bg-rose-500/25 text-rose-300 border border-rose-500/40 hover:bg-rose-500/35 ring-1 ring-rose-500/20"
+                    : "bg-white/10 text-emerald-300 border border-white/10 hover:bg-white/15"
+                }`}
                 title={isMuted ? "Unmute Microphone" : "Mute Microphone"}
               >
-                {isMuted || isMutedByMod ? <MicOff size={14} /> : <Mic size={14} />}
+                {isMuted || isMutedByMod ? <MicOff size={13} /> : <Mic size={13} />}
               </button>
 
               {/* Deafen Toggle Button */}
               <button
                 type="button"
+                onPointerDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
                   e.stopPropagation();
                   setIsDeafened(!isDeafened);
                 }}
-                className={`p-2 sm:p-2.5 rounded-xl text-xs font-semibold transition-all active:scale-95 cursor-pointer flex items-center justify-center ${isDeafened
-                    ? "bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:bg-amber-500/30"
-                    : "bg-white/5 text-slate-300 hover:text-white hover:bg-white/10 border border-white/5"
-                  }`}
+                className={`w-8 h-8 rounded-full flex items-center justify-center transition-all active:scale-90 cursor-pointer ${
+                  isDeafened
+                    ? "bg-amber-500/25 text-amber-300 border border-amber-500/40 hover:bg-amber-500/35"
+                    : "bg-white/5 text-slate-400 hover:text-white hover:bg-white/10 border border-white/5"
+                }`}
                 title={isDeafened ? "Undeafen Audio" : "Deafen Audio"}
               >
-                {isDeafened ? <VolumeX size={14} /> : <Volume2 size={14} />}
+                {isDeafened ? <VolumeX size={13} /> : <Volume2 size={13} />}
               </button>
 
               {/* Maximize Button */}
               <button
                 type="button"
+                onPointerDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
                   e.stopPropagation();
                   onMaximize?.();
                 }}
-                className="p-2 sm:p-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-all shadow-md active:scale-95 cursor-pointer flex items-center justify-center"
+                className="w-8 h-8 rounded-full bg-indigo-600 hover:bg-indigo-500 text-white shadow-md shadow-indigo-600/30 flex items-center justify-center transition-all active:scale-90 cursor-pointer"
                 title="Expand to Full Room"
               >
-                <Maximize2 size={14} />
+                <Maximize2 size={13} />
               </button>
 
               {/* Leave Room Button */}
               <button
                 type="button"
+                onPointerDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
                   e.stopPropagation();
-                  handleLeave();
+                  setIsLeaveModalOpen(true);
                 }}
-                className="p-2 sm:p-2.5 rounded-xl bg-white/5 hover:bg-rose-600/20 text-slate-400 hover:text-rose-400 border border-white/5 hover:border-rose-500/30 transition-all active:scale-95 cursor-pointer flex items-center justify-center"
+                className="w-8 h-8 rounded-full bg-white/5 hover:bg-rose-600/20 text-slate-400 hover:text-rose-400 border border-white/5 hover:border-rose-500/30 transition-all active:scale-90 cursor-pointer flex items-center justify-center"
                 title="Leave Room"
               >
-                <PhoneOff size={14} />
+                <PhoneOff size={13} />
               </button>
             </div>
           </div>
@@ -2804,9 +2924,9 @@ export function JunctionRoom({
                 <div className="min-w-0 flex items-center gap-2 sm:gap-3">
                   <button
                     type="button"
-                    onClick={handleLeave}
+                    onClick={() => setIsLeaveModalOpen(true)}
                     className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 flex items-center justify-center text-slate-400 hover:text-white transition-all cursor-pointer shrink-0 active:scale-95"
-                    title="Leave Room"
+                    title="Leave or Minimize Room"
                   >
                     <ChevronLeft size={16} />
                   </button>
@@ -3950,7 +4070,7 @@ export function JunctionRoom({
 
               {/* Disconnect & Leave Junction (Hero Circular End Call Button) */}
               <button
-                onClick={handleLeave}
+                onClick={() => setIsLeaveModalOpen(true)}
                 className="w-11 h-11 sm:w-12 sm:h-12 rounded-full bg-gradient-to-tr from-rose-600 via-rose-600 to-red-500 hover:from-rose-500 hover:to-red-400 text-white shadow-[0_4px_20px_rgba(244,63,94,0.45)] ring-2 ring-rose-400/30 flex items-center justify-center active:scale-90 hover:scale-105 transition-all duration-200 cursor-pointer"
                 title="Leave Junction"
               >
@@ -4508,6 +4628,80 @@ export function JunctionRoom({
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Leave Voice Junction Confirmation Modal - Rendered at Root (Works in Both Full & Minimized Mode) */}
+      {isLeaveModalOpen && (
+        <div
+          className="fixed inset-0 z-[150] flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-fadeIn"
+          onClick={() => setIsLeaveModalOpen(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm bg-[#121320] border border-white/15 rounded-3xl p-5 sm:p-6 shadow-2xl flex flex-col gap-4 text-center animate-in zoom-in-95 duration-200"
+          >
+            <div className="w-12 h-12 rounded-2xl bg-rose-500/15 border border-rose-500/30 text-rose-400 flex items-center justify-center mx-auto shadow-inner">
+              <PhoneOff size={22} />
+            </div>
+
+            <div>
+              <h3 className="text-base font-bold text-white">Leave Voice Junction?</h3>
+              <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                Are you sure you want to disconnect from <span className="font-semibold text-white">{junction?.name || "this room"}</span>?
+              </p>
+            </div>
+
+            <div className="flex flex-col gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsLeaveModalOpen(false);
+                  handleLeave();
+                }}
+                className="w-full py-2.5 rounded-xl bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 text-white font-bold text-xs sm:text-sm shadow-lg shadow-rose-600/30 active:scale-95 transition-all cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                <PhoneOff size={15} />
+                <span>Leave Call</span>
+              </button>
+
+              {!isMinimized && onMinimize && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsLeaveModalOpen(false);
+                    handleMinimize();
+                  }}
+                  className="w-full py-2.5 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/30 text-indigo-300 font-semibold text-xs sm:text-sm active:scale-95 transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                >
+                  <Minimize2 size={15} />
+                  <span>Minimize Call (Stay Connected)</span>
+                </button>
+              )}
+
+              {isMinimized && onMaximize && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsLeaveModalOpen(false);
+                    onMaximize();
+                  }}
+                  className="w-full py-2.5 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/30 text-indigo-300 font-semibold text-xs sm:text-sm active:scale-95 transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                >
+                  <Maximize2 size={15} />
+                  <span>Open Full Room</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => setIsLeaveModalOpen(false)}
+                className="w-full py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white font-semibold text-xs transition-colors cursor-pointer"
+              >
+                {isMinimized ? "Keep Minimized" : "Stay in Room"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </>

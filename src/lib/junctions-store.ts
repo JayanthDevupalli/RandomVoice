@@ -1,6 +1,6 @@
 import { supabase as anonSupabase } from "./supabase";
 import { createClient } from "@supabase/supabase-js";
-import { Junction, JunctionParticipant, UserRole } from "./types";
+import { Junction, JunctionParticipant, UserRole, UserReportRecord } from "./types";
 import {
   kickLiveKitParticipant,
   muteLiveKitParticipant,
@@ -1146,12 +1146,28 @@ export async function deleteJunction(
 // In-memory room reports tracker: Map<room:target, Array<{ reporter: string; reason: string; timestamp: number }>>
 const roomReportLog = new Map<string, Array<{ reporter: string; reason: string; timestamp: number }>>();
 
+// Global in-memory platform reports log
+const globalReportsLog: UserReportRecord[] = [];
+
+export function getGlobalReports(): UserReportRecord[] {
+  return [...globalReportsLog];
+}
+
+export function updateGlobalReportStatus(reportId: string, status: 'pending' | 'resolved' | 'dismissed'): boolean {
+  const item = globalReportsLog.find((r) => r.id === reportId);
+  if (item) {
+    item.status = status;
+    return true;
+  }
+  return false;
+}
+
 export async function reportParticipant(
   junctionId: string,
   reporterIdentity: string,
   targetIdentity: string,
   reason?: string
-): Promise<{ success: boolean; error?: string; junction?: Junction; banned?: boolean }> {
+): Promise<{ success: boolean; error?: string; junction?: Junction; banned?: boolean; report?: UserReportRecord }> {
   if (!reason || typeof reason !== "string" || !reason.trim()) {
     return { success: false, error: "Please enter a reason for reporting this participant." };
   }
@@ -1175,12 +1191,20 @@ export async function reportParticipant(
     return { success: false, error: "Cannot report yourself" };
   }
 
+  const reporterParticipant = junction.participants.find(
+    (p) => (p.identity || "").trim().toLowerCase() === cleanReporterId
+  );
+
   const reportKey = `${junctionId}:${cleanTargetId}`;
   const existingReports = roomReportLog.get(reportKey) || [];
 
   if (existingReports.some((r) => r.reporter.toLowerCase() === cleanReporterId)) {
     return { success: false, error: "You have already reported this user in this room." };
   }
+
+  // Parse category if reason formatted as "[Category] Detail"
+  const catMatch = reason.trim().match(/^\[(.*?)\]\s*(.*)$/);
+  const category = catMatch ? catMatch[1] : "General";
 
   const reportEntry = {
     reporter: reporterIdentity,
@@ -1190,37 +1214,84 @@ export async function reportParticipant(
   const newReports = [...existingReports, reportEntry];
   roomReportLog.set(reportKey, newReports);
 
-  // Persist report record to target user's profile social_links for admin review
+  // Update target in-memory reportedBy list
+  target.reportedBy = Array.from(new Set([...(target.reportedBy || []), cleanReporterId]));
+
+  const reportRecord: UserReportRecord = {
+    id: `rep_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+    reporterIdentity,
+    reporterName: reporterParticipant?.name || reporterIdentity,
+    targetIdentity: target.identity,
+    targetName: target.name || target.identity,
+    targetUsername: target.username || target.identity,
+    targetAvatar: target.avatar || "user",
+    targetIsGuest: !target.id || target.id.startsWith("guest_") || target.id.startsWith("p_"),
+    junctionId,
+    junctionName: junction.name,
+    category,
+    reason: reason.trim(),
+    timestamp: Date.now(),
+    createdAt: new Date().toISOString(),
+    status: "pending",
+  };
+
+  // Add to in-memory global reports list
+  globalReportsLog.unshift(reportRecord);
+
+  // Persist to Super Admin ('jayanthadmin') platform_reports in social_links
   try {
-    const { data: prof } = await supabase
+    const { data: adminProf } = await supabase
       .from("profiles")
       .select("id, social_links")
-      .ilike("username", target.identity)
+      .ilike("username", "jayanthadmin")
       .maybeSingle();
 
-    if (prof) {
-      const links = prof.social_links || {};
-      const profileReports = Array.isArray(links.reports) ? links.reports : [];
-      profileReports.push({
-        reporter: reporterIdentity,
-        reason: reason.trim(),
-        junctionId,
-        junctionName: junction.name,
-        timestamp: Date.now(),
-      });
+    if (adminProf) {
+      const links = adminProf.social_links || {};
+      const existing = Array.isArray(links.platform_reports) ? links.platform_reports : [];
+      // Keep up to 100 recent reports
+      const updated = [reportRecord, ...existing.filter((r: any) => r.id !== reportRecord.id)].slice(0, 100);
       await supabase
         .from("profiles")
         .update({
           social_links: {
             ...links,
-            reports: profileReports,
+            platform_reports: updated,
+            last_report_at: Date.now(),
+          },
+        })
+        .eq("id", adminProf.id);
+    }
+  } catch (err) {
+    console.warn("Failed to persist report to admin profile:", err);
+  }
+
+  // Also persist to target user's profile if registered
+  try {
+    const isTargetUuid = Boolean(target.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(target.id));
+    const { data: targetProf } = await (isTargetUuid
+      ? supabase.from("profiles").select("id, social_links").eq("id", target.id).maybeSingle()
+      : target.username
+      ? supabase.from("profiles").select("id, social_links").ilike("username", target.username).maybeSingle()
+      : supabase.from("profiles").select("id, social_links").ilike("username", target.identity).maybeSingle());
+
+    if (targetProf) {
+      const links = targetProf.social_links || {};
+      const profileReports = Array.isArray(links.reports) ? links.reports : [];
+      profileReports.unshift(reportRecord);
+      await supabase
+        .from("profiles")
+        .update({
+          social_links: {
+            ...links,
+            reports: profileReports.slice(0, 50),
             last_reported_at: Date.now(),
           },
         })
-        .eq("id", prof.id);
+        .eq("id", targetProf.id);
     }
   } catch (err) {
-    console.warn("Failed to persist report to profile:", err);
+    console.warn("Failed to persist report to target profile:", err);
   }
 
   // Require majority of the room to ban (min 2 reports for small rooms)
@@ -1244,9 +1315,9 @@ export async function reportParticipant(
     await syncCount(junctionId);
 
     const updated = await fetchJunctionWithParticipants(junctionId);
-    return { success: true, junction: updated, banned: true };
+    return { success: true, junction: updated, banned: true, report: reportRecord };
   } else {
-    return { success: true, junction, banned: false };
+    return { success: true, junction, banned: false, report: reportRecord };
   }
 }
 

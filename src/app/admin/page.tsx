@@ -36,6 +36,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useMaintenanceMode } from "@/hooks/useMaintenanceMode";
+import { UserReportRecord } from "@/lib/types";
 
 interface AdminUserRecord {
   id: string;
@@ -84,6 +85,7 @@ export default function AdminPortalPage() {
   const [activeTab, setActiveTab] = useState<"users" | "rooms" | "desk" | "stats">("users");
   const [users, setUsers] = useState<AdminUserRecord[]>([]);
   const [rooms, setRooms] = useState<AdminRoomRecord[]>([]);
+  const [reports, setReports] = useState<UserReportRecord[]>([]);
   const [isLoadingData, setIsLoadingData] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [toastMessage, setToastMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -93,7 +95,9 @@ export default function AdminPortalPage() {
   const [roleFilter, setRoleFilter] = useState<"all" | UserRole | "banned">("all");
   const [roomFilter, setRoomFilter] = useState<"all" | "locked" | "public">("all");
   const [deskSubFilter, setDeskSubFilter] = useState<"all" | "platform" | "rooms" | "reports">("all");
+  const [reportFilter, setReportFilter] = useState<"all" | "pending" | "resolved" | "dismissed">("all");
   const [deskSearch, setDeskSearch] = useState("");
+  const [isActioningReport, setIsActioningReport] = useState<string | null>(null);
 
   // Confirmation Modals
   const [pendingAction, setPendingAction] = useState<{
@@ -208,9 +212,10 @@ export default function AdminPortalPage() {
     setIsRefreshing(true);
     try {
       const headers = await getAuthHeaders();
-      const [usersRes, roomsRes] = await Promise.all([
+      const [usersRes, roomsRes, reportsRes] = await Promise.all([
         fetch("/api/admin/users", { headers }),
         fetch("/api/admin/rooms", { headers }),
+        fetch("/api/admin/reports", { headers }),
       ]);
 
       if (usersRes.ok) {
@@ -220,6 +225,10 @@ export default function AdminPortalPage() {
       if (roomsRes.ok) {
         const rData = await roomsRes.json();
         setRooms(rData.rooms || []);
+      }
+      if (reportsRes.ok) {
+        const repData = await reportsRes.json();
+        setReports(repData.reports || []);
       }
     } catch (e) {
       console.error("Failed to load admin data:", e);
@@ -472,34 +481,66 @@ export default function AdminPortalPage() {
     return list;
   }, [rooms]);
 
-  // Moderation Desk: Reported active participants
-  const reportedParticipants = useMemo(() => {
-    const list: Array<{
-      roomId: string;
-      roomName: string;
-      identity: string;
-      name: string;
-      avatar: string;
-      reportedBy: string[];
-    }> = [];
-    rooms.forEach((r) => {
-      (r.participants || []).forEach((p) => {
-        if (p.reportedBy && p.reportedBy.length > 0) {
-          list.push({
-            roomId: r.id,
-            roomName: r.name,
-            identity: p.identity,
-            name: p.name,
-            avatar: p.avatar,
-            reportedBy: p.reportedBy,
-          });
-        }
+  // Moderation Desk: Report Actions
+  const handleUpdateReportStatus = async (reportId: string, status: "pending" | "resolved" | "dismissed") => {
+    try {
+      setIsActioningReport(reportId);
+      const headers = await getAuthHeaders();
+      const res = await fetch("/api/admin/reports", {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ reportId, status }),
       });
-    });
-    return list;
-  }, [rooms]);
+      if (!res.ok) throw new Error("Failed to update report status");
+      setReports((prev) =>
+        prev.map((r) => (r.id === reportId ? { ...r, status } : r))
+      );
+      showToast("success", `Report marked as ${status}`);
+    } catch (err: any) {
+      showToast("error", err.message || "Failed to update report");
+    } finally {
+      setIsActioningReport(null);
+    }
+  };
 
-  const totalDeskCount = platformBannedUsers.length + roomBans.length + reportedParticipants.length;
+  const handleDeleteReport = async (reportId: string) => {
+    try {
+      setIsActioningReport(reportId);
+      const headers = await getAuthHeaders();
+      const res = await fetch(`/api/admin/reports?reportId=${encodeURIComponent(reportId)}`, {
+        method: "DELETE",
+        headers,
+      });
+      if (!res.ok) throw new Error("Failed to delete report");
+      setReports((prev) => prev.filter((r) => r.id !== reportId));
+      showToast("success", "Report removed from desk");
+    } catch (err: any) {
+      showToast("error", err.message || "Failed to delete report");
+    } finally {
+      setIsActioningReport(null);
+    }
+  };
+
+  // Moderation Desk: Filtered persistent reports
+  const filteredReports = useMemo(() => {
+    return reports.filter((r) => {
+      if (reportFilter !== "all" && r.status !== reportFilter) return false;
+      if (!deskSearch.trim()) return true;
+      const q = deskSearch.toLowerCase();
+      return (
+        (r.targetName || "").toLowerCase().includes(q) ||
+        (r.targetUsername || "").toLowerCase().includes(q) ||
+        (r.targetIdentity || "").toLowerCase().includes(q) ||
+        (r.reporterName || "").toLowerCase().includes(q) ||
+        (r.reporterIdentity || "").toLowerCase().includes(q) ||
+        (r.junctionName || "").toLowerCase().includes(q) ||
+        (r.category || "").toLowerCase().includes(q) ||
+        (r.reason || "").toLowerCase().includes(q)
+      );
+    });
+  }, [reports, reportFilter, deskSearch]);
+
+  const totalDeskCount = platformBannedUsers.length + roomBans.length + reports.length;
 
   // Filtered Users
   const filteredUsers = useMemo(() => {
@@ -1586,7 +1627,7 @@ export default function AdminPortalPage() {
                       : "bg-black/30 text-slate-400 hover:text-slate-200"
                   }`}
                 >
-                  Reports & Flags ({reportedParticipants.length})
+                  Reports & Flags ({reports.length})
                 </button>
               </div>
 
@@ -1785,84 +1826,192 @@ export default function AdminPortalPage() {
             {/* SECTION 3: REPORTS & FLAGGED ACTIVITY */}
             {(deskSubFilter === "all" || deskSubFilter === "reports") && (
               <div className="space-y-3 pt-2">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
                   <h3 className="text-sm font-bold text-white flex items-center gap-2">
                     <Flag size={16} className="text-purple-400" />
-                    <span>Reported Users in Active Rooms</span>
-                    <span className="text-[11px] font-normal text-slate-400">({reportedParticipants.length})</span>
+                    <span>Reported Users & Infractions</span>
+                    <span className="text-[11px] font-normal text-slate-400">({filteredReports.length})</span>
                   </h3>
+
+                  {/* Status filter chips for reports */}
+                  <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
+                    {(["all", "pending", "resolved", "dismissed"] as const).map((st) => (
+                      <button
+                        key={st}
+                        onClick={() => setReportFilter(st)}
+                        className={`px-2.5 py-1 rounded-xl text-[11px] font-semibold capitalize transition-all cursor-pointer ${
+                          reportFilter === st
+                            ? "bg-purple-600 text-white shadow-sm"
+                            : "bg-white/5 text-slate-400 hover:text-slate-200 hover:bg-white/10"
+                        }`}
+                      >
+                        {st === "all" ? `All (${reports.length})` : st}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
-                {reportedParticipants
-                  .filter((p) => {
-                    if (!deskSearch) return true;
-                    const q = deskSearch.toLowerCase();
-                    return (
-                      (p.identity || "").toLowerCase().includes(q) ||
-                      (p.name || "").toLowerCase().includes(q) ||
-                      (p.roomName || "").toLowerCase().includes(q)
-                    );
-                  })
-                  .length === 0 ? (
-                  <div className="p-6 rounded-2xl bg-[#11121A] border border-white/5 text-center text-xs text-slate-500">
-                    No active reported participants inside rooms right now.
+                {filteredReports.length === 0 ? (
+                  <div className="p-8 rounded-2xl bg-[#11121A] border border-white/5 text-center text-xs text-slate-500">
+                    <Flag size={24} className="mx-auto mb-2 text-slate-600 opacity-60" />
+                    <p className="font-semibold text-slate-400">No reports found matching this view</p>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      When participants report users in voice rooms with proper reasons, they will be listed here for review.
+                    </p>
                   </div>
                 ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    {reportedParticipants
-                      .filter((p) => {
-                        if (!deskSearch) return true;
-                        const q = deskSearch.toLowerCase();
-                        return (
-                          (p.identity || "").toLowerCase().includes(q) ||
-                          (p.name || "").toLowerCase().includes(q) ||
-                          (p.roomName || "").toLowerCase().includes(q)
-                        );
-                      })
-                      .map((reported, idx) => (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                    {filteredReports.map((r) => {
+                      const isPending = r.status === "pending";
+                      const isResolved = r.status === "resolved";
+                      const isBusy = isActioningReport === r.id;
+
+                      const category = r.category || "General";
+                      const rawReason = r.reason || "Reported for community guidelines violation";
+                      const displayReason = rawReason.startsWith(`[${category}]`)
+                        ? rawReason.replace(`[${category}]`, "").trim()
+                        : rawReason;
+
+                      return (
                         <div
-                          key={`${reported.roomId}-${reported.identity}-${idx}`}
-                          className="bg-[#11121A] border border-purple-500/20 rounded-2xl p-4 shadow-lg flex items-start justify-between gap-3"
+                          key={r.id}
+                          className="bg-[#11121A] border border-purple-500/20 rounded-2xl p-4 shadow-lg flex flex-col justify-between gap-3 hover:border-purple-500/40 transition-all"
                         >
-                          <div className="flex items-start gap-3">
-                            <UserAvatar
-                              avatar={reported.avatar || "user"}
-                              color="#A855F7"
-                              size="md"
-                              className="!rounded-full border border-purple-500/30 shrink-0"
-                            />
-                            <div>
-                              <div className="text-sm font-bold text-white">{reported.name}</div>
-                              <div className="text-xs text-slate-400 font-mono">@{reported.identity}</div>
-                              <div className="text-[11px] text-slate-400 mt-1">
-                                Room: <strong className="text-purple-300">{reported.roomName}</strong>
+                          <div>
+                            {/* Card Top: Target User + Status Badge */}
+                            <div className="flex items-start justify-between gap-2.5 mb-2.5">
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <div className="relative shrink-0">
+                                  <UserAvatar
+                                    avatar={r.targetAvatar || "user"}
+                                    color="#A855F7"
+                                    size="md"
+                                    className="!rounded-full border border-purple-500/30"
+                                  />
+                                  <div className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-rose-600 border border-black flex items-center justify-center text-white">
+                                    <AlertTriangle size={9} />
+                                  </div>
+                                </div>
+
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="text-sm font-bold text-white truncate">{r.targetName}</span>
+                                    {r.targetIsGuest ? (
+                                      <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/25">
+                                        Guest
+                                      </span>
+                                    ) : (
+                                      <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-indigo-500/15 text-indigo-300 border border-indigo-500/25">
+                                        Member
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="text-xs text-slate-400 font-mono">@{r.targetUsername || r.targetIdentity}</div>
+                                </div>
                               </div>
-                              <div className="text-[11px] text-rose-300 font-semibold mt-1 flex items-center gap-1">
-                                <Flag size={11} className="text-rose-400" />
-                                <span>Reported by {reported.reportedBy.length} member(s)</span>
+
+                              {/* Status Badge */}
+                              <span
+                                className={`px-2 py-0.5 rounded-full text-[10px] font-bold shrink-0 uppercase tracking-wider ${
+                                  isPending
+                                    ? "bg-amber-500/20 text-amber-300 border border-amber-500/30 animate-pulse"
+                                    : isResolved
+                                    ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                                    : "bg-white/10 text-slate-400 border border-white/10"
+                                }`}
+                              >
+                                {r.status}
+                              </span>
+                            </div>
+
+                            {/* Room & Reporter metadata */}
+                            <div className="grid grid-cols-2 gap-2 p-2.5 rounded-xl bg-black/40 border border-white/5 text-[11px] text-slate-400 mb-2.5">
+                              <div>
+                                <span className="text-slate-500 block text-[10px]">Room:</span>
+                                <strong className="text-purple-300 truncate block">{r.junctionName}</strong>
                               </div>
+                              <div>
+                                <span className="text-slate-500 block text-[10px]">Reported by:</span>
+                                <strong className="text-slate-200 truncate block">@{r.reporterName}</strong>
+                              </div>
+                            </div>
+
+                            {/* Reason with Category Pill */}
+                            <div className="p-3 rounded-xl bg-rose-950/20 border border-rose-500/20 text-xs text-rose-200 leading-relaxed">
+                              <div className="flex items-center gap-1.5 mb-1">
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-rose-500/25 text-rose-300 border border-rose-500/30">
+                                  {category}
+                                </span>
+                              </div>
+                              <p className="whitespace-pre-wrap select-text break-words mt-1">{displayReason}</p>
+                            </div>
+
+                            {/* Timestamp */}
+                            <div className="text-[10px] text-slate-500 mt-2">
+                              Reported on: {new Date(r.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
                             </div>
                           </div>
 
-                          <div className="flex flex-col gap-1.5 shrink-0">
-                            {isMainAdmin || isStaffAdmin ? (
+                          {/* Action Buttons */}
+                          <div className="flex items-center justify-between gap-2 border-t border-white/5 pt-2.5 mt-1">
+                            <div className="flex items-center gap-1.5">
+                              {isPending ? (
+                                <button
+                                  type="button"
+                                  disabled={isBusy}
+                                  onClick={() => handleUpdateReportStatus(r.id, "dismissed")}
+                                  className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-slate-400 hover:text-slate-200 text-xs font-semibold transition-colors cursor-pointer"
+                                  title="Dismiss flag as reviewed"
+                                >
+                                  Dismiss
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  disabled={isBusy}
+                                  onClick={() => handleUpdateReportStatus(r.id, "pending")}
+                                  className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-amber-300 text-xs font-semibold transition-colors cursor-pointer"
+                                >
+                                  Reopen
+                                </button>
+                              )}
+
+                              {(isMainAdmin || isStaffAdmin) && (
+                                <button
+                                  type="button"
+                                  disabled={isBusy}
+                                  onClick={() => handleDeleteReport(r.id)}
+                                  className="p-1 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
+                                  title="Delete report entry"
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              )}
+                            </div>
+
+                            {(isMainAdmin || isStaffAdmin) && (
                               <button
-                                onClick={() =>
+                                type="button"
+                                onClick={() => {
+                                  handleUpdateReportStatus(r.id, "resolved");
                                   setPendingAction({
                                     type: "toggle_ban",
-                                    targetId: reported.identity,
-                                    targetName: reported.name,
+                                    targetId: r.targetIdentity,
+                                    targetName: r.targetName,
                                     newBanState: true,
-                                  })
-                                }
-                                className="px-3 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 text-xs font-semibold cursor-pointer transition-all"
+                                  });
+                                  setBanReasonInput(`[${category}] ${displayReason}`);
+                                }}
+                                className="px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold transition-all shadow-md shadow-rose-600/20 active:scale-95 cursor-pointer flex items-center gap-1.5"
                               >
-                                Suspend Account
+                                <Ban size={12} />
+                                <span>Suspend Account</span>
                               </button>
-                            ) : null}
+                            )}
                           </div>
                         </div>
-                      ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>

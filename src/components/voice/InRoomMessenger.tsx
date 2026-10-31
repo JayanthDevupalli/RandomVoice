@@ -737,7 +737,7 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
     <div
       className={`fixed z-50 transition-all duration-300 ease-out shadow-2xl backdrop-blur-2xl border border-white/10 bg-[#0B0C15]/95 overflow-hidden flex flex-col ${
         isMinimized
-          ? "bottom-20 right-3.5 sm:right-6 w-auto sm:min-w-[280px] h-13 rounded-2xl bg-[#0F101C]/95 border-white/15 px-3 py-2"
+          ? "bottom-20 right-3.5 sm:right-6 w-auto sm:min-w-[280px] h-14 rounded-2xl bg-[#0F101C]/95 border-white/15 px-3 py-2"
           : "inset-x-3 bottom-20 top-14 sm:inset-auto sm:bottom-20 sm:right-6 sm:w-[400px] sm:h-[530px] rounded-3xl"
       }`}
     >
@@ -853,16 +853,26 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
           {!activeConversationId && (
             <div className="flex-1 flex flex-col overflow-hidden bg-[#0A0B13]/50">
               {/* Search Bar */}
-              <div className="p-3 border-b border-white/[0.06] bg-black/20">
-                <div className="relative">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+              <div className="px-3 py-2.5 border-b border-white/[0.06] bg-black/25">
+                <div className="relative flex items-center">
+                  <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
                   <input
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     placeholder="Search chats..."
-                    className="w-full pl-8.5 pr-3 py-1.5 bg-black/40 border border-white/10 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500/50 transition-colors"
+                    className="w-full pl-10 pr-8 py-2 bg-black/40 hover:bg-black/50 border border-white/10 focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/20 rounded-xl text-xs text-white placeholder-slate-400 focus:outline-none transition-all"
                   />
+                  {searchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setSearchQuery("")}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 rounded-full bg-white/10 hover:bg-white/20 text-slate-400 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+                      title="Clear search"
+                    >
+                      <X size={10} />
+                    </button>
+                  )}
                 </div>
               </div>
 
