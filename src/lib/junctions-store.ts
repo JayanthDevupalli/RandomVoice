@@ -1280,6 +1280,15 @@ export function updateGlobalReportStatus(reportId: string, status: 'pending' | '
   return false;
 }
 
+export function deleteGlobalReport(reportId: string): boolean {
+  const index = globalReportsLog.findIndex((r) => r.id === reportId);
+  if (index !== -1) {
+    globalReportsLog.splice(index, 1);
+    return true;
+  }
+  return false;
+}
+
 export async function reportParticipant(
   junctionId: string,
   reporterIdentity: string,

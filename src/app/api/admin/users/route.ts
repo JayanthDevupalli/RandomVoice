@@ -337,48 +337,46 @@ export async function PATCH(request: NextRequest) {
         const guestIdentifier = targetUsername || targetUserId;
         if (guestIdentifier) {
           if (isBanned) {
-            // Remove from all active junctions
-            if (targetUsername) {
-              await adminClient
-                .from("junction_participants")
-                .delete()
-                .ilike("identity", targetUsername);
-            }
-            if (targetUserId) {
-              await adminClient
-                .from("junction_participants")
-                .delete()
-                .eq("id", targetUserId);
-            }
+            // Find active junctions where guest is currently inside
+            const { data: activeGuestParts } = await adminClient
+              .from("junction_participants")
+              .select("junction_id")
+              .or(`identity.ilike.${guestIdentifier},id.eq.${guestIdentifier}`);
 
-            // Ban from all junctions
-            const { data: allJuncs } = await adminClient.from("junctions").select("id, banned_identities");
-            if (allJuncs) {
-              for (const j of allJuncs) {
-                const list = Array.isArray(j.banned_identities) ? j.banned_identities : [];
-                if (!list.some((b: string) => b.toLowerCase() === guestIdentifier.toLowerCase())) {
-                  await adminClient
-                    .from("junctions")
-                    .update({ banned_identities: [...list, guestIdentifier] })
-                    .eq("id", j.id);
-                }
-                // Also kick from LiveKit Cloud room
-                await kickLiveKitParticipant(j.id, guestIdentifier);
+            // Remove from active junctions
+            await adminClient
+              .from("junction_participants")
+              .delete()
+              .or(`identity.ilike.${guestIdentifier},id.eq.${guestIdentifier}`);
+
+            // Kick from LiveKit only for rooms they were actually connected to
+            if (activeGuestParts && activeGuestParts.length > 0) {
+              const affectedIds = Array.from(new Set(activeGuestParts.map((p: any) => p.junction_id)));
+              for (const jId of affectedIds) {
+                await kickLiveKitParticipant(jId as string, guestIdentifier);
+                const { count } = await adminClient
+                  .from("junction_participants")
+                  .select("*", { count: "exact", head: true })
+                  .eq("junction_id", jId);
+                await adminClient
+                  .from("junctions")
+                  .update({ current_count: count || 0 })
+                  .eq("id", jId);
               }
             }
 
             return NextResponse.json({
               success: true,
-              message: `Guest @${guestIdentifier} has been suspended and ejected from all rooms.`,
+              message: `Guest @${guestIdentifier} has been suspended and ejected from active hangouts.`,
               isGuest: true,
             });
           } else {
-            // Unban guest from all junctions
+            // Unban guest: clean up from any room-level banned_identities if present
             const { data: allJuncs } = await adminClient.from("junctions").select("id, banned_identities");
             if (allJuncs) {
               for (const j of allJuncs) {
                 const list = Array.isArray(j.banned_identities) ? j.banned_identities : [];
-                const updated = list.filter((b: string) => b.toLowerCase() !== guestIdentifier.toLowerCase());
+                const updated = list.filter((b: string) => b && b.toLowerCase() !== guestIdentifier.toLowerCase());
                 if (updated.length !== list.length) {
                   await adminClient
                     .from("junctions")
@@ -524,55 +522,63 @@ export async function PATCH(request: NextRequest) {
         bannedReason
       );
 
-      // If user is banned, immediately disconnect them from all active voice rooms
+      // If user is banned, immediately disconnect them from active voice rooms
       if (isBanned) {
-        if (targetProfile.username) {
-          await adminClient
-            .from("junction_participants")
-            .delete()
-            .ilike("identity", targetProfile.username);
-        }
-        if (targetUserId) {
-          await adminClient
-            .from("junction_participants")
-            .delete()
-            .eq("id", targetUserId);
-        }
+        // Find junctions where user is currently active
+        const { data: activeUserParts } = await adminClient
+          .from("junction_participants")
+          .select("junction_id")
+          .or(`identity.ilike.${targetProfile.username},id.eq.${targetProfile.id}`);
 
+        // Eject from junction_participants
+        await adminClient
+          .from("junction_participants")
+          .delete()
+          .or(`identity.ilike.${targetProfile.username},id.eq.${targetProfile.id}`);
+
+        // Clear moderator assignment if held
         await adminClient
           .from("junctions")
           .update({ moderator_identity: "" })
           .ilike("moderator_identity", targetProfile.username);
 
-        // Keep all junction current_count values strictly accurate and ban from rooms
-        const { data: allJuncs } = await adminClient.from("junctions").select("id, banned_identities");
-        if (allJuncs) {
-          for (const j of allJuncs) {
-            const list = Array.isArray(j.banned_identities) ? j.banned_identities : [];
-            if (!list.some((b: string) => b.toLowerCase() === targetProfile.username.toLowerCase())) {
-              await adminClient
-                .from("junctions")
-                .update({ banned_identities: [...list, targetProfile.username] })
-                .eq("id", j.id);
-            }
-            await kickLiveKitParticipant(j.id, targetProfile.username);
+        // Kick from LiveKit only for rooms they were actually connected to and update room counts
+        if (activeUserParts && activeUserParts.length > 0) {
+          const affectedIds = Array.from(new Set(activeUserParts.map((p: any) => p.junction_id)));
+          for (const jId of affectedIds) {
+            await kickLiveKitParticipant(jId as string, targetProfile.username);
             const { count } = await adminClient
               .from("junction_participants")
               .select("*", { count: "exact", head: true })
-              .eq("junction_id", j.id);
+              .eq("junction_id", jId);
             await adminClient
               .from("junctions")
               .update({ current_count: count || 0 })
-              .eq("id", j.id);
+              .eq("id", jId);
           }
         }
-      } else {
-        // Unban: remove from all junctions banned_identities
+
+        // Clean up: Ensure this platform-suspended user does NOT pollute any junction's room-level banned_identities
         const { data: allJuncs } = await adminClient.from("junctions").select("id, banned_identities");
         if (allJuncs) {
           for (const j of allJuncs) {
             const list = Array.isArray(j.banned_identities) ? j.banned_identities : [];
-            const updated = list.filter((b: string) => b.toLowerCase() !== targetProfile.username.toLowerCase());
+            const updated = list.filter((b: string) => b && b.toLowerCase() !== targetProfile.username.toLowerCase());
+            if (updated.length !== list.length) {
+              await adminClient
+                .from("junctions")
+                .update({ banned_identities: updated })
+                .eq("id", j.id);
+            }
+          }
+        }
+      } else {
+        // Unban: remove from all junctions banned_identities if residual
+        const { data: allJuncs } = await adminClient.from("junctions").select("id, banned_identities");
+        if (allJuncs) {
+          for (const j of allJuncs) {
+            const list = Array.isArray(j.banned_identities) ? j.banned_identities : [];
+            const updated = list.filter((b: string) => b && b.toLowerCase() !== targetProfile.username.toLowerCase());
             if (updated.length !== list.length) {
               await adminClient
                 .from("junctions")

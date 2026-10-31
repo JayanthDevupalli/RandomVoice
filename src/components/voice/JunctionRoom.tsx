@@ -583,6 +583,7 @@ export function JunctionRoom({
       pillDragRef.current.hasMoved = false;
       return;
     }
+    setMinimizedUnreadCount(0);
     onMaximize?.();
   };
 
@@ -755,6 +756,19 @@ export function JunctionRoom({
   const privateRecipientRef = useRef(privateRecipient);
   privateRecipientRef.current = privateRecipient;
 
+  // Minimized Mode: Unread Chat Badge & State
+  const [minimizedUnreadCount, setMinimizedUnreadCount] = useState<number>(0);
+  const isMinimizedRef = useRef(isMinimized);
+  isMinimizedRef.current = isMinimized;
+  const seenIncomingMessageIdsRef = useRef<Set<string>>(new Set());
+
+  // Automatically reset minimized unread counter whenever the room is expanded / maximized
+  useEffect(() => {
+    if (!isMinimized) {
+      setMinimizedUnreadCount(0);
+    }
+  }, [isMinimized]);
+
   const toggleShowInRoomPopups = useCallback(() => {
     setShowInRoomPopups((prev) => {
       const next = !prev;
@@ -870,8 +884,31 @@ export function JunctionRoom({
     };
   }, [isRecipientMenuOpen]);
 
+  const chatScrollContainerRef = useRef<HTMLDivElement>(null);
+  const [isScrolledUp, setIsScrolledUp] = useState(false);
+  const [newMessagesWhileScrolledUp, setNewMessagesWhileScrolledUp] = useState(0);
+
   const scrollChatToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
-    chatMessagesEndRef.current?.scrollIntoView({ behavior });
+    if (chatMessagesEndRef.current) {
+      chatMessagesEndRef.current.scrollIntoView({ behavior, block: "end" });
+    }
+    if (chatScrollContainerRef.current) {
+      chatScrollContainerRef.current.scrollTo({
+        top: chatScrollContainerRef.current.scrollHeight,
+        behavior,
+      });
+    }
+  }, []);
+
+  const handleChatScroll = useCallback(() => {
+    const el = chatScrollContainerRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const scrolledUp = distanceFromBottom > 65;
+    setIsScrolledUp(scrolledUp);
+    if (!scrolledUp) {
+      setNewMessagesWhileScrolledUp(0);
+    }
   }, []);
 
   const [lastReadChatCount, setLastReadChatCount] = useState(0);
@@ -882,11 +919,41 @@ export function JunctionRoom({
     }
   }, [isChatOpen, rightPanelTab, chatMessages.length]);
 
+  // When a new message arrives: if user is scrolled up, increment unread badge; otherwise auto-scroll
   useEffect(() => {
-    if (isChatOpen) {
+    if (isChatOpen && rightPanelTab === "chat" && !isMinimized) {
+      if (isScrolledUp) {
+        setNewMessagesWhileScrolledUp((prev) => prev + 1);
+      } else {
+        scrollChatToBottom("smooth");
+      }
+    }
+  }, [chatMessages.length]);
+
+  // Auto-scroll to latest messages when opening chat, switching tabs, or maximizing
+  useEffect(() => {
+    if (isChatOpen && rightPanelTab === "chat" && !isMinimized) {
+      scrollChatToBottom("auto");
+      const t1 = setTimeout(() => scrollChatToBottom("auto"), 50);
+      const t2 = setTimeout(() => scrollChatToBottom("smooth"), 180);
+      const t3 = setTimeout(() => scrollChatToBottom("smooth"), 320);
+      setIsScrolledUp(false);
+      setNewMessagesWhileScrolledUp(0);
+
+      return () => {
+        clearTimeout(t1);
+        clearTimeout(t2);
+        clearTimeout(t3);
+      };
+    }
+  }, [isChatOpen, rightPanelTab, isMinimized, scrollChatToBottom]);
+
+  // Scroll to bottom when typing status changes and user is not scrolled up
+  useEffect(() => {
+    if (isChatOpen && !isScrolledUp && activeTypingList.length > 0) {
       scrollChatToBottom("smooth");
     }
-  }, [chatMessages.length, isChatOpen, scrollChatToBottom, activeTypingList.length]);
+  }, [activeTypingList.length, isChatOpen, isScrolledUp, scrollChatToBottom]);
 
   // LiveKit Data Publish Ref & Supabase Realtime Channel
   const liveKitPublishRef = useRef<((data: any) => void) | null>(null);
@@ -1309,6 +1376,22 @@ export function JunctionRoom({
         // 2. Chat drawer is completely closed
         // 3. showInRoomPopups setting is enabled
         const isSelf = isLocalIdentity(payload.senderName) || payload.senderId === guest.id || (user?.id && payload.senderId === user.id);
+
+        // Track unread messages for minimized floating bar icon badge
+        const msgId = payload.id;
+        const isNewMessage = msgId ? !seenIncomingMessageIdsRef.current.has(msgId) : true;
+        if (msgId) {
+          seenIncomingMessageIdsRef.current.add(msgId);
+          if (seenIncomingMessageIdsRef.current.size > 200) {
+            const firstItems = Array.from(seenIncomingMessageIdsRef.current).slice(0, 50);
+            firstItems.forEach((id) => seenIncomingMessageIdsRef.current.delete(id));
+          }
+        }
+
+        if (!isSelf && isMinimizedRef.current && isNewMessage) {
+          setMinimizedUnreadCount((prev) => prev + 1);
+        }
+
         if (!isSelf && !isChatOpenRef.current && showInRoomPopupsRef.current) {
           const isWhisper = Boolean(payload.targetIdentity && isLocalIdentity(payload.targetIdentity));
           const newPopup: InRoomPopupMessage = {
@@ -3198,18 +3281,36 @@ export function JunctionRoom({
                 {isDeafened ? <VolumeX size={13} /> : <Volume2 size={13} />}
               </button>
 
-              {/* Maximize Button */}
+              {/* Room Chat Button with Live Unread Badge */}
               <button
                 type="button"
                 onPointerDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
                   e.stopPropagation();
+                  setMinimizedUnreadCount(0);
+                  setRightPanelTab("chat");
+                  setIsChatOpen(true);
+                  setInRoomPopups([]);
                   onMaximize?.();
                 }}
-                className="w-8 h-8 rounded-full bg-indigo-600 hover:bg-indigo-500 text-white shadow-md shadow-indigo-600/30 flex items-center justify-center transition-all active:scale-90 cursor-pointer"
-                title="Expand to Full Room"
+                className={`w-8 h-8 rounded-full flex items-center justify-center transition-all active:scale-90 cursor-pointer relative ${
+                  minimizedUnreadCount > 0
+                    ? "bg-indigo-600 text-white shadow-[0_0_18px_rgba(99,102,241,0.65)] ring-2 ring-indigo-400/80"
+                    : "bg-indigo-600 hover:bg-indigo-500 text-white shadow-md shadow-indigo-600/30"
+                }`}
+                title={
+                  minimizedUnreadCount > 0
+                    ? `${minimizedUnreadCount} new message${minimizedUnreadCount > 1 ? "s" : ""} - Open Room Chat`
+                    : "Open Room Chat"
+                }
+                aria-label="Open Room Chat"
               >
-                <Maximize2 size={13} />
+                <MessageSquare size={13} className={minimizedUnreadCount > 0 ? "animate-pulse" : ""} />
+                {minimizedUnreadCount > 0 && (
+                  <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[9px] font-black border-2 border-[#0B0C15] shadow-lg flex items-center justify-center animate-in zoom-in-75 duration-150">
+                    {minimizedUnreadCount > 9 ? "9+" : minimizedUnreadCount}
+                  </span>
+                )}
               </button>
 
               {/* Leave Room Button */}
@@ -4074,9 +4175,13 @@ export function JunctionRoom({
 
             {/* TAB 1: WHISPER CHAT */}
             {rightPanelTab === "chat" && (
-              <>
+              <div className="flex-1 flex flex-col min-h-0 relative overflow-hidden">
                 {/* Chat Messages Log */}
-                <div className="flex-1 p-3 sm:p-4 overflow-y-auto space-y-3.5 scroll-smooth flex flex-col">
+                <div
+                  ref={chatScrollContainerRef}
+                  onScroll={handleChatScroll}
+                  className="flex-1 p-3 sm:p-4 overflow-y-auto space-y-3.5 scroll-smooth flex flex-col"
+                >
                   {chatMessages.length === 0 ? (
                     <div className="flex flex-col items-center justify-center m-auto text-center py-8 px-4 select-none animate-in fade-in zoom-in-95 duration-200">
                       <div className="w-12 h-12 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 mb-3 shadow-lg shadow-indigo-500/5">
@@ -4251,6 +4356,33 @@ export function JunctionRoom({
                   <div ref={chatMessagesEndRef} />
                 </div>
 
+                {/* Floating "Tap to Recent Chat" Down Arrow Button */}
+                {isScrolledUp && (
+                  <div className="absolute bottom-20 right-4 sm:right-6 z-30 pointer-events-auto animate-in fade-in slide-in-from-bottom-2 duration-200">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        scrollChatToBottom("smooth");
+                        setIsScrolledUp(false);
+                        setNewMessagesWhileScrolledUp(0);
+                      }}
+                      className="group flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-indigo-600/95 hover:bg-indigo-600 active:scale-95 text-white text-xs font-semibold shadow-xl shadow-indigo-600/50 border border-indigo-400/40 backdrop-blur-xl transition-all cursor-pointer select-none"
+                      title="Scroll to recent chat"
+                      aria-label="Scroll to recent chat"
+                    >
+                      <span>Recent chat</span>
+                      <div className="w-4 h-4 rounded-full bg-white/20 flex items-center justify-center group-hover:translate-y-0.5 transition-transform">
+                        <ChevronDown size={13} className="text-white" />
+                      </div>
+                      {newMessagesWhileScrolledUp > 0 && (
+                        <span className="px-1.5 py-0.2 rounded-full bg-rose-500 text-white text-[10px] font-bold">
+                          {newMessagesWhileScrolledUp}
+                        </span>
+                      )}
+                    </button>
+                  </div>
+                )}
+
                 {/* Real-time Typing Indicator Bar */}
                 {activeTypingList.length > 0 && (
                   <div className="px-4 py-1.5 bg-[#0C0D14]/90 border-t border-white/[0.06] flex items-center gap-2 text-xs text-slate-400 shrink-0 select-none animate-in fade-in slide-in-from-bottom-1 duration-150">
@@ -4385,7 +4517,7 @@ export function JunctionRoom({
                     </button>
                   </div>
                 </form>
-              </>
+              </div>
             )}
 
             {/* TAB 2: OTHER JUNCTIONS EXPLORER */}

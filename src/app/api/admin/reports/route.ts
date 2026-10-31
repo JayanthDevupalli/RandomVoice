@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { supabase as anonSupabase } from "@/lib/supabase";
-import { getGlobalReports, updateGlobalReportStatus } from "@/lib/junctions-store";
+import { getGlobalReports, updateGlobalReportStatus, deleteGlobalReport } from "@/lib/junctions-store";
 import { UserReportRecord, UserRole } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -91,6 +91,7 @@ export async function GET(request: NextRequest) {
     }
 
     // 2. Load platform reports persisted on Super Admin ('jayanthadmin') profile
+    let deletedReportIds = new Set<string>();
     try {
       const { data: adminProf } = await adminClient
         .from("profiles")
@@ -98,10 +99,14 @@ export async function GET(request: NextRequest) {
         .ilike("username", "jayanthadmin")
         .maybeSingle();
 
+      if (adminProf?.social_links?.deleted_report_ids && Array.isArray(adminProf.social_links.deleted_report_ids)) {
+        deletedReportIds = new Set<string>(adminProf.social_links.deleted_report_ids);
+      }
+
       const platformReports = adminProf?.social_links?.platform_reports;
       if (Array.isArray(platformReports)) {
         for (const r of platformReports) {
-          if (r && r.id && !reportsMap.has(r.id)) {
+          if (r && r.id && !deletedReportIds.has(r.id)) {
             reportsMap.set(r.id, r);
           }
         }
@@ -125,7 +130,8 @@ export async function GET(request: NextRequest) {
             for (const r of links.reports) {
               if (r) {
                 const repId = r.id || `rep_${r.timestamp || Date.now()}_${r.targetIdentity || u.username}`;
-                if (!reportsMap.has(repId)) {
+                // Guard against deleted reports being resurrected
+                if (!deletedReportIds.has(repId) && !reportsMap.has(repId)) {
                   reportsMap.set(repId, {
                     id: repId,
                     reporterIdentity: r.reporter || r.reporterIdentity || "Anonymous",
@@ -179,11 +185,12 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json({ error: "Missing or invalid report update parameters." }, { status: 400 });
     }
 
-    // Update in-memory
+    // 1. Update in-memory
     updateGlobalReportStatus(reportId, status);
 
-    // Update in Super Admin profile
     const adminClient = getAdminClient();
+
+    // 2. Update in Super Admin profile
     try {
       const { data: adminProf } = await adminClient
         .from("profiles")
@@ -211,6 +218,39 @@ export async function PATCH(request: NextRequest) {
       console.error("Error updating platform_reports in admin profile:", e);
     }
 
+    // 3. ALSO update in any user profiles that store this report
+    try {
+      const { data: userProfiles } = await adminClient
+        .from("profiles")
+        .select("id, social_links")
+        .not("social_links", "is", null);
+
+      if (userProfiles) {
+        for (const u of userProfiles) {
+          const links = u.social_links;
+          if (links && Array.isArray(links.reports)) {
+            const hasMatch = links.reports.some((r: any) => r.id === reportId);
+            if (hasMatch) {
+              const updatedReports = links.reports.map((r: any) =>
+                r.id === reportId ? { ...r, status } : r
+              );
+              await adminClient
+                .from("profiles")
+                .update({
+                  social_links: {
+                    ...links,
+                    reports: updatedReports,
+                  },
+                })
+                .eq("id", u.id);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Error updating report in user profiles:", e);
+    }
+
     return NextResponse.json({ success: true, message: `Report status updated to ${status}.` });
   } catch (err: any) {
     console.error("Admin reports PATCH error:", err);
@@ -233,7 +273,12 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json({ error: "Missing reportId parameter." }, { status: 400 });
     }
 
+    // 1. Delete in-memory
+    deleteGlobalReport(reportId);
+
     const adminClient = getAdminClient();
+
+    // 2. Remove from Super Admin profile and track in deleted_report_ids
     try {
       const { data: adminProf } = await adminClient
         .from("profiles")
@@ -245,12 +290,16 @@ export async function DELETE(request: NextRequest) {
         const links = adminProf.social_links || {};
         const platformReports = Array.isArray(links.platform_reports) ? links.platform_reports : [];
         const filtered = platformReports.filter((r: any) => r.id !== reportId);
+        const existingDeleted = Array.isArray(links.deleted_report_ids) ? links.deleted_report_ids : [];
+        const updatedDeleted = Array.from(new Set([...existingDeleted, reportId]));
+
         await adminClient
           .from("profiles")
           .update({
             social_links: {
               ...links,
               platform_reports: filtered,
+              deleted_report_ids: updatedDeleted,
             },
           })
           .eq("id", adminProf.id);
@@ -259,7 +308,38 @@ export async function DELETE(request: NextRequest) {
       console.error("Error removing report from admin profile:", e);
     }
 
-    return NextResponse.json({ success: true, message: "Report deleted successfully." });
+    // 3. Remove from any user profiles storing this report
+    try {
+      const { data: userProfiles } = await adminClient
+        .from("profiles")
+        .select("id, social_links")
+        .not("social_links", "is", null);
+
+      if (userProfiles) {
+        for (const u of userProfiles) {
+          const links = u.social_links;
+          if (links && Array.isArray(links.reports)) {
+            const hasMatch = links.reports.some((r: any) => r.id === reportId);
+            if (hasMatch) {
+              const filteredReports = links.reports.filter((r: any) => r.id !== reportId);
+              await adminClient
+                .from("profiles")
+                .update({
+                  social_links: {
+                    ...links,
+                    reports: filteredReports,
+                  },
+                })
+                .eq("id", u.id);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Error removing report from user profiles:", e);
+    }
+
+    return NextResponse.json({ success: true, message: "Report deleted permanently." });
   } catch (err: any) {
     console.error("Admin reports DELETE error:", err);
     return NextResponse.json({ error: err.message }, { status: 500 });

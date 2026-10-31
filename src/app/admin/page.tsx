@@ -33,6 +33,8 @@ import {
   ChevronUp,
   X,
   Flag,
+  Filter,
+  SlidersHorizontal,
 } from "lucide-react";
 import Link from "next/link";
 import { useMaintenanceMode } from "@/hooks/useMaintenanceMode";
@@ -92,12 +94,15 @@ export default function AdminPortalPage() {
 
   // Filters
   const [userSearch, setUserSearch] = useState("");
-  const [roleFilter, setRoleFilter] = useState<"all" | UserRole | "banned">("all");
-  const [roomFilter, setRoomFilter] = useState<"all" | "locked" | "public">("all");
+  const [roleFilter, setRoleFilter] = useState<"all" | UserRole>("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | "active" | "suspended">("all");
+  const [roomFilter, setRoomFilter] = useState<"all" | "active" | "locked" | "public">("all");
+  const [roomSearch, setRoomSearch] = useState("");
   const [deskSubFilter, setDeskSubFilter] = useState<"all" | "platform" | "rooms" | "reports">("all");
   const [reportFilter, setReportFilter] = useState<"all" | "pending" | "resolved" | "dismissed">("all");
   const [deskSearch, setDeskSearch] = useState("");
   const [isActioningReport, setIsActioningReport] = useState<string | null>(null);
+  const [isSanitizingBans, setIsSanitizingBans] = useState(false);
 
   // Confirmation Modals
   const [pendingAction, setPendingAction] = useState<{
@@ -292,6 +297,9 @@ export default function AdminPortalPage() {
   const handleToggleBan = async (targetUserId: string, shouldBan: boolean, reason?: string) => {
     setPendingAction(null);
 
+    const targetUser = users.find((u) => u.id === targetUserId);
+    const targetUsername = targetUser?.username?.toLowerCase();
+
     const prevUsers = [...users];
     setUsers((prev) =>
       prev.map((u) =>
@@ -300,6 +308,19 @@ export default function AdminPortalPage() {
           : u
       )
     );
+
+    // Optimistically clean up room-level bans for this user so they don't linger
+    if (targetUsername) {
+      setRooms((prev) =>
+        prev.map((r) => ({
+          ...r,
+          bannedIdentities: (r.bannedIdentities || []).filter(
+            (b) => (b || "").trim().toLowerCase() !== targetUsername
+          ),
+        }))
+      );
+    }
+
     showToast("success", shouldBan ? "User account suspended" : "User suspension lifted");
 
     try {
@@ -463,23 +484,154 @@ export default function AdminPortalPage() {
     return users.filter((u) => u.is_banned);
   }, [users]);
 
-  // Moderation Desk: Room-level bans across all junctions
-  const roomBans = useMemo(() => {
-    const list: Array<{ roomId: string; roomName: string; roomCategory: string; bannedIdentity: string }> = [];
+  // Fast lookup set of platform-suspended usernames
+  const platformBannedUsernames = useMemo(() => {
+    const set = new Set<string>();
+    users.forEach((u) => {
+      if (u.is_banned && u.username) {
+        set.add(u.username.toLowerCase());
+      }
+    });
+    return set;
+  }, [users]);
+
+  // Moderation Desk: Room-level bans grouped by user identity
+  // STRICT POLICY: Users who are platform-suspended are excluded because they are already blocked platform-wide.
+  const groupedRoomBans = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        bannedIdentity: string;
+        user?: AdminUserRecord;
+        rooms: Array<{ roomId: string; roomName: string; roomCategory: string }>;
+      }
+    >();
+
     rooms.forEach((r) => {
       (r.bannedIdentities || []).forEach((b) => {
-        if (b) {
-          list.push({
+        const cleanB = (b || "").trim();
+        if (!cleanB) return;
+        const lowerB = cleanB.toLowerCase();
+
+        // Exclude accounts that are already platform-suspended
+        if (platformBannedUsernames.has(lowerB)) {
+          return;
+        }
+
+        if (!map.has(lowerB)) {
+          const matchedUser = users.find(
+            (u) => (u.username || "").toLowerCase() === lowerB || (u.displayName || "").toLowerCase() === lowerB
+          );
+          map.set(lowerB, {
+            bannedIdentity: cleanB,
+            user: matchedUser,
+            rooms: [],
+          });
+        }
+
+        const entry = map.get(lowerB)!;
+        if (!entry.rooms.some((existing) => existing.roomId === r.id)) {
+          entry.rooms.push({
             roomId: r.id,
             roomName: r.name,
             roomCategory: r.category,
-            bannedIdentity: b,
           });
         }
       });
     });
-    return list;
-  }, [rooms]);
+
+    return Array.from(map.values());
+  }, [rooms, users, platformBannedUsernames]);
+
+  // Handle Room-Level Unban across ALL rooms for an identity
+  const handleRoomUnbanAll = async (targetIdentity: string, roomIds: string[]) => {
+    try {
+      showToast("success", `Unbanning @${targetIdentity} from ${roomIds.length} room${roomIds.length > 1 ? "s" : ""}...`);
+      setRooms((prev) =>
+        prev.map((r) =>
+          roomIds.includes(r.id)
+            ? {
+                ...r,
+                bannedIdentities: (r.bannedIdentities || []).filter(
+                  (b) => (b || "").trim().toLowerCase() !== targetIdentity.trim().toLowerCase()
+                ),
+              }
+            : r
+        )
+      );
+
+      await Promise.allSettled(
+        roomIds.map((roomId) =>
+          fetch(`/api/junctions/${roomId}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: "moderate",
+              modAction: "unban",
+              targetIdentity,
+              moderatorIdentity: user?.username || user?.name || "admin",
+              moderatorUserId: user?.id,
+              requesterRole: user?.role,
+            }),
+          })
+        )
+      );
+      showToast("success", `Successfully unbanned @${targetIdentity} from all rooms!`);
+    } catch (err: any) {
+      showToast("error", err.message || "Failed to unban from all rooms");
+    }
+  };
+
+  // One-click utility to scrub any stale room bans belonging to platform-suspended users across all junctions
+  const handleSanitizeStaleRoomBans = async () => {
+    try {
+      setIsSanitizingBans(true);
+      showToast("success", "Sanitizing room bans across all junctions...");
+
+      const roomsToClean = rooms.filter((r) =>
+        (r.bannedIdentities || []).some((b) => platformBannedUsernames.has((b || "").trim().toLowerCase()))
+      );
+
+      if (roomsToClean.length === 0) {
+        showToast("success", "All junction ban lists are 100% clean and synchronized!");
+        return;
+      }
+
+      for (const r of roomsToClean) {
+        const staleIdentities = (r.bannedIdentities || []).filter((b) =>
+          platformBannedUsernames.has((b || "").trim().toLowerCase())
+        );
+        for (const identity of staleIdentities) {
+          await fetch(`/api/junctions/${r.id}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: "moderate",
+              modAction: "unban",
+              targetIdentity: identity,
+              moderatorIdentity: user?.username || user?.name || "admin",
+              moderatorUserId: user?.id,
+              requesterRole: user?.role,
+            }),
+          });
+        }
+      }
+
+      setRooms((prev) =>
+        prev.map((r) => ({
+          ...r,
+          bannedIdentities: (r.bannedIdentities || []).filter(
+            (b) => !platformBannedUsernames.has((b || "").trim().toLowerCase())
+          ),
+        }))
+      );
+      showToast("success", `Sanitized room bans across ${roomsToClean.length} room${roomsToClean.length > 1 ? "s" : ""}!`);
+    } catch (err: any) {
+      showToast("error", err.message || "Failed to sanitize room bans");
+    } finally {
+      setIsSanitizingBans(false);
+    }
+  };
 
   // Moderation Desk: Report Actions
   const handleUpdateReportStatus = async (reportId: string, status: "pending" | "resolved" | "dismissed") => {
@@ -540,40 +692,83 @@ export default function AdminPortalPage() {
     });
   }, [reports, reportFilter, deskSearch]);
 
-  const totalDeskCount = platformBannedUsers.length + roomBans.length + reports.length;
+  const totalDeskCount = platformBannedUsers.length + groupedRoomBans.length + reports.filter((r) => r.status === "pending").length;
 
-  // Filtered Users
+  // User Filter Live Counts
+  const roleCounts = useMemo(() => {
+    return {
+      all: users.length,
+      super_admin: users.filter((u) => u.role === "super_admin").length,
+      admin: users.filter((u) => u.role === "admin").length,
+      manager: users.filter((u) => u.role === "manager").length,
+      user: users.filter((u) => u.role === "user" || !u.role).length,
+    };
+  }, [users]);
+
+  const statusCounts = useMemo(() => {
+    return {
+      all: users.length,
+      active: users.filter((u) => !u.is_banned).length,
+      suspended: users.filter((u) => u.is_banned).length,
+    };
+  }, [users]);
+
+  // Report Filter Live Counts
+  const reportCounts = useMemo(() => {
+    return {
+      all: reports.length,
+      pending: reports.filter((r) => r.status === "pending").length,
+      resolved: reports.filter((r) => r.status === "resolved").length,
+      dismissed: reports.filter((r) => r.status === "dismissed").length,
+    };
+  }, [reports]);
+
+  // Filtered Users with orthogonal multi-dimensional filtering
   const filteredUsers = useMemo(() => {
-    const q = (userSearch || "").toLowerCase();
+    const q = (userSearch || "").toLowerCase().trim();
     return users.filter((u) => {
-      const uName = (u.username || "").toLowerCase();
-      const uDisplay = (u.displayName || "").toLowerCase();
-      const uBio = (u.bio || "").toLowerCase();
-      const uId = (u.id || "").toLowerCase();
+      if (q) {
+        const uName = (u.username || "").toLowerCase();
+        const uDisplay = (u.displayName || "").toLowerCase();
+        const uBio = (u.bio || "").toLowerCase();
+        const uId = (u.id || "").toLowerCase();
+        const matchesSearch =
+          uName.includes(q) ||
+          uDisplay.includes(q) ||
+          uBio.includes(q) ||
+          uId.includes(q);
+        if (!matchesSearch) return false;
+      }
 
-      const matchesSearch =
-        !q ||
-        uName.includes(q) ||
-        uDisplay.includes(q) ||
-        uBio.includes(q) ||
-        uId.includes(q);
+      if (roleFilter !== "all") {
+        const uRole = u.role || "user";
+        if (uRole !== roleFilter) return false;
+      }
 
-      if (!matchesSearch) return false;
+      if (statusFilter === "active" && u.is_banned) return false;
+      if (statusFilter === "suspended" && !u.is_banned) return false;
 
-      if (roleFilter === "all") return true;
-      if (roleFilter === "banned") return Boolean(u.is_banned);
-      return u.role === roleFilter;
+      return true;
     });
-  }, [users, userSearch, roleFilter]);
+  }, [users, userSearch, roleFilter, statusFilter]);
 
-  // Filtered Rooms
+  // Filtered Rooms with search and status filters
   const filteredRooms = useMemo(() => {
+    const q = (roomSearch || "").toLowerCase().trim();
     return rooms.filter((r) => {
-      if (roomFilter === "locked") return r.isLocked;
+      if (q) {
+        const matches =
+          (r.name || "").toLowerCase().includes(q) ||
+          (r.category || "").toLowerCase().includes(q) ||
+          (r.description || "").toLowerCase().includes(q);
+        if (!matches) return false;
+      }
+      if (roomFilter === "active") return (r.currentCount || 0) > 0;
+      if (roomFilter === "locked") return Boolean(r.isLocked);
       if (roomFilter === "public") return !r.isLocked;
       return true;
     });
-  }, [rooms, roomFilter]);
+  }, [rooms, roomFilter, roomSearch]);
 
   // Stats
   const totalUsersCount = users.length;
@@ -988,16 +1183,17 @@ export default function AdminPortalPage() {
         {activeTab === "users" && (
           <div className="space-y-4">
             
-            {/* Search Bar & Role Filter Pills */}
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 bg-[#11121A] border border-white/10 p-3 rounded-2xl shadow-md">
-              <div className="relative flex-1">
+            {/* Search Bar & Multi-dimensional Filter Controls */}
+            <div className="bg-[#11121A] border border-white/10 p-3.5 sm:p-4 rounded-2xl shadow-md space-y-3">
+              {/* Search input */}
+              <div className="relative">
                 <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
                 <input
                   type="text"
-                  placeholder="Search by name, handle, or bio..."
+                  placeholder="Search members by username, display name, handle, or bio..."
                   value={userSearch}
                   onChange={(e) => setUserSearch(e.target.value)}
-                  className="w-full pl-9 pr-8 py-2 bg-black/40 border border-white/5 rounded-xl text-xs sm:text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                  className="w-full pl-9 pr-8 py-2 bg-black/40 border border-white/10 rounded-xl text-xs sm:text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"
                 />
                 {userSearch && (
                   <button
@@ -1009,22 +1205,121 @@ export default function AdminPortalPage() {
                 )}
               </div>
 
-              {/* Horizontal Scroll Filter Chips */}
-              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0 no-scrollbar">
-                {(["all", "super_admin", "admin", "manager", "user", "banned"] as const).map((r) => (
+              {/* Two-Tier Filter Controls: Roles + Status */}
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 pt-1 border-t border-white/5">
+                {/* Role Filters */}
+                <div className="flex items-center gap-1.5 overflow-x-auto pb-1 lg:pb-0 no-scrollbar">
+                  <span className="text-[11px] font-semibold text-slate-400 mr-1 shrink-0 flex items-center gap-1">
+                    <Filter size={11} />
+                    <span>Role:</span>
+                  </span>
+                  {(
+                    [
+                      { id: "all", label: "All Roles", count: roleCounts.all },
+                      { id: "super_admin", label: "Founders", count: roleCounts.super_admin },
+                      { id: "admin", label: "Admins", count: roleCounts.admin },
+                      { id: "manager", label: "Managers", count: roleCounts.manager },
+                      { id: "user", label: "Members", count: roleCounts.user },
+                    ] as const
+                  ).map((rf) => (
+                    <button
+                      key={rf.id}
+                      onClick={() => setRoleFilter(rf.id)}
+                      className={`px-2.5 py-1 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer shrink-0 flex items-center gap-1.5 ${
+                        roleFilter === rf.id
+                          ? "bg-indigo-600 text-white shadow-sm"
+                          : "bg-black/30 text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      <span>{rf.label}</span>
+                      <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                        roleFilter === rf.id ? "bg-white/20 text-white" : "bg-white/5 text-slate-500"
+                      }`}>
+                        {rf.count}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+
+                {/* Status Filters: Active vs Suspended */}
+                <div className="flex items-center gap-1.5 overflow-x-auto pb-1 lg:pb-0 no-scrollbar shrink-0">
+                  <span className="text-[11px] font-semibold text-slate-400 mr-1 shrink-0">Status:</span>
                   <button
-                    key={r}
-                    onClick={() => setRoleFilter(r)}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold capitalize whitespace-nowrap transition-colors cursor-pointer shrink-0 ${
-                      roleFilter === r
+                    onClick={() => setStatusFilter("all")}
+                    className={`px-2.5 py-1 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${
+                      statusFilter === "all"
                         ? "bg-white/20 text-white shadow-sm"
                         : "bg-black/30 text-slate-400 hover:text-slate-200"
                     }`}
                   >
-                    {r === "super_admin" ? "Founder" : r}
+                    <span>All</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-white/5 text-slate-400">
+                      {statusCounts.all}
+                    </span>
                   </button>
-                ))}
+
+                  <button
+                    onClick={() => setStatusFilter("active")}
+                    className={`px-2.5 py-1 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${
+                      statusFilter === "active"
+                        ? "bg-emerald-600 text-white shadow-sm"
+                        : "bg-black/30 text-slate-400 hover:text-emerald-300"
+                    }`}
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                    <span>Active</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-emerald-500/10 text-emerald-300">
+                      {statusCounts.active}
+                    </span>
+                  </button>
+
+                  <button
+                    onClick={() => setStatusFilter("suspended")}
+                    className={`px-2.5 py-1 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${
+                      statusFilter === "suspended"
+                        ? "bg-rose-600 text-white shadow-sm"
+                        : "bg-black/30 text-slate-400 hover:text-rose-300"
+                    }`}
+                  >
+                    <Ban size={11} className="text-rose-400" />
+                    <span>Suspended</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-rose-500/10 text-rose-300">
+                      {statusCounts.suspended}
+                    </span>
+                  </button>
+                </div>
               </div>
+
+              {/* Active Filter Summary Bar */}
+              {(userSearch.trim() || roleFilter !== "all" || statusFilter !== "all") && (
+                <div className="flex items-center justify-between text-xs text-slate-400 bg-black/25 px-3 py-1.5 rounded-xl border border-white/5">
+                  <div className="flex items-center gap-1.5 truncate">
+                    <span>Showing <strong className="text-white">{filteredUsers.length}</strong> of {users.length} members</span>
+                    {roleFilter !== "all" && (
+                      <span className="px-1.5 py-0.2 rounded bg-indigo-500/20 text-indigo-300 text-[10px] font-bold uppercase">
+                        {roleFilter}
+                      </span>
+                    )}
+                    {statusFilter !== "all" && (
+                      <span className={`px-1.5 py-0.2 rounded text-[10px] font-bold uppercase ${
+                        statusFilter === "suspended" ? "bg-rose-500/20 text-rose-300" : "bg-emerald-500/20 text-emerald-300"
+                      }`}>
+                        {statusFilter}
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => {
+                      setUserSearch("");
+                      setRoleFilter("all");
+                      setStatusFilter("all");
+                    }}
+                    className="text-xs text-indigo-400 hover:text-indigo-300 underline cursor-pointer shrink-0 ml-2"
+                  >
+                    Reset filters
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* Read-only note for non-main admins */}
@@ -1056,8 +1351,23 @@ export default function AdminPortalPage() {
 
             {/* Empty state */}
             {!isLoadingData && filteredUsers.length === 0 && (
-              <div className="py-12 text-center text-slate-500 bg-[#11121A] border border-white/5 rounded-3xl text-sm">
-                No members found matching &quot;{userSearch}&quot;
+              <div className="py-14 text-center text-slate-500 bg-[#11121A] border border-white/5 rounded-3xl text-sm space-y-2">
+                <Users size={28} className="mx-auto text-slate-600 mb-1" />
+                <p className="font-semibold text-slate-400">
+                  {userSearch ? `No members found matching "${userSearch}"` : "No members match the selected filters"}
+                </p>
+                {(userSearch || roleFilter !== "all" || statusFilter !== "all") && (
+                  <button
+                    onClick={() => {
+                      setUserSearch("");
+                      setRoleFilter("all");
+                      setStatusFilter("all");
+                    }}
+                    className="text-xs text-indigo-400 hover:text-indigo-300 underline cursor-pointer inline-block"
+                  >
+                    Clear active filters
+                  </button>
+                )}
               </div>
             )}
 
@@ -1458,28 +1768,56 @@ export default function AdminPortalPage() {
         {activeTab === "rooms" && (
           <div className="space-y-4">
             
-            {/* Filter controls */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-[#11121A] border border-white/10 p-3 rounded-2xl">
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-slate-400 font-semibold px-1">Filter:</span>
-                {(["all", "locked", "public"] as const).map((f) => (
+            {/* Filter & Search controls */}
+            <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 bg-[#11121A] border border-white/10 p-3 sm:p-3.5 rounded-2xl shadow-md">
+              {/* Search rooms */}
+              <div className="relative flex-1 max-w-sm">
+                <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Search rooms by name or category..."
+                  value={roomSearch}
+                  onChange={(e) => setRoomSearch(e.target.value)}
+                  className="w-full pl-9 pr-8 py-1.5 bg-black/40 border border-white/10 rounded-xl text-xs sm:text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                />
+                {roomSearch && (
                   <button
-                    key={f}
-                    onClick={() => setRoomFilter(f)}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold capitalize transition-colors cursor-pointer ${
-                      roomFilter === f
-                        ? "bg-indigo-600 text-white"
+                    onClick={() => setRoomSearch("")}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 p-0.5 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                )}
+              </div>
+
+              {/* Status chips */}
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0 no-scrollbar">
+                {(
+                  [
+                    { id: "all", label: "All Rooms", count: rooms.length },
+                    { id: "active", label: "🟢 Active", count: rooms.filter((r) => r.currentCount > 0).length },
+                    { id: "public", label: "🌐 Public", count: rooms.filter((r) => !r.isLocked).length },
+                    { id: "locked", label: "🔒 Locked", count: lockedRoomsCount },
+                  ] as const
+                ).map((f) => (
+                  <button
+                    key={f.id}
+                    onClick={() => setRoomFilter(f.id)}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${
+                      roomFilter === f.id
+                        ? "bg-indigo-600 text-white shadow-sm"
                         : "bg-black/30 text-slate-400 hover:text-slate-200"
                     }`}
                   >
-                    {f === "locked" ? "🔒 Locked / Private" : f === "public" ? "🌐 Public" : "All Rooms"}
+                    <span>{f.label}</span>
+                    <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                      roomFilter === f.id ? "bg-white/20 text-white" : "bg-white/5 text-slate-500"
+                    }`}>
+                      {f.count}
+                    </span>
                   </button>
                 ))}
               </div>
-
-              <span className="text-[11px] text-slate-400">
-                Total Rooms Online: <strong className="text-white">{filteredRooms.length}</strong>
-              </span>
             </div>
 
             {/* Rooms Grid */}
@@ -1617,17 +1955,22 @@ export default function AdminPortalPage() {
                       : "bg-black/30 text-slate-400 hover:text-slate-200"
                   }`}
                 >
-                  Room-Level Bans ({roomBans.length})
+                  Room-Level Bans ({groupedRoomBans.length})
                 </button>
                 <button
                   onClick={() => setDeskSubFilter("reports")}
-                  className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${
+                  className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${
                     deskSubFilter === "reports"
                       ? "bg-purple-600 text-white shadow-sm"
                       : "bg-black/30 text-slate-400 hover:text-slate-200"
                   }`}
                 >
-                  Reports & Flags ({reports.length})
+                  <span>Reports</span>
+                  <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                    deskSubFilter === "reports" ? "bg-white/20 text-white" : "bg-white/5 text-slate-400"
+                  }`}>
+                    {reportCounts.pending} pending
+                  </span>
                 </button>
               </div>
 
@@ -1763,19 +2106,38 @@ export default function AdminPortalPage() {
             {/* SECTION 2: ROOM-LEVEL BANS */}
             {(deskSubFilter === "all" || deskSubFilter === "rooms") && (
               <div className="space-y-3 pt-2">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
                   <h3 className="text-sm font-bold text-white flex items-center gap-2">
                     <Radio size={16} className="text-amber-400" />
                     <span>Room-Level Bans</span>
-                    <span className="text-[11px] font-normal text-slate-400">({roomBans.length})</span>
+                    <span className="text-[11px] font-normal text-slate-400">
+                      ({groupedRoomBans.length} distinct {groupedRoomBans.length === 1 ? "user" : "users"})
+                    </span>
                   </h3>
+
+                  {/* Clean up utility button */}
+                  {(isMainAdmin || isStaffAdmin) && (
+                    <button
+                      onClick={handleSanitizeStaleRoomBans}
+                      disabled={isSanitizingBans}
+                      className="px-2.5 py-1 rounded-xl bg-white/5 hover:bg-amber-500/15 border border-white/10 hover:border-amber-500/30 text-slate-400 hover:text-amber-300 text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer self-start sm:self-auto"
+                      title="Sync and remove platform-suspended accounts from room-level lists"
+                    >
+                      <RefreshCw size={12} className={isSanitizingBans ? "animate-spin text-amber-400" : ""} />
+                      <span>{isSanitizingBans ? "Syncing..." : "Sync & Sanitize Lists"}</span>
+                    </button>
+                  )}
                 </div>
 
-                {roomBans
+                {groupedRoomBans
                   .filter((b) => {
                     if (!deskSearch) return true;
                     const q = deskSearch.toLowerCase();
-                    return (b.bannedIdentity || "").toLowerCase().includes(q) || (b.roomName || "").toLowerCase().includes(q);
+                    return (
+                      (b.bannedIdentity || "").toLowerCase().includes(q) ||
+                      (b.user?.displayName || "").toLowerCase().includes(q) ||
+                      b.rooms.some((r) => (r.roomName || "").toLowerCase().includes(q))
+                    );
                   })
                   .length === 0 ? (
                   <div className="p-6 rounded-2xl bg-[#11121A] border border-white/5 text-center text-xs text-slate-500">
@@ -1783,39 +2145,85 @@ export default function AdminPortalPage() {
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {roomBans
+                    {groupedRoomBans
                       .filter((b) => {
                         if (!deskSearch) return true;
                         const q = deskSearch.toLowerCase();
-                        return (b.bannedIdentity || "").toLowerCase().includes(q) || (b.roomName || "").toLowerCase().includes(q);
+                        return (
+                          (b.bannedIdentity || "").toLowerCase().includes(q) ||
+                          (b.user?.displayName || "").toLowerCase().includes(q) ||
+                          b.rooms.some((r) => (r.roomName || "").toLowerCase().includes(q))
+                        );
                       })
-                      .map((banItem, idx) => (
+                      .map((banItem) => (
                         <div
-                          key={`${banItem.roomId}-${banItem.bannedIdentity}-${idx}`}
-                          className="bg-[#11121A] border border-amber-500/20 rounded-2xl p-4 shadow-lg flex flex-col justify-between gap-3"
+                          key={banItem.bannedIdentity}
+                          className="bg-[#11121A] border border-amber-500/20 rounded-2xl p-4 shadow-lg flex flex-col justify-between gap-3 hover:border-amber-500/40 transition-all"
                         >
                           <div>
-                            <div className="flex items-center justify-between gap-2 mb-1.5">
-                              <span className="text-[10px] font-bold uppercase tracking-wider text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-full border border-amber-500/20">
-                                {banItem.roomCategory}
+                            {/* Header: User avatar + identity + room count */}
+                            <div className="flex items-start justify-between gap-2.5 mb-2.5">
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <div className="relative shrink-0">
+                                  <UserAvatar
+                                    avatar={banItem.user?.avatar || "user"}
+                                    color="#F59E0B"
+                                    size="md"
+                                    className="!rounded-full border border-amber-500/30"
+                                  />
+                                  <div className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-amber-600 border border-black flex items-center justify-center text-white">
+                                    <Radio size={9} />
+                                  </div>
+                                </div>
+                                <div className="min-w-0">
+                                  <div className="text-sm font-bold text-white truncate">
+                                    {banItem.user?.displayName || banItem.bannedIdentity}
+                                  </div>
+                                  <div className="text-xs text-slate-400 font-mono">@{banItem.bannedIdentity}</div>
+                                </div>
+                              </div>
+
+                              <span className="text-[10px] font-bold uppercase tracking-wider text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-full border border-amber-500/20 shrink-0">
+                                {banItem.rooms.length} {banItem.rooms.length === 1 ? "Room" : "Rooms"}
                               </span>
-                              <span className="text-[10px] text-slate-400">Room Ban</span>
                             </div>
 
-                            <div className="text-sm font-bold text-white mb-0.5 truncate">{banItem.roomName}</div>
-                            <div className="text-xs text-rose-300 font-mono flex items-center gap-1.5 mt-2 p-2 bg-black/40 rounded-xl border border-white/5">
-                              <Ban size={12} className="text-rose-400 shrink-0" />
-                              <span className="truncate">@{banItem.bannedIdentity}</span>
+                            {/* Rooms list tags with quick individual unban (x) */}
+                            <div className="mt-1">
+                              <div className="text-[10px] font-semibold text-slate-400 mb-1.5 flex items-center gap-1">
+                                <span>Banned in Junctions:</span>
+                              </div>
+                              <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto pr-1">
+                                {banItem.rooms.map((r) => (
+                                  <div
+                                    key={r.roomId}
+                                    className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-black/40 border border-white/10 text-xs text-slate-200"
+                                  >
+                                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
+                                    <span className="truncate max-w-[120px]">{r.roomName}</span>
+                                    <button
+                                      onClick={() => handleRoomUnban(r.roomId, banItem.bannedIdentity)}
+                                      className="text-slate-400 hover:text-rose-400 p-0.5 rounded transition-colors cursor-pointer"
+                                      title={`Unban from ${r.roomName}`}
+                                    >
+                                      <X size={11} />
+                                    </button>
+                                  </div>
+                                ))}
+                              </div>
                             </div>
                           </div>
 
-                          <button
-                            onClick={() => handleRoomUnban(banItem.roomId, banItem.bannedIdentity)}
-                            className="w-full py-1.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer transition-all active:scale-95"
-                          >
-                            <Unlock size={12} />
-                            <span>Unban from Room</span>
-                          </button>
+                          {/* Bottom unban button */}
+                          <div className="pt-2 border-t border-white/5 flex items-center gap-2">
+                            <button
+                              onClick={() => handleRoomUnbanAll(banItem.bannedIdentity, banItem.rooms.map((r) => r.roomId))}
+                              className="w-full py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer transition-all active:scale-95"
+                            >
+                              <Unlock size={12} />
+                              <span>Unban from All {banItem.rooms.length} {banItem.rooms.length === 1 ? "Room" : "Rooms"}</span>
+                            </button>
+                          </div>
                         </div>
                       ))}
                   </div>
@@ -1835,20 +2243,35 @@ export default function AdminPortalPage() {
 
                   {/* Status filter chips for reports */}
                   <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
-                    {(["all", "pending", "resolved", "dismissed"] as const).map((st) => (
+                    {(
+                      [
+                        { id: "all", label: `All (${reportCounts.all})` },
+                        { id: "pending", label: `Pending (${reportCounts.pending})` },
+                        { id: "dismissed", label: `Dismissed (${reportCounts.dismissed})` },
+                        { id: "resolved", label: `Resolved (${reportCounts.resolved})` },
+                      ] as const
+                    ).map((st) => (
                       <button
-                        key={st}
-                        onClick={() => setReportFilter(st)}
-                        className={`px-2.5 py-1 rounded-xl text-[11px] font-semibold capitalize transition-all cursor-pointer ${
-                          reportFilter === st
+                        key={st.id}
+                        onClick={() => setReportFilter(st.id)}
+                        className={`px-2.5 py-1 rounded-xl text-[11px] font-semibold whitespace-nowrap transition-all cursor-pointer ${
+                          reportFilter === st.id
                             ? "bg-purple-600 text-white shadow-sm"
                             : "bg-white/5 text-slate-400 hover:text-slate-200 hover:bg-white/10"
                         }`}
                       >
-                        {st === "all" ? `All (${reports.length})` : st}
+                        {st.label}
                       </button>
                     ))}
                   </div>
+                </div>
+
+                {/* Moderator Action Guide Notice */}
+                <div className="px-3.5 py-2 rounded-xl bg-purple-950/25 border border-purple-500/20 text-xs text-purple-200 flex items-center gap-2">
+                  <Info size={14} className="text-purple-400 shrink-0" />
+                  <span>
+                    <strong>Action Guide:</strong> <strong>Dismiss</strong> marks non-violating or false reports as reviewed without penalizing the user. <strong>Delete</strong> permanently purges the entry. <strong>Suspend Account</strong> penalizes the reported user.
+                  </span>
                 </div>
 
                 {filteredReports.length === 0 ? (
@@ -1954,25 +2377,28 @@ export default function AdminPortalPage() {
 
                           {/* Action Buttons */}
                           <div className="flex items-center justify-between gap-2 border-t border-white/5 pt-2.5 mt-1">
-                            <div className="flex items-center gap-1.5">
+                            <div className="flex items-center gap-2">
                               {isPending ? (
                                 <button
                                   type="button"
                                   disabled={isBusy}
                                   onClick={() => handleUpdateReportStatus(r.id, "dismissed")}
-                                  className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-slate-400 hover:text-slate-200 text-xs font-semibold transition-colors cursor-pointer"
-                                  title="Dismiss flag as reviewed"
+                                  className="px-3 py-1.5 rounded-xl bg-white/5 hover:bg-emerald-500/20 border border-white/10 hover:border-emerald-500/30 text-slate-300 hover:text-emerald-300 text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+                                  title="Dismiss report as not a violation (clears from Pending queue)"
                                 >
-                                  Dismiss
+                                  <CheckCircle2 size={12} className="text-emerald-400" />
+                                  <span>Dismiss</span>
                                 </button>
                               ) : (
                                 <button
                                   type="button"
                                   disabled={isBusy}
                                   onClick={() => handleUpdateReportStatus(r.id, "pending")}
-                                  className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-amber-300 text-xs font-semibold transition-colors cursor-pointer"
+                                  className="px-3 py-1.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+                                  title="Reopen report back into Pending review"
                                 >
-                                  Reopen
+                                  <RefreshCw size={11} />
+                                  <span>Reopen</span>
                                 </button>
                               )}
 
@@ -1981,10 +2407,11 @@ export default function AdminPortalPage() {
                                   type="button"
                                   disabled={isBusy}
                                   onClick={() => handleDeleteReport(r.id)}
-                                  className="p-1 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
-                                  title="Delete report entry"
+                                  className="px-2.5 py-1.5 rounded-xl bg-white/5 hover:bg-rose-500/20 border border-white/10 hover:border-rose-500/30 text-slate-400 hover:text-rose-300 text-xs font-medium transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+                                  title="Permanently delete this report entry"
                                 >
-                                  <Trash2 size={13} />
+                                  <Trash2 size={12} />
+                                  <span>Delete</span>
                                 </button>
                               )}
                             </div>
@@ -1993,11 +2420,19 @@ export default function AdminPortalPage() {
                               <button
                                 type="button"
                                 onClick={() => {
+                                  const matchedUser = users.find(
+                                    (u) =>
+                                      (r.targetUsername && (u.username || "").toLowerCase() === r.targetUsername.toLowerCase()) ||
+                                      (r.targetIdentity && (u.username || "").toLowerCase() === r.targetIdentity.toLowerCase()) ||
+                                      u.id === r.targetIdentity
+                                  );
+                                  const resolvedId = matchedUser?.id || r.targetIdentity;
+
                                   handleUpdateReportStatus(r.id, "resolved");
                                   setPendingAction({
                                     type: "toggle_ban",
-                                    targetId: r.targetIdentity,
-                                    targetName: r.targetName,
+                                    targetId: resolvedId,
+                                    targetName: r.targetName || r.targetUsername || r.targetIdentity,
                                     newBanState: true,
                                   });
                                   setBanReasonInput(`[${category}] ${displayReason}`);
