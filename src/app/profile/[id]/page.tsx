@@ -107,6 +107,10 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
     )
   );
 
+  // Check if mutual connection (both follow each other) or owner
+  const isMutualConnection = Boolean(isFollowing && followsMe);
+  const canViewConnections = isOwner || isMutualConnection;
+
   const fetchProfile = useCallback(async (isInitial = false) => {
     let effectiveTarget = targetId;
 
@@ -888,17 +892,27 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
                     <>
                       <button
                         onClick={() => setConnectionsModalMode("followers")}
-                        className="flex flex-col items-center py-1.5 rounded-xl hover:bg-white/5 transition-all cursor-pointer"
+                        className="flex flex-col items-center py-1.5 rounded-xl hover:bg-white/5 transition-all cursor-pointer group"
                       >
-                        <span className="font-extrabold text-white text-base sm:text-lg">{followersCount}</span>
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-extrabold text-white text-base sm:text-lg">{followersCount}</span>
+                          {!canViewConnections && (
+                            <Lock size={12} className="text-slate-500 group-hover:text-slate-400 transition-colors" />
+                          )}
+                        </div>
                         <span className="text-slate-400 text-xs font-medium">Followers</span>
                       </button>
 
                       <button
                         onClick={() => setConnectionsModalMode("following")}
-                        className="flex flex-col items-center py-1.5 rounded-xl hover:bg-white/5 transition-all cursor-pointer"
+                        className="flex flex-col items-center py-1.5 rounded-xl hover:bg-white/5 transition-all cursor-pointer group"
                       >
-                        <span className="font-extrabold text-white text-base sm:text-lg">{followingCount}</span>
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-extrabold text-white text-base sm:text-lg">{followingCount}</span>
+                          {!canViewConnections && (
+                            <Lock size={12} className="text-slate-500 group-hover:text-slate-400 transition-colors" />
+                          )}
+                        </div>
                         <span className="text-slate-400 text-xs font-medium">Following</span>
                       </button>
                     </>
@@ -1323,6 +1337,9 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
           currentUserId={currentUser?.id}
           initialMode={connectionsModalMode}
           onCountsChanged={() => fetchProfile(false)}
+          isMutualConnection={canViewConnections}
+          initialFollowersCount={followersCount}
+          initialFollowingCount={followingCount}
         />
       )}
 

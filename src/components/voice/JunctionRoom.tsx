@@ -3540,13 +3540,6 @@ export function JunctionRoom({
                             )}
                           </div>
 
-                          {/* Username sub-label if distinct from shown name (for registered members only) */}
-                          {(!participant.identity?.startsWith("guest_") && !participant.username?.endsWith("_guest") && participant.username && participant.username.toLowerCase() !== participant.name.toLowerCase()) && (
-                            <span className="text-[10px] font-medium text-slate-400 truncate max-w-[120px] xs:max-w-[145px] sm:max-w-[175px] -mt-0.5">
-                              @{participant.username}
-                            </span>
-                          )}
-
                           {/* Fixed Height Soundwave Bar or Status Pill */}
                           <div className="h-5 flex items-center justify-center mt-0.5">
                             {speaking ? (
