@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { GuestUser, Junction } from "@/lib/types";
+import { useUser } from "@/hooks/useUser";
 import { X, Plus, Sparkles, Gamepad2, Cpu, Coffee, Music, Languages, Dices, Loader2, Users, Lock, Unlock } from "lucide-react";
 
 interface CreateJunctionModalProps {
@@ -24,10 +25,11 @@ const CATEGORIES: { id: Junction["category"]; label: string; icon: any }[] = [
 
 export function CreateJunctionModal({ isOpen, onClose, guest, onCreated }: CreateJunctionModalProps) {
   const router = useRouter();
+  const { user, isRegistered } = useUser();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [category, setCategory] = useState<Junction["category"]>("casual");
-  const [maxParticipants, setMaxParticipants] = useState<number>(10);
+  const [maxParticipants, setMaxParticipants] = useState<number>(2);
   const [isLocked, setIsLocked] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -49,6 +51,7 @@ export function CreateJunctionModal({ isOpen, onClose, guest, onCreated }: Creat
     setError(null);
 
     try {
+      const creatorName = (isRegistered && user?.isRegistered && user?.username ? user.username : (guest.name || "Guest")).trim();
       const res = await fetch("/api/junctions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -57,12 +60,12 @@ export function CreateJunctionModal({ isOpen, onClose, guest, onCreated }: Creat
           description: description.trim() || `Welcome to ${name.trim()} voice room!`,
           category,
           tags: ["Custom", category, isLocked ? "Private" : "Public"],
-          maxParticipants: maxParticipants || 10,
+          maxParticipants: maxParticipants || 2,
           isLocked: isLocked,
           creator: {
-            name: guest.name,
-            avatar: guest.avatar || "zap",
-            color: guest.color,
+            name: creatorName,
+            avatar: (isRegistered && user?.avatar) || guest.avatar || "zap",
+            color: (isRegistered && user?.color) || guest.color || "#6366F1",
           },
         }),
       });
@@ -170,15 +173,18 @@ export function CreateJunctionModal({ isOpen, onClose, guest, onCreated }: Creat
 
           {/* Max Capacity Selector */}
           <div className="p-3.5 sm:p-4 rounded-xl bg-white/5 border border-white/10 mt-4 sm:mt-5">
-            <div className="flex items-center justify-between mb-2.5">
+            <div className="flex items-center justify-between mb-1">
               <label className="text-[10px] font-bold uppercase tracking-widest text-slate-400 flex items-center gap-1.5">
                 <Users size={12} className="text-indigo-400" />
-                <span>Max Room Capacity</span>
+                <span>Initial Room Capacity</span>
               </label>
               <span className="text-xs font-semibold text-indigo-300">
                 {maxParticipants} seats
               </span>
             </div>
+            <p className="text-[11px] text-slate-400 font-light mb-3">
+              Starts at 2 seats. As host, you can dynamically increase or decrease seats anytime inside the room!
+            </p>
             <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
               {[2, 4, 6, 8, 10, 12].map((size) => (
                 <button

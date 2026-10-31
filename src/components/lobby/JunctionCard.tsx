@@ -87,7 +87,7 @@ export const JunctionCard = React.memo(
       : junction.description;
 
     const participantCount = junction.participants?.length ?? junction.currentCount;
-    const maxCapacity = junction.maxParticipants || 10;
+    const maxCapacity = junction.maxParticipants || (isPublic ? 10 : 2);
     const isFull = participantCount >= maxCapacity;
     const isLocked = junction.isLocked;
     const isCreator = guest?.name === junction.creatorId;

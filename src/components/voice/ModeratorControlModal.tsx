@@ -56,10 +56,14 @@ export function ModeratorControlModal({
 
   // Edit Details State
   const [editName, setEditName] = useState(junction.name);
-  const [editCapacity, setEditCapacity] = useState(junction.maxParticipants);
+  const [editCapacity, setEditCapacity] = useState(junction.maxParticipants || 2);
   const [isEditing, setIsEditing] = useState(false);
 
   if (!isOpen) return null;
+
+  const isPrivate = Boolean(junction.isCustom || junction.creatorId || junction.id.startsWith("junc_"));
+  const isCreatorHost = Boolean(isPrivate && junction.creatorId && currentModerator.toLowerCase() === junction.creatorId.toLowerCase());
+  const canKick = isStaff || isCreatorHost;
 
   const participantList = (participants && participants.length > 0) ? participants : junction.participants;
 
@@ -246,60 +250,63 @@ export function ModeratorControlModal({
                         <span className="text-[10px] font-bold">{p.isMutedByMod ? "Allow Mic" : "Mute"}</span>
                       </button>
 
-                      {/* Kick & Ban: Strictly for official Staff (Managers, Admins, Main Admin) */}
-                      {isStaff && (
-                        <>
-                          <button
-                            onClick={() =>
-                              handleParticipantAction(p.identity, "kick", "Kicked")
-                            }
-                            disabled={actionLoading !== null}
-                            className="p-1.5 px-2 rounded-lg bg-slate-200 dark:bg-slate-800 hover:bg-rose-600 hover:text-white text-slate-700 dark:text-slate-300 text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer"
-                            title="Kick from junction"
-                          >
-                            <UserX size={13} />
-                            <span className="text-[10px] font-bold">Kick</span>
-                          </button>
-
-                          <button
-                            onClick={() =>
-                              handleParticipantAction(p.identity, "ban", "Banned")
-                            }
-                            disabled={actionLoading !== null}
-                            className="p-1.5 px-2 rounded-lg bg-slate-200 dark:bg-slate-800 hover:bg-rose-800 hover:text-white text-slate-700 dark:text-slate-300 text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer"
-                            title="Ban from re-joining junction"
-                          >
-                            <Ban size={13} />
-                            <span className="text-[10px] font-bold">Ban</span>
-                          </button>
-                        </>
+                      {/* Kick Action */}
+                      {canKick && (
+                        <button
+                          onClick={() =>
+                            handleParticipantAction(p.identity, "kick", "Kicked")
+                          }
+                          disabled={actionLoading !== null}
+                          className="p-1.5 px-2 rounded-lg bg-slate-200 dark:bg-slate-800 hover:bg-rose-600 hover:text-white text-slate-700 dark:text-slate-300 text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer"
+                          title="Kick from junction"
+                        >
+                          <UserX size={13} />
+                          <span className="text-[10px] font-bold">Kick</span>
+                        </button>
                       )}
 
-                      {/* Co-Mod / Demote Mod */}
-                      {isMod ? (
+                      {/* Ban: Staff Only */}
+                      {isStaff && (
                         <button
                           onClick={() =>
-                            handleParticipantAction(p.identity, "demote_mod", "Moderator Removed")
+                            handleParticipantAction(p.identity, "ban", "Banned")
                           }
                           disabled={actionLoading !== null}
-                          className="p-1.5 px-2 rounded-lg bg-rose-500/20 hover:bg-rose-500/40 text-rose-300 border border-rose-500/30 text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer"
-                          title="Remove Moderator Role"
+                          className="p-1.5 px-2 rounded-lg bg-slate-200 dark:bg-slate-800 hover:bg-rose-800 hover:text-white text-slate-700 dark:text-slate-300 text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer"
+                          title="Ban from re-joining junction"
                         >
-                          <Shield size={13} />
-                          <span className="text-[10px] font-bold">Remove Mod</span>
+                          <Ban size={13} />
+                          <span className="text-[10px] font-bold">Ban</span>
                         </button>
-                      ) : (
-                        <button
-                          onClick={() =>
-                            handleParticipantAction(p.identity, "promote_mod", "Moderator Added")
-                          }
-                          disabled={actionLoading !== null}
-                          className="p-1.5 px-2 rounded-lg bg-amber-500/20 hover:bg-amber-500/40 text-amber-300 border border-amber-500/30 text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer"
-                          title="Promote to Moderator"
-                        >
-                          <Crown size={13} />
-                          <span className="text-[10px] font-bold">Make Mod</span>
-                        </button>
+                      )}
+
+                      {/* Co-Mod / Demote Mod: Not allowed in private rooms */}
+                      {!isPrivate && (
+                        isMod ? (
+                          <button
+                            onClick={() =>
+                              handleParticipantAction(p.identity, "demote_mod", "Moderator Removed")
+                            }
+                            disabled={actionLoading !== null}
+                            className="p-1.5 px-2 rounded-lg bg-rose-500/20 hover:bg-rose-500/40 text-rose-300 border border-rose-500/30 text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer"
+                            title="Remove Moderator Role"
+                          >
+                            <Shield size={13} />
+                            <span className="text-[10px] font-bold">Remove Mod</span>
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() =>
+                              handleParticipantAction(p.identity, "promote_mod", "Moderator Added")
+                            }
+                            disabled={actionLoading !== null}
+                            className="p-1.5 px-2 rounded-lg bg-amber-500/20 hover:bg-amber-500/40 text-amber-300 border border-amber-500/30 text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer"
+                            title="Promote to Moderator"
+                          >
+                            <Crown size={13} />
+                            <span className="text-[10px] font-bold">Make Mod</span>
+                          </button>
+                        )
                       )}
                     </div>
                   )}

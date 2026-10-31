@@ -154,11 +154,9 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
           disableForReducedMotion: true
         });
 
-        completeOnboarding({
-          name: cleanUsername,
-          avatar: userAvatar,
-          color: "#6366F1",
-        });
+        try {
+          localStorage.setItem("junction_onboarding_completed", "true");
+        } catch {}
 
         // Use direct client-side navigation to apply active session state cleanly
         router.push("/junctions");
@@ -218,11 +216,9 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
           return;
         }
 
-        completeOnboarding({
-          name: cleanUsername,
-          avatar: selectedAvatar || "zap",
-          color: "#6366F1",
-        });
+        try {
+          localStorage.setItem("junction_onboarding_completed", "true");
+        } catch {}
 
         router.push("/junctions");
       }
@@ -317,11 +313,9 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
           disableForReducedMotion: true
         });
 
-        completeOnboarding({
-          name: cleanUsername,
-          avatar: userAvatar,
-          color: "#6366F1",
-        });
+        try {
+          localStorage.setItem("junction_onboarding_completed", "true");
+        } catch {}
 
         setTimeout(() => {
           router.push("/junctions");
@@ -982,11 +976,9 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
           username={savedUserForRecoveryModal}
           onClose={() => {
             setNewlyCreatedRecoveryCode(null);
-            completeOnboarding({
-              name: savedUserForRecoveryModal,
-              avatar: selectedAvatar || "zap",
-              color: "#6366F1",
-            });
+            try {
+              localStorage.setItem("junction_onboarding_completed", "true");
+            } catch {}
             router.push("/junctions");
           }}
         />

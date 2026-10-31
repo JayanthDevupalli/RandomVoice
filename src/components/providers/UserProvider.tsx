@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from "react";
 import { supabase } from "@/lib/supabase";
 import { useGuestUser } from "@/hooks/useGuestUser";
+import { generateRandomGuest } from "@/lib/guest-utils";
 
 export type UserRole = "super_admin" | "admin" | "manager" | "user";
 
@@ -84,6 +85,30 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
               bannedReason: userBannedReason,
             });
           }
+        } else {
+          // User is logged out. Ensure the guest profile in localStorage is a genuine guest persona,
+          // not contaminated with a registered member's username.
+          try {
+            const rawStored = localStorage.getItem("junction_guest_profile");
+            if (rawStored) {
+              const parsed = JSON.parse(rawStored);
+              if (parsed?.name) {
+                const { data: existingProf } = await supabase
+                  .from("profiles")
+                  .select("id")
+                  .ilike("username", parsed.name.trim())
+                  .maybeSingle();
+
+                if (existingProf && mounted) {
+                  const newGuest = generateRandomGuest();
+                  localStorage.setItem("junction_guest_profile", JSON.stringify(newGuest));
+                  window.dispatchEvent(
+                    new CustomEvent("yapclub_guest_profile_sync", { detail: { guest: newGuest, onboarded: true } })
+                  );
+                }
+              }
+            }
+          } catch {}
         }
       } catch (err) {
         console.warn("Failed to check auth in UserProvider:", err);
@@ -134,7 +159,16 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
           console.warn("Error fetching profile on auth state change:", err);
         }
       } else if (event === "SIGNED_OUT") {
-        if (mounted) setUser(null);
+        if (mounted) {
+          setUser(null);
+          const newGuest = generateRandomGuest();
+          try {
+            localStorage.setItem("junction_guest_profile", JSON.stringify(newGuest));
+          } catch {}
+          window.dispatchEvent(
+            new CustomEvent("yapclub_guest_profile_sync", { detail: { guest: newGuest, onboarded: true } })
+          );
+        }
       }
     });
 
@@ -294,6 +328,15 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
   const signOut = useCallback(async () => {
     await supabase.auth.signOut();
     setUser(null);
+    const newGuest = generateRandomGuest();
+    try {
+      localStorage.setItem("junction_guest_profile", JSON.stringify(newGuest));
+    } catch {}
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent("yapclub_guest_profile_sync", { detail: { guest: newGuest, onboarded: true } })
+      );
+    }
   }, []);
 
   const isLoaded = guestLoaded && isAuthLoaded;

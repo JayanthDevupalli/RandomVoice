@@ -48,6 +48,7 @@ import {
   Trash2,
   ChevronDown,
   Lock,
+  Unlock,
   Loader2,
   Check,
   Compass,
@@ -894,9 +895,123 @@ export function JunctionRoom({
   // Profile Preview Modal State
   const [previewParticipant, setPreviewParticipant] = useState<JunctionParticipant | null>(null);
 
-  // Web Audio Visualizer for local mic
-  // Room host concept removed — all participants are equal speakers
-  const isCurrentModerator = false;
+  // In private rooms, the creator is the moderator (host)
+  const isPrivateRoom = Boolean(
+    junction?.isCustom ||
+    junction?.creatorId ||
+    (typeof junction?.id === "string" && junction.id.startsWith("junc_"))
+  );
+
+  const isHost = Boolean(
+    isPrivateRoom &&
+    junction?.creatorId &&
+    (isLocalIdentity(junction.creatorId) ||
+     (myIdentity && junction.creatorId.toLowerCase() === myIdentity.toLowerCase()) ||
+     (user?.username && junction.creatorId.toLowerCase() === user.username.toLowerCase()) ||
+     (guest?.name && junction.creatorId.toLowerCase() === guest.name.toLowerCase()))
+  );
+
+  const isCurrentModerator = isPrivateRoom && isHost;
+
+  const isParticipantHost = useCallback((p?: { id?: string; identity?: string; name?: string; username?: string; role?: string } | null) => {
+    if (!p || !isPrivateRoom || !junction?.creatorId) return false;
+    const cleanCreator = junction.creatorId.trim().toLowerCase();
+    return Boolean(
+      p.role === "moderator" ||
+      (p.identity && p.identity.trim().toLowerCase() === cleanCreator) ||
+      (p.username && p.username.trim().toLowerCase() === cleanCreator) ||
+      (p.name && p.name.trim().toLowerCase() === cleanCreator)
+    );
+  }, [isPrivateRoom, junction?.creatorId]);
+
+  const [isCapacityMenuOpen, setIsCapacityMenuOpen] = useState(false);
+  const [isUpdatingCapacity, setIsUpdatingCapacity] = useState(false);
+
+  const handleUpdateCapacity = async (newCapacity: number) => {
+    if (isUpdatingCapacity || !isPrivateRoom || !isHost) return;
+    if (newCapacity < participants.length) {
+      setModNoticeToast(`⚠️ Cannot reduce capacity below ${participants.length} current participants`);
+      setTimeout(() => setModNoticeToast(null), 3000);
+      return;
+    }
+    setIsUpdatingCapacity(true);
+    try {
+      const res = await fetch(`/api/junctions/${junctionId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "update_details",
+          moderatorIdentity: myIdentity,
+          updates: { maxParticipants: newCapacity },
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || "Failed to update room capacity");
+      }
+
+      setJunction((prev) => (prev ? { ...prev, maxParticipants: newCapacity } : prev));
+
+      broadcastRoomUpdate({
+        type: "room_capacity_updated",
+        payload: { maxParticipants: newCapacity },
+      });
+      broadcastRoomUpdate({ type: "room_participants_updated" });
+
+      setModNoticeToast(`✨ Room capacity set to ${newCapacity} seats!`);
+      setTimeout(() => setModNoticeToast(null), 3000);
+    } catch (err: any) {
+      console.error("Error updating capacity:", err);
+      setModNoticeToast(err.message || "Failed to update capacity");
+      setTimeout(() => setModNoticeToast(null), 3000);
+    } finally {
+      setIsUpdatingCapacity(false);
+      setIsCapacityMenuOpen(false);
+    }
+  };
+
+  const [isTogglingLock, setIsTogglingLock] = useState(false);
+
+  const handleToggleLock = async () => {
+    if (isTogglingLock || !isPrivateRoom || !isHost) return;
+    const targetLockedState = !junction?.isLocked;
+    setIsTogglingLock(true);
+    try {
+      const res = await fetch(`/api/junctions/${junctionId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "lock",
+          moderatorIdentity: myIdentity,
+          isLocked: targetLockedState,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || "Failed to toggle room lock");
+      }
+
+      setJunction((prev) => (prev ? { ...prev, isLocked: targetLockedState } : prev));
+
+      broadcastRoomUpdate({
+        type: "room_lock_updated",
+        payload: { isLocked: targetLockedState },
+      });
+
+      setModNoticeToast(
+        targetLockedState
+          ? "🔒 Room locked — new participants cannot join"
+          : "🔓 Room unlocked — new participants can join"
+      );
+      setTimeout(() => setModNoticeToast(null), 3000);
+    } catch (err: any) {
+      console.error("Error toggling room lock:", err);
+      setModNoticeToast(err.message || "Failed to toggle room lock");
+      setTimeout(() => setModNoticeToast(null), 3000);
+    } finally {
+      setIsTogglingLock(false);
+    }
+  };
 
   const handleClaimModerator = async () => {
     if (isClaimingMod || isCurrentModerator) return;
@@ -1196,7 +1311,9 @@ export function JunctionRoom({
             setKickedNotice(
               action === "ban"
                 ? "You have been banned by YapClub moderation staff."
-                : "You were removed from this junction by platform staff."
+                : (isPrivateRoom
+                    ? "You were kicked from this private room by the host."
+                    : "You were removed from this junction by platform staff.")
             );
           }
         }
@@ -1246,13 +1363,23 @@ export function JunctionRoom({
         );
       } else if (type === "room_ended") {
         setKickedNotice("This junction was closed by YapClub administration.");
+      } else if (type === "room_capacity_updated" && payload) {
+        const newCap = Number(payload.maxParticipants);
+        if (newCap && !isNaN(newCap)) {
+          setJunction((prev) => (prev ? { ...prev, maxParticipants: newCap } : prev));
+        }
+        pollJunction();
+      } else if (type === "room_lock_updated" && payload) {
+        const locked = Boolean(payload.isLocked);
+        setJunction((prev) => (prev ? { ...prev, isLocked: locked } : prev));
+        pollJunction();
       } else if (type === "room_participants_updated") {
         pollJunction();
       }
     } catch (err) {
       console.error("Error processing room message", err);
     }
-  }, [isLocalIdentity, isLocalParticipant, junctionId, user?.id, guest?.id, refreshUser, pollJunction]);
+  }, [isLocalIdentity, isLocalParticipant, junctionId, user?.id, guest?.id, refreshUser, pollJunction, isPrivateRoom, mediaStream]);
 
   const pollJunctionRef = useRef(pollJunction);
   pollJunctionRef.current = pollJunction;
@@ -1658,24 +1785,29 @@ export function JunctionRoom({
       }
     }
 
-    // Staff clearance for kicking (Super Admin, Admin, and Manager)
+    // Clearance for kicking (Room Host or Staff)
     if (modAction === "kick") {
-      if (!isStaff) {
-        alert("Unauthorized: Only official Staff (Managers, Admins, Main Admin) can kick participants.");
+      if (!isCurrentModerator && !isStaff) {
+        alert("Unauthorized: Only the room Host or official Staff can kick participants.");
         return;
       }
-      if (targetRole === "super_admin" && !isSuperAdmin) {
+      if (targetRole === "super_admin") {
         alert("Protected: The Main Admin cannot be kicked.");
         return;
       }
-      if (targetRole === "admin" && !isSuperAdmin) {
+      if (targetRole === "admin" && !isSuperAdmin && !isCurrentModerator) {
         alert("Only the Main Admin has authority to kick an Admin.");
         return;
       }
-      if (targetRole === "manager" && !isAdmin) {
+      if (targetRole === "manager" && !isAdmin && !isCurrentModerator) {
         alert("Admin clearance required to kick a Manager.");
         return;
       }
+    }
+
+    if (modAction === "promote_mod" && isPrivateRoom) {
+      alert("In private rooms, only the room creator can be the host.");
+      return;
     }
 
     // Optimistically update participants state case-insensitively
@@ -2480,13 +2612,13 @@ export function JunctionRoom({
     isRegistered,
   ]);
   const speakingParticipant = effectiveParticipants.find((p) => activeSpeakers.some((s) => s.toLowerCase() === p.identity?.toLowerCase())) || effectiveParticipants[0];
-  const SEAT_SLOTS = Array.from({ length: junction?.maxParticipants || 10 });
+  const SEAT_SLOTS = Array.from({ length: junction?.maxParticipants || (isPrivateRoom ? 2 : 10) });
 
   // Deterministic, compact sequential first-come first-served seating assignments.
   // Active participants ALWAYS fill seats #1, #2, #3, ... compactly without empty gaps.
   // When a user exits, all subsequent participants seamlessly shift forward into the vacant seats.
   const seatedParticipants: (JunctionParticipant | null)[] = useMemo(() => {
-    const maxSeats = junction?.maxParticipants || 10;
+    const maxSeats = junction?.maxParticipants || (isPrivateRoom ? 2 : 10);
     const seats: (JunctionParticipant | null)[] = Array.from({ length: maxSeats }, () => null);
 
     const getPKey = (p: JunctionParticipant) =>
@@ -2506,7 +2638,7 @@ export function JunctionRoom({
     }
 
     return seats;
-  }, [effectiveParticipants, junction?.maxParticipants]);
+  }, [effectiveParticipants, junction?.maxParticipants, isPrivateRoom]);
 
   // Kicked / Banned / Ended Modal (Rendered strictly AFTER all hooks to adhere to React Rules of Hooks)
   if (kickedNotice) {
@@ -2919,33 +3051,207 @@ export function JunctionRoom({
                     <ChevronLeft size={16} />
                   </button>
 
-                  <div className="min-w-0 flex items-center gap-1.5 sm:gap-2 flex-wrap sm:flex-nowrap">
-                    <h1 className="text-sm sm:text-base font-bold text-white truncate drop-shadow-sm leading-none">
-                      {junction?.name || "Junction Room"}
-                    </h1>
+                  <div className="min-w-0 flex flex-col justify-center">
+                    <div className="min-w-0 flex items-center gap-1.5 sm:gap-2 flex-wrap">
+                      <h1 className="text-sm sm:text-base font-bold text-white tracking-tight truncate drop-shadow-sm leading-tight">
+                        {junction?.name || "Junction Room"}
+                      </h1>
 
-                    {/* Participant Count Pill */}
-                    <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-[10px] sm:text-xs font-semibold text-slate-300 shrink-0">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                      <span>{participants.length}/{junction?.maxParticipants || 10}</span>
+                      {/* Participant Count / Capacity Pill */}
+                      {isPrivateRoom && isHost ? (
+                        <div className="relative">
+                          <button
+                            type="button"
+                            onClick={() => setIsCapacityMenuOpen(!isCapacityMenuOpen)}
+                            className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/40 text-[10px] sm:text-xs font-bold transition-all shadow-sm cursor-pointer active:scale-95 shrink-0"
+                            title="Dynamic Room Capacity (Host Feature)"
+                          >
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                            <span>{participants.length}/{junction?.maxParticipants || 2} Seats</span>
+                            <ChevronDown size={11} className={`transition-transform duration-200 ${isCapacityMenuOpen ? "rotate-180" : ""}`} />
+                          </button>
+
+                          {isCapacityMenuOpen && (
+                            <>
+                              <div
+                                className="fixed inset-0 z-40"
+                                onClick={() => setIsCapacityMenuOpen(false)}
+                              />
+                              <div className="absolute left-0 sm:left-auto sm:right-0 top-full mt-2 w-64 p-3.5 rounded-2xl bg-[#12131F]/98 border border-white/20 shadow-2xl z-50 animate-fadeIn backdrop-blur-2xl">
+                                <div className="flex items-center justify-between mb-1.5">
+                                  <div className="flex items-center gap-1.5 text-xs font-bold text-white">
+                                    <Users size={13} className="text-indigo-400" />
+                                    <span>Dynamic Room Capacity</span>
+                                  </div>
+                                  <span className="text-[10px] text-slate-400 font-mono">
+                                    {participants.length} seated
+                                  </span>
+                                </div>
+
+                                <p className="text-[10px] text-slate-400 font-light mb-3">
+                                  Dynamically expand or shrink seat capacity for this private room.
+                                </p>
+
+                                <div className="flex items-center justify-between p-2 rounded-xl bg-white/5 border border-white/10 mb-3">
+                                  <button
+                                    type="button"
+                                    disabled={isUpdatingCapacity || (junction?.maxParticipants || 2) <= 2 || (junction?.maxParticipants || 2) <= participants.length}
+                                    onClick={() => handleUpdateCapacity(Math.max(2, (junction?.maxParticipants || 2) - 2))}
+                                    className="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-white font-bold flex items-center justify-center transition-all cursor-pointer text-sm"
+                                    title="Decrease by 2 seats"
+                                  >
+                                    -
+                                  </button>
+
+                                  <div className="text-center">
+                                    <div className="text-sm font-black text-white">
+                                      {junction?.maxParticipants || 2} Seats
+                                    </div>
+                                    <div className="text-[9px] text-indigo-300 font-medium">
+                                      {isUpdatingCapacity ? "Updating..." : "Active Room Limit"}
+                                    </div>
+                                  </div>
+
+                                  <button
+                                    type="button"
+                                    disabled={isUpdatingCapacity || (junction?.maxParticipants || 2) >= 12}
+                                    onClick={() => handleUpdateCapacity(Math.min(12, (junction?.maxParticipants || 2) + 2))}
+                                    className="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-white font-bold flex items-center justify-center transition-all cursor-pointer text-sm"
+                                    title="Increase by 2 seats"
+                                  >
+                                    +
+                                  </button>
+                                </div>
+
+                                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">
+                                  Quick Seat Presets
+                                </div>
+                                <div className="grid grid-cols-3 gap-1.5">
+                                  {[2, 4, 6, 8, 10, 12].map((size) => {
+                                    const isActive = (junction?.maxParticipants || 2) === size;
+                                    const isBelowOccupied = size < participants.length;
+                                    return (
+                                      <button
+                                        key={size}
+                                        type="button"
+                                        disabled={isUpdatingCapacity || isBelowOccupied}
+                                        onClick={() => {
+                                          if (size !== (junction?.maxParticipants || 2)) {
+                                            handleUpdateCapacity(size);
+                                          }
+                                        }}
+                                        className={`py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex flex-col items-center justify-center ${
+                                          isActive
+                                            ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30 ring-1 ring-white/30"
+                                            : isBelowOccupied
+                                              ? "bg-white/5 text-slate-600 border border-white/5 cursor-not-allowed opacity-40"
+                                              : "bg-white/5 hover:bg-white/15 text-slate-300 border border-white/10"
+                                        }`}
+                                        title={isBelowOccupied ? `Cannot set below ${participants.length} current participants` : `${size} seats`}
+                                      >
+                                        <span>{size}</span>
+                                        <span className="text-[8px] opacity-75 font-normal">seats</span>
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+
+                                {/* Room Lock Quick Row */}
+                                <div className="mt-3 pt-2.5 border-t border-white/10 flex items-center justify-between">
+                                  <div className="flex items-center gap-1.5">
+                                    {junction?.isLocked ? (
+                                      <Lock size={12} className="text-amber-400 shrink-0" />
+                                    ) : (
+                                      <Unlock size={12} className="text-slate-400 shrink-0" />
+                                    )}
+                                    <div className="flex flex-col">
+                                      <span className="text-[11px] font-bold text-white leading-tight">
+                                        {junction?.isLocked ? "Room Locked" : "Room Open"}
+                                      </span>
+                                      <span className="text-[9px] text-slate-400 leading-tight">
+                                        {junction?.isLocked ? "New users blocked" : "Open to invitees"}
+                                      </span>
+                                    </div>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={handleToggleLock}
+                                    disabled={isTogglingLock}
+                                    className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                                      junction?.isLocked
+                                        ? "bg-amber-500 text-black shadow-sm hover:bg-amber-400"
+                                        : "bg-white/10 text-slate-300 hover:bg-white/20 border border-white/10"
+                                    }`}
+                                  >
+                                    {isTogglingLock ? "..." : (junction?.isLocked ? "Unlock" : "Lock")}
+                                  </button>
+                                </div>
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-[10px] sm:text-xs font-semibold text-slate-300 shrink-0">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                          <span>{participants.length}/{junction?.maxParticipants || (isPrivateRoom ? 2 : 10)} Seats</span>
+                        </div>
+                      )}
+
+                      {/* User's Role Badge */}
+                      {myPlatformRole !== "user" && (
+                        <RoleBadge role={myPlatformRole} size="xs" />
+                      )}
                     </div>
 
-                    {/* User's Role Badge */}
-                    {myPlatformRole !== "user" && (
-                      <RoleBadge role={myPlatformRole} size="xs" />
-                    )}
-
-                    {/* Optional quiet subtitle on large screens only */}
+                    {/* Room Description as clean subtitle */}
                     {junction?.description && (
-                      <span className="text-[11px] text-slate-500 hidden xl:inline truncate max-w-[200px] border-l border-white/10 pl-2">
+                      <p className="text-[11px] text-slate-400 font-normal truncate max-w-xs sm:max-w-md mt-0.5 leading-tight">
                         {junction.description}
-                      </span>
+                      </p>
                     )}
                   </div>
                 </div>
 
                 {/* Right: Clean, Lightweight Controls */}
                 <div className="flex items-center justify-end gap-1 sm:gap-1.5 shrink-0">
+                  {/* Lock / Unlock Room Control - Host Feature for Private Rooms */}
+                  {isPrivateRoom && isHost && (
+                    <button
+                      type="button"
+                      onClick={handleToggleLock}
+                      disabled={isTogglingLock}
+                      className={`h-8 sm:h-9 px-2.5 sm:px-3 rounded-full flex items-center gap-1.5 border transition-all cursor-pointer shadow-sm active:scale-95 shrink-0 ${
+                        junction?.isLocked
+                          ? "bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border-amber-400/50 shadow-amber-500/10"
+                          : "bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border-white/10"
+                      }`}
+                      title={junction?.isLocked ? "Room is Locked (Click to Unlock)" : "Room is Open (Click to Lock Room)"}
+                    >
+                      {junction?.isLocked ? (
+                        <>
+                          <Lock size={13} className="text-amber-400" />
+                          <span className="text-[11px] font-bold">Locked</span>
+                        </>
+                      ) : (
+                        <>
+                          <Unlock size={13} className="text-slate-400" />
+                          <span className="text-[11px] font-semibold hidden xs:inline">Lock Room</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+
+                  {/* Room Locked indicator for fellow users in private room */}
+                  {isPrivateRoom && !isHost && junction?.isLocked && (
+                    <div
+                      className="h-8 sm:h-9 px-2.5 rounded-full flex items-center gap-1.5 bg-amber-500/15 border border-amber-400/30 text-amber-300 text-[11px] font-semibold shrink-0"
+                      title="This private room is locked by the host"
+                    >
+                      <Lock size={12} className="text-amber-400" />
+                      <span className="hidden xs:inline">Locked</span>
+                    </div>
+                  )}
+
                   {/* Admin Terminate Junction Button */}
                   {isAdmin && (
                     <button
@@ -2982,11 +3288,11 @@ export function JunctionRoom({
             </div>
 
             {/* Dynamic Seat Stage Grid */}
-            <div className={`w-full mx-auto px-2.5 sm:px-6 my-auto py-2 sm:py-4 ${SEAT_SLOTS.length <= 2 ? "max-w-3xl" :
-                SEAT_SLOTS.length <= 4 ? "max-w-4xl" :
-                  SEAT_SLOTS.length <= 6 ? "max-w-5xl" :
-                    SEAT_SLOTS.length <= 8 ? "max-w-6xl" :
-                      "max-w-7xl"
+            <div className={`w-full mx-auto px-2.5 sm:px-6 my-auto py-2 sm:py-4 ${SEAT_SLOTS.length <= 2 ? "max-w-2xl" :
+                SEAT_SLOTS.length <= 4 ? "max-w-3xl" :
+                  SEAT_SLOTS.length <= 6 ? "max-w-4xl" :
+                    SEAT_SLOTS.length <= 8 ? "max-w-5xl" :
+                      "max-w-6xl"
               }`}>
               <div className={`grid gap-2.5 sm:gap-4 justify-center mx-auto ${SEAT_SLOTS.length <= 2 ? "grid-cols-1 sm:grid-cols-2" :
                   SEAT_SLOTS.length <= 4 ? "grid-cols-2 sm:grid-cols-2" :
@@ -3018,12 +3324,12 @@ export function JunctionRoom({
                         key={participant.id || participant.identity || index}
                         style={cardThemeStyle}
                         className={`relative w-full min-w-0 p-3 sm:p-4 rounded-2xl sm:rounded-[1.4rem] flex flex-col justify-between items-center text-center transition-all duration-300 border overflow-hidden backdrop-blur-xl group/card shadow-[0_12px_32px_-8px_rgba(0,0,0,0.6)] ${SEAT_SLOTS.length <= 2
-                            ? "min-h-[175px] sm:min-h-[285px]"
+                            ? "min-h-[190px] sm:min-h-[285px]"
                             : SEAT_SLOTS.length <= 4
-                              ? "min-h-[155px] sm:min-h-[250px]"
+                              ? "min-h-[180px] sm:min-h-[265px]"
                               : SEAT_SLOTS.length <= 8
-                                ? "min-h-[140px] sm:min-h-[220px]"
-                                : "min-h-[135px] sm:min-h-[200px]"
+                                ? "min-h-[155px] sm:min-h-[225px]"
+                                : "min-h-[140px] sm:min-h-[200px]"
                           } ${participantRole === "super_admin"
                             ? "ring-1.5 ring-amber-400/80 shadow-[0_0_25px_rgba(245,158,11,0.25)]"
                             : participantRole === "admin"
@@ -3069,7 +3375,12 @@ export function JunctionRoom({
                             })()}
                           </div>
 
-                          <div className="flex items-center gap-1 shrink-0 justify-end">
+                          <div className="flex items-center gap-1.5 shrink-0 justify-end">
+                            {isPrivateRoom && isParticipantHost(participant) && (
+                              <span className="w-5 h-5 rounded-full bg-amber-500/20 border border-amber-400/40 text-amber-300 flex items-center justify-center shadow-xs backdrop-blur-md shrink-0" title="Room Host">
+                                <Shield size={11} className="fill-amber-400/40 text-amber-400" />
+                              </span>
+                            )}
                             {isLocal ? (
                               <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/35 text-[8px] sm:text-[9px] font-extrabold tracking-wider shrink-0 backdrop-blur-md shadow-xs uppercase">
                                 YOU
@@ -3201,7 +3512,7 @@ export function JunctionRoom({
                               ? (user?.avatar || guest?.avatar || participant.avatar || "zap")
                               : (participant.avatar || "zap");
                             const effectiveName = isLocal
-                              ? (user?.displayName || user?.name || guest?.displayName || guest?.name || participant.name)
+                              ? (isRegistered && user?.isRegistered ? (user?.displayName || user?.name) : (guest?.displayName || guest?.name || participant.name))
                               : participant.name;
                             const effectiveColor = isLocal
                               ? (user?.color || guest?.color || participant.color || "#6366F1")
@@ -3220,15 +3531,17 @@ export function JunctionRoom({
                         >
                           <div className="flex items-center justify-center gap-1.5 max-w-full">
                             <span className="font-bold text-xs sm:text-sm text-white tracking-tight truncate max-w-[120px] xs:max-w-[145px] sm:max-w-[175px] group-hover/name:underline decoration-white/40">
-                              {participant.name}
+                              {isLocal
+                                ? (isRegistered && user?.isRegistered ? (user?.displayName || user?.name) : (guest?.displayName || guest?.name || participant.name))
+                                : participant.name}
                             </span>
                             {participantRole !== "user" && (
                               <RoleBadge role={participantRole} size="xs" showLabel={false} />
                             )}
                           </div>
 
-                          {/* Username sub-label if distinct from shown name */}
-                          {participant.username && participant.username.toLowerCase() !== participant.name.toLowerCase() && (
+                          {/* Username sub-label if distinct from shown name (for registered members only) */}
+                          {(!participant.identity?.startsWith("guest_") && !participant.username?.endsWith("_guest") && participant.username && participant.username.toLowerCase() !== participant.name.toLowerCase()) && (
                             <span className="text-[10px] font-medium text-slate-400 truncate max-w-[120px] xs:max-w-[145px] sm:max-w-[175px] -mt-0.5">
                               @{participant.username}
                             </span>
@@ -3274,42 +3587,77 @@ export function JunctionRoom({
                     <div
                       key={`vacant-${index}`}
                       onClick={() => {
+                        if (junction?.isLocked) {
+                          setModNoticeToast(
+                            isHost
+                              ? "🔒 Room is locked. Unlock via the Lock button in the top header to invite."
+                              : "🔒 This room is locked by the host."
+                          );
+                          setTimeout(() => setModNoticeToast(null), 3000);
+                          return;
+                        }
                         handleCopyLink();
                         setIsInviteModalOpen(true);
                       }}
-                      className={`relative w-full min-w-0 p-3 sm:p-4 rounded-2xl sm:rounded-[1.4rem] border border-dashed border-white/15 hover:border-indigo-400/50 bg-[#0E1017]/40 hover:bg-indigo-950/20 backdrop-blur-xl flex flex-col justify-between items-center text-center group cursor-pointer transition-all duration-200 active:scale-98 shadow-sm hover:shadow-[0_0_25px_rgba(99,102,241,0.15)] overflow-hidden ${SEAT_SLOTS.length <= 2
-                          ? "min-h-[175px] sm:min-h-[285px]"
+                      className={`relative w-full min-w-0 p-3 sm:p-4 rounded-2xl sm:rounded-[1.4rem] border border-dashed backdrop-blur-xl flex flex-col justify-between items-center text-center group cursor-pointer transition-all duration-300 active:scale-98 shadow-md overflow-hidden ${
+                        junction?.isLocked
+                          ? "border-amber-500/25 bg-amber-950/[0.08] hover:border-amber-400/40 hover:shadow-[0_8px_30px_rgba(245,158,11,0.12)]"
+                          : "border-white/15 hover:border-indigo-400/50 bg-gradient-to-b from-white/[0.04] to-white/[0.015] hover:from-indigo-600/[0.08] hover:to-purple-600/[0.03] hover:shadow-[0_8px_30px_rgba(99,102,241,0.18)]"
+                      } ${SEAT_SLOTS.length <= 2
+                          ? "min-h-[190px] sm:min-h-[285px]"
                           : SEAT_SLOTS.length <= 4
-                            ? "min-h-[155px] sm:min-h-[250px]"
+                            ? "min-h-[180px] sm:min-h-[265px]"
                             : SEAT_SLOTS.length <= 8
-                              ? "min-h-[140px] sm:min-h-[220px]"
-                              : "min-h-[135px] sm:min-h-[200px]"
+                              ? "min-h-[155px] sm:min-h-[225px]"
+                              : "min-h-[140px] sm:min-h-[200px]"
                         }`}
                     >
-                      <div className="absolute inset-x-0 top-0 h-[1px] bg-gradient-to-r from-transparent via-white/15 to-transparent pointer-events-none" />
+                      <div className="absolute inset-x-0 top-0 h-[1px] bg-gradient-to-r from-transparent via-white/20 to-transparent pointer-events-none" />
 
                       {/* Top Header */}
-                      <div className="w-full flex items-center justify-between z-10">
+                      <div className="w-full flex items-center justify-between z-10 min-h-[24px]">
                         <span className="px-2 py-0.5 rounded-full bg-black/40 border border-white/10 text-[9px] sm:text-[10px] font-mono font-medium text-slate-400">
                           #{index + 1}
                         </span>
-                        <span className="text-[8px] sm:text-[9px] text-slate-400 font-bold uppercase tracking-wider">
-                          Available
-                        </span>
+                        {junction?.isLocked ? (
+                          <span className="px-2 py-0.5 rounded-full bg-amber-500/20 border border-amber-400/35 text-[8px] sm:text-[9px] font-mono font-bold tracking-wider text-amber-300 uppercase flex items-center gap-1 shadow-xs">
+                            <Lock size={9} />
+                            <span>Locked</span>
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-full bg-white/[0.05] border border-white/10 text-[8px] sm:text-[9px] font-mono font-semibold tracking-wider text-slate-400 group-hover:text-indigo-300 group-hover:border-indigo-400/30 transition-colors uppercase">
+                            Available
+                          </span>
+                        )}
                       </div>
 
                       {/* Center Icon */}
-                      <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-2xl sm:rounded-[1.4rem] border border-dashed border-white/20 group-hover:border-indigo-400/60 group-hover:bg-indigo-500/10 flex items-center justify-center text-slate-400 group-hover:text-indigo-300 transition-all my-1.5 sm:my-3 shadow-inner">
-                        <UserPlus className="w-6 h-6 sm:w-8 sm:h-8" />
+                      <div className="relative my-2 sm:my-3">
+                        <div className={`w-16 h-16 sm:w-20 sm:h-20 rounded-2xl sm:rounded-[1.3rem] border border-dashed flex items-center justify-center transition-all duration-300 shadow-inner group-hover:scale-105 ${
+                          junction?.isLocked
+                            ? "border-amber-500/30 bg-amber-500/10 text-amber-300"
+                            : "border-white/20 group-hover:border-indigo-400/60 bg-white/[0.02] group-hover:bg-indigo-500/10 text-slate-400 group-hover:text-indigo-300"
+                        }`}>
+                          {junction?.isLocked ? (
+                            <Lock className="w-6 h-6 sm:w-8 sm:h-8 transition-transform duration-300 group-hover:scale-110" />
+                          ) : (
+                            <UserPlus className="w-6 h-6 sm:w-8 sm:h-8 transition-transform duration-300 group-hover:scale-110" />
+                          )}
+                        </div>
                       </div>
 
                       {/* Bottom Prompt */}
                       <div className="flex flex-col items-center gap-0.5 z-10">
-                        <span className="text-xs sm:text-sm font-semibold text-slate-300 group-hover:text-white transition-colors">
-                          Open Seat
+                        <span className={`text-xs sm:text-sm font-semibold transition-colors flex items-center gap-1 ${
+                          junction?.isLocked ? "text-amber-200/90" : "text-slate-300 group-hover:text-white"
+                        }`}>
+                          <span>{junction?.isLocked ? "Room Locked" : "Open Seat"}</span>
+                          {!junction?.isLocked && (
+                            <span className="text-[10px] text-indigo-400 opacity-0 group-hover:opacity-100 transition-all transform group-hover:translate-x-0.5">→</span>
+                          )}
                         </span>
-                        <span className="text-[9px] sm:text-[10px] text-slate-400 font-medium">
-                          Tap to invite
+                        <span className="text-[9px] sm:text-[10px] text-slate-500 group-hover:text-slate-400 transition-colors font-medium">
+                          {junction?.isLocked ? "New joins blocked" : "Tap to invite friend"}
                         </span>
                       </div>
                     </div>
@@ -3558,6 +3906,11 @@ export function JunctionRoom({
                               <UserAvatar avatar={msg.senderAvatar} size="sm" className="!w-full !h-full" badgeRole={senderRole} />
                             </div>
                             <span className="text-[11px] font-semibold text-slate-300">{msg.senderName}</span>
+                            {isPrivateRoom && isParticipantHost(senderParticipant) && (
+                              <span className="flex items-center gap-0.5 px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                                <Shield size={8} className="fill-amber-400/40" /> Host
+                              </span>
+                            )}
                             {senderRole && senderRole !== "user" && (
                               <RoleBadge role={senderRole} size="xs" />
                             )}
@@ -4101,6 +4454,9 @@ export function JunctionRoom({
               (isManager && targetRole === "user")
             );
 
+            const canHostKick = isPrivateRoom && isHost && targetRole !== "super_admin" && targetRole !== "admin";
+            const canKick = canStaffKick || canHostKick;
+
             const canStaffBan = isStaff && targetRole !== "super_admin" && (
               isSuperAdmin ||
               (isAdmin && targetRole !== "admin") ||
@@ -4109,11 +4465,11 @@ export function JunctionRoom({
 
             const canStaffSuspendAccount = (isAdmin || isSuperAdmin) && targetRole !== "super_admin" && targetRole !== "admin";
 
-            const canMute = isStaff && (
+            const canMute = (isStaff && (
               isSuperAdmin ||
               (isAdmin && targetRole !== "super_admin") ||
               (isManager && targetRole !== "super_admin" && targetRole !== "admin")
-            );
+            )) || (isPrivateRoom && isHost && targetRole !== "super_admin" && targetRole !== "admin");
 
             const closeMenu = () => {
               setMenuAnchor(null);
@@ -4158,7 +4514,11 @@ export function JunctionRoom({
                         )}
                       </div>
                     </div>
-                    <RoleBadge role={targetRole} size="xs" showLabel={false} />
+                    {isPrivateRoom && isParticipantHost(target) ? (
+                      <span className="px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-400/40 text-[9px] font-bold">Host</span>
+                    ) : (
+                      <RoleBadge role={targetRole} size="xs" showLabel={false} />
+                    )}
                   </div>
 
                   {/* Section 1: Room Voice Control */}
@@ -4180,18 +4540,22 @@ export function JunctionRoom({
                     </button>
                   )}
 
-                  {/* Kick from Room - Official Staff Only */}
-                  {canStaffKick && (
+                  {/* Kick from Room */}
+                  {canKick && (
                     <button
                       type="button"
                       onClick={() => {
+                        const confirmed = window.confirm(
+                          `Kick @${target.name || target.identity} from this room?`
+                        );
+                        if (!confirmed) return;
                         handleModerateParticipant(target.identity, "kick");
                         closeMenu();
                       }}
                       className="w-full px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-rose-400 hover:bg-rose-950/60 flex items-center gap-2 transition-colors cursor-pointer"
                     >
                       <PhoneOff size={13} className="shrink-0" />
-                      <span>Kick from Junction</span>
+                      <span>{isPrivateRoom ? "Kick from Room" : "Kick from Junction"}</span>
                     </button>
                   )}
 

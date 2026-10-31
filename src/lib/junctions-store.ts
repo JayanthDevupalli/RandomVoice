@@ -71,6 +71,12 @@ function rowToJunction(
   roleMap?: Record<string, UserRole>,
   profileMap?: Record<string, ParticipantProfile>
 ): Junction {
+  const isPrivate = Boolean(
+    row.is_custom ||
+    row.creator_id ||
+    (typeof row.id === "string" && row.id.startsWith("junc_"))
+  );
+
   return {
     id: row.id,
     name: row.name,
@@ -78,15 +84,36 @@ function rowToJunction(
     category: row.category as Junction["category"],
     icon: row.icon,
     tags: row.tags || [],
-    maxParticipants: (row.max_participants === 7 || !row.max_participants) ? 10 : row.max_participants,
+    maxParticipants: row.max_participants || (isPrivate ? 2 : 10),
     currentCount: participants.length,
     createdAt: row.created_at,
     isCustom: row.is_custom,
     creatorId: row.creator_id || undefined,
-    moderatorIdentity: participants.length === 0 ? "" : row.moderator_identity,
+    moderatorIdentity: isPrivate ? (row.creator_id || row.moderator_identity || "") : "",
     isLocked: row.is_locked,
     bannedIdentities: row.banned_identities || [],
-    participants: participants.map((p) => rowToParticipant(p, roleMap, profileMap)),
+    participants: participants.map((p) => {
+      const part = rowToParticipant(p, roleMap, profileMap);
+      if (isPrivate) {
+        const cleanCreator = (row.creator_id || "").trim().toLowerCase();
+        const cleanId = (part.identity || "").trim().toLowerCase();
+        const cleanUser = (part.username || "").trim().toLowerCase();
+        const cleanName = (part.name || "").trim().toLowerCase();
+        const isCreator = Boolean(
+          cleanCreator &&
+          (cleanId === cleanCreator || cleanUser === cleanCreator || cleanName === cleanCreator)
+        );
+        return {
+          ...part,
+          role: isCreator ? "moderator" : "speaker",
+        };
+      } else {
+        return {
+          ...part,
+          role: "speaker",
+        };
+      }
+    }),
   };
 }
 
@@ -520,8 +547,7 @@ export async function createJunction(data: {
   const junctionId = "junc_" + Date.now().toString(36) + "_" + Math.random().toString(36).substring(2, 6);
   const now = Date.now();
 
-  // Insert junction — creator is recorded but NOT auto-added as participant.
-  // The first person to actually visit/join the room becomes the host (moderator).
+  // Insert junction — creator is recorded and designated as host (moderator).
   const { error: jError } = await supabase.from("junctions").insert({
     id: junctionId,
     name: data.name,
@@ -529,12 +555,12 @@ export async function createJunction(data: {
     category: data.category,
     icon: "Mic",
     tags: data.tags.length > 0 ? data.tags : ["Custom", data.category],
-    max_participants: data.maxParticipants || 10,
+    max_participants: data.maxParticipants || 2,
     current_count: 0,
     created_at: now,
     is_custom: true,
     creator_id: creatorIdentity,
-    moderator_identity: "",
+    moderator_identity: creatorIdentity,
     is_locked: data.isLocked || false,
     banned_identities: [],
   });
@@ -633,10 +659,21 @@ export async function addParticipantToJunction(
     return { success: false, error: `Junction is full (Max ${junction.maxParticipants || 10} seats reached)` };
   }
 
-  const isCreator = cleanParticipantIdentity === (junction.creatorId || "").trim().toLowerCase();
+  const isPrivate = Boolean(
+    junction.isCustom ||
+    junction.creatorId ||
+    (typeof junction.id === "string" && junction.id.startsWith("junc_"))
+  );
+  const cleanCreator = (junction.creatorId || "").trim().toLowerCase();
+  const cleanUsername = (participant.username || "").trim().toLowerCase();
+  const cleanName = (participant.name || "").trim().toLowerCase();
+  const isCreator = Boolean(
+    isPrivate && cleanCreator &&
+    (cleanParticipantIdentity === cleanCreator || cleanUsername === cleanCreator || cleanName === cleanCreator)
+  );
 
   if (junction.isLocked && !isAlreadyPresent && !isCreator) {
-    return { success: false, error: "This room is locked by the moderator." };
+    return { success: false, error: "This room is locked by the host." };
   }
 
   // Determine avatar and cardBgColor from participant or existing
@@ -651,8 +688,11 @@ export async function addParticipantToJunction(
   );
 
   const participantId = participant.id || existing?.id || ("guest_" + Date.now() + "_" + Math.random().toString(36).substr(2, 5));
-  // All room members are equal speakers; no room host concept
-  const newRole = participant.role || existing?.role || "speaker";
+  // In private rooms, ONLY the creator has the host (moderator) tag; fellow users remain speakers.
+  // In public junctions, all participants remain equal speakers.
+  const newRole: JunctionParticipant["role"] = isPrivate
+    ? (isCreator ? "moderator" : "speaker")
+    : "speaker";
   const newMuted = shouldKeepModMute ? true : (existing?.isMuted !== undefined ? existing.isMuted : (participant.isMuted !== undefined ? participant.isMuted : true));
   const joinedAtTime = existing?.joinedAt || (participant as any).joinedAt || (participant as any).joined_at || Date.now();
   const newCount = isAlreadyPresent ? junction.participants.length : junction.participants.length + 1;
@@ -726,7 +766,7 @@ export async function addParticipantToJunction(
     ...junction,
     currentCount: updatedParticipants.length,
     participants: updatedParticipants,
-    moderatorIdentity: "",
+    moderatorIdentity: isPrivate ? (junction.creatorId || "") : "",
   };
 
   return { success: true, junction: updatedJunction };
@@ -837,13 +877,24 @@ export async function moderateParticipant(
   const isCallerAdmin = isCallerSuperAdmin || callerRole === "admin";
   const isCallerManager = isCallerAdmin || callerRole === "manager";
 
+  const isPrivateRoom = Boolean(
+    junction.isCustom ||
+    junction.creatorId ||
+    (typeof junction.id === "string" && junction.id.startsWith("junc_"))
+  );
+  const cleanCreator = (junction.creatorId || "").trim().toLowerCase();
   const cleanModId = (moderatorIdentity || "").trim().toLowerCase();
   const modParticipant = junction.participants.find(
     (p) => (p.identity || "").trim().toLowerCase() === cleanModId
   );
   const isCallerRoomMod = Boolean(modParticipant && modParticipant.role === "moderator");
+  const isCreatorHost = Boolean(
+    isPrivateRoom &&
+    cleanCreator &&
+    (cleanModId === cleanCreator || (modParticipant && modParticipant.role === "moderator"))
+  );
 
-  if (!isCallerManager && !isCallerRoomMod) {
+  if (!isCallerManager && !isCallerRoomMod && !isCreatorHost) {
     return { success: false, error: "Unauthorized: Staff or Moderator privileges required" };
   }
 
@@ -888,10 +939,10 @@ export async function moderateParticipant(
       error: "Unauthorized: Admin clearance required to ban staff members.",
     };
   }
-  if (action === "kick" && !isCallerManager) {
+  if (action === "kick" && !isCallerManager && !isCreatorHost) {
     return {
       success: false,
-      error: "Unauthorized: Staff privileges required to kick participants.",
+      error: "Unauthorized: Staff privileges or Private Room Host required to kick participants.",
     };
   }
 
@@ -948,12 +999,17 @@ export async function moderateParticipant(
     await syncCount(junctionId);
     await kickLiveKitParticipant(junctionId, target.identity);
   } else if (action === "promote_mod") {
-    // Promote new co-moderator
+    if (isPrivateRoom) {
+      return { success: false, error: "Private rooms can only have one host: the room creator." };
+    }
     await supabase
       .from("junction_participants")
       .update({ role: "moderator" })
       .eq("id", target.id);
   } else if (action === "demote_mod") {
+    if (isPrivateRoom && isCreatorHost && cleanTargetId === cleanCreator) {
+      return { success: false, error: "The room creator cannot be demoted from host." };
+    }
     // Cannot demote yourself unless admin
     if (cleanTargetId === cleanModId && !isCallerAdmin) {
       return { success: false, error: "Cannot demote yourself" };
@@ -1028,26 +1084,45 @@ export async function updateJunctionDetails(
 ): Promise<{ success: boolean; error?: string; junction?: Junction }> {
   const { data: jRow, error: jError } = await supabase
     .from("junctions")
-    .select("moderator_identity")
+    .select("id, is_custom, creator_id, moderator_identity")
     .eq("id", junctionId)
     .single();
 
   if (jError || !jRow) return { success: false, error: "Junction not found" };
 
-  const modParticipant = await supabase
+  const isPrivate = Boolean(
+    jRow.is_custom ||
+    jRow.creator_id ||
+    (typeof jRow.id === "string" && jRow.id.startsWith("junc_"))
+  );
+
+  if (!isPrivate) {
+    return { success: false, error: "Room capacity can only be modified in private rooms." };
+  }
+
+  const cleanMod = (moderatorIdentity || "").trim().toLowerCase();
+  const cleanCreator = (jRow.creator_id || "").trim().toLowerCase();
+  const isCreator = Boolean(cleanCreator && cleanMod === cleanCreator);
+
+  const { data: modParticipant } = await supabase
     .from("junction_participants")
     .select("role")
     .eq("junction_id", junctionId)
-    .eq("identity", moderatorIdentity)
-    .single();
+    .ilike("identity", cleanMod)
+    .maybeSingle();
 
-  if (!modParticipant.data || modParticipant.data.role !== "moderator") {
-    return { success: false, error: "Only moderators can edit junction details" };
+  const isMod = modParticipant?.role === "moderator";
+
+  if (!isCreator && !isMod) {
+    return { success: false, error: "Only the private room host can edit room capacity." };
   }
 
   const updateData: any = {};
   if (updates.name !== undefined) updateData.name = updates.name;
-  if (updates.maxParticipants !== undefined) updateData.max_participants = updates.maxParticipants;
+  if (updates.maxParticipants !== undefined) {
+    const newCap = Math.max(2, Math.min(16, Number(updates.maxParticipants)));
+    updateData.max_participants = newCap;
+  }
 
   if (Object.keys(updateData).length === 0) return { success: true };
 
@@ -1078,20 +1153,36 @@ export async function toggleRoomLock(
     return { success: false, error: "Junction not found" };
   }
 
-  const cleanModId = (moderatorIdentity || "").trim().toLowerCase();
-  const callerRole = resolvePlatformRole(moderatorIdentity);
-  const isCreator = Boolean(
-    junction.creatorId &&
-    cleanModId === junction.creatorId.toLowerCase()
+  const isPrivate = Boolean(
+    junction.isCustom ||
+    junction.creatorId ||
+    (typeof junction.id === "string" && junction.id.startsWith("junc_"))
   );
-  const isStaff = callerRole === "super_admin" || callerRole === "admin" || callerRole === "manager";
 
-  if (!isCreator && !isStaff) {
-    return { success: false, error: "Unauthorized: Only the room creator or platform staff can lock/unlock the room" };
+  if (!isPrivate) {
+    return { success: false, error: "Cannot lock a public station" };
   }
 
-  if (!junction.isCustom) {
-    return { success: false, error: "Cannot lock a public station" };
+  const cleanModId = (moderatorIdentity || "").trim().toLowerCase();
+  const cleanCreator = (junction.creatorId || "").trim().toLowerCase();
+  const callerRole = resolvePlatformRole(moderatorIdentity);
+  const isStaff = callerRole === "super_admin" || callerRole === "admin" || callerRole === "manager";
+
+  const isCreator = Boolean(cleanCreator && cleanModId === cleanCreator);
+
+  let isMod = false;
+  if (!isCreator && !isStaff) {
+    const { data: modParticipant } = await supabase
+      .from("junction_participants")
+      .select("role")
+      .eq("junction_id", junctionId)
+      .ilike("identity", cleanModId)
+      .maybeSingle();
+    isMod = modParticipant?.role === "moderator";
+  }
+
+  if (!isCreator && !isMod && !isStaff) {
+    return { success: false, error: "Unauthorized: Only the room host can lock or unlock the room" };
   }
 
   await supabase

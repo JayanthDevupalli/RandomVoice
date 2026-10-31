@@ -14,6 +14,7 @@ import {
   touchParticipantHeartbeat,
   toggleRoomLock,
 } from "@/lib/junctions-store";
+import { generateRandomNickname } from "@/lib/guest-utils";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -134,17 +135,33 @@ export async function POST(
         }
         // 2. Guest can NEVER have elevated platform roles
         participant.userRole = "user";
-        // 3. Prevent guest from spoofing a registered user's username
-        if (participant.identity) {
-          const cleanIdent = participant.identity.trim().toLowerCase();
-          const { data: existingUser } = await sbAdmin
-            .from("profiles")
-            .select("id")
-            .ilike("username", cleanIdent)
-            .maybeSingle();
-          if (existingUser) {
-            // A registered user owns this handle. Append a random suffix so guest doesn't impersonate them
-            participant.identity = `${participant.identity}_guest`;
+        // 3. Prevent guest from spoofing a registered user's username or identity
+        if (participant.identity || participant.name) {
+          const cleanIdent = (participant.identity || "").trim().toLowerCase();
+          const cleanName = (participant.name || "").trim().toLowerCase();
+          let matched = false;
+          if (cleanIdent) {
+            const { data: existingUser } = await sbAdmin
+              .from("profiles")
+              .select("id")
+              .ilike("username", cleanIdent)
+              .maybeSingle();
+            if (existingUser) matched = true;
+          }
+          if (!matched && cleanName) {
+            const { data: existingUser } = await sbAdmin
+              .from("profiles")
+              .select("id")
+              .ilike("username", cleanName)
+              .maybeSingle();
+            if (existingUser) matched = true;
+          }
+          if (matched) {
+            // A registered user owns this name/identity. An unauthenticated guest must be assigned a clean guest nickname.
+            const guestNickname = generateRandomNickname();
+            participant.name = guestNickname;
+            participant.displayName = guestNickname;
+            participant.identity = "guest_" + Math.random().toString(36).substring(2, 9);
             participant.username = participant.identity;
           }
         }
