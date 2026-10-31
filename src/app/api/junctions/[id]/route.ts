@@ -27,9 +27,10 @@ export async function GET(
     const { searchParams } = new URL(request.url);
     const action = searchParams.get("action");
     const identity = searchParams.get("identity") || searchParams.get("username") || "";
+    const tabSessionId = searchParams.get("tabSessionId") || "";
 
     if (action === "leave" && identity) {
-      await removeParticipantFromJunction(params.id, identity);
+      await removeParticipantFromJunction(params.id, identity, { tabSessionId });
     }
 
     const junction = await getJunctionById(params.id);
@@ -78,7 +79,7 @@ export async function POST(
         }
       }
     }
-    const { action, participant, identity, moderatorIdentity, moderatorUserId, requesterRole, targetIdentity, modAction, isLocked, updates } = body;
+    const { action, participant, identity, moderatorIdentity, moderatorUserId, requesterRole, targetIdentity, modAction, isLocked, updates, tabSessionId } = body;
 
     if (action === "join") {
       if (!participant) {
@@ -167,7 +168,7 @@ export async function POST(
         }
       }
 
-      const result = await addParticipantToJunction(params.id, participant);
+      const result = await addParticipantToJunction(params.id, participant, tabSessionId);
       if (!result.success) {
         return NextResponse.json({ error: result.error }, { status: 400 });
       }
@@ -194,6 +195,7 @@ export async function POST(
         identities: allIdentities,
         participantId,
         userId,
+        tabSessionId,
       });
       const junction = await getJunctionById(params.id);
       return NextResponse.json({ junction });

@@ -1,7 +1,15 @@
 "use client";
 
-import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from "react";
 import { useRouter, usePathname } from "next/navigation";
+import {
+  getTabId,
+  getActiveTabSession,
+  isCurrentTabActiveOwner,
+  claimJunctionSession,
+  releaseJunctionSession,
+  listenToTabSessionEvents,
+} from "@/lib/junction-tab-coordinator";
 
 interface ActiveJunctionContextType {
   activeJunctionId: string | null;
@@ -11,6 +19,8 @@ interface ActiveJunctionContextType {
   minimize: () => void;
   maximize: () => void;
   leaveJunction: () => void;
+  supersededNotice: string | null;
+  dismissSupersededNotice: () => void;
 }
 
 const ActiveJunctionContext = createContext<ActiveJunctionContextType>({
@@ -21,6 +31,8 @@ const ActiveJunctionContext = createContext<ActiveJunctionContextType>({
   minimize: () => {},
   maximize: () => {},
   leaveJunction: () => {},
+  supersededNotice: null,
+  dismissSupersededNotice: () => {},
 });
 
 export function ActiveJunctionProvider({ children }: { children: React.ReactNode }) {
@@ -34,6 +46,16 @@ export function ActiveJunctionProvider({ children }: { children: React.ReactNode
         const isReload = nav?.type === "reload" || (performance as any).navigation?.type === 1;
         const isJunctionPath = window.location.pathname.startsWith("/junction/");
         const stored = sessionStorage.getItem("yapclub_active_junction_id");
+
+        // Verify if another tab is currently the active owner
+        const activeCrossTab = getActiveTabSession();
+        const myTabId = getTabId();
+
+        // If another tab has claimed this session, this tab starts inactive
+        if (activeCrossTab && activeCrossTab.tabId !== myTabId) {
+          sessionStorage.removeItem("yapclub_active_junction_id");
+          return null;
+        }
 
         // Only restore active junction if page is refreshed or user is actively on a /junction/ URL
         if (stored && (isReload || isJunctionPath)) {
@@ -50,12 +72,51 @@ export function ActiveJunctionProvider({ children }: { children: React.ReactNode
   });
 
   const [isMinimized, setIsMinimized] = useState<boolean>(false);
+  const [supersededNotice, setSupersededNotice] = useState<string | null>(null);
+  const activeJunctionIdRef = useRef<string | null>(activeJunctionId);
+  activeJunctionIdRef.current = activeJunctionId;
 
-  // Clear active junction on tab close or navigation away so stale sessions don't resurrect
+  const dismissSupersededNotice = useCallback(() => {
+    setSupersededNotice(null);
+  }, []);
+
+  // Listen to cross-tab session events (takeovers from new tabs)
+  useEffect(() => {
+    const unsubscribe = listenToTabSessionEvents({
+      onSuperseded: (event) => {
+        // Another browser tab claimed a junction session!
+        if (activeJunctionIdRef.current) {
+          const prevId = activeJunctionIdRef.current;
+          setActiveJunctionIdState(null);
+          setIsMinimized(false);
+          if (typeof window !== "undefined") {
+            sessionStorage.removeItem("yapclub_active_junction_id");
+          }
+          const roomLabel = event.junctionName && event.junctionName.trim() && event.junctionName !== "Junction"
+            ? `"${event.junctionName}"`
+            : "another tab";
+          setSupersededNotice(
+            `Voice call moved to ${roomLabel}. Audio in this tab has been disconnected.`
+          );
+        }
+      },
+      onSessionReleased: () => {
+        // Cross-tab session was closed
+      },
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // Clear active junction on tab close or navigation away
   useEffect(() => {
     const handleUnload = () => {
       try {
         sessionStorage.removeItem("yapclub_active_junction_id");
+        // ONLY release the cross-tab session lock if THIS tab is the active owner!
+        if (isCurrentTabActiveOwner(activeJunctionIdRef.current || undefined)) {
+          releaseJunctionSession(activeJunctionIdRef.current || undefined);
+        }
       } catch {}
     };
 
@@ -68,8 +129,11 @@ export function ActiveJunctionProvider({ children }: { children: React.ReactNode
     if (typeof window !== "undefined") {
       if (id) {
         sessionStorage.setItem("yapclub_active_junction_id", id);
+        claimJunctionSession(id, "User");
+        setSupersededNotice(null);
       } else {
         sessionStorage.removeItem("yapclub_active_junction_id");
+        releaseJunctionSession();
       }
     }
   }, []);
@@ -98,7 +162,8 @@ export function ActiveJunctionProvider({ children }: { children: React.ReactNode
   const leaveJunction = useCallback(() => {
     const leftId = activeJunctionId;
     isMinimizingRef.current = false;
-    setActiveJunctionId(null);
+    releaseJunctionSession(leftId || undefined);
+    setActiveJunctionIdState(null);
     setIsMinimized(false);
     if (typeof window !== "undefined") {
       sessionStorage.removeItem("yapclub_active_junction_id");
@@ -109,7 +174,7 @@ export function ActiveJunctionProvider({ children }: { children: React.ReactNode
     if (pathname.startsWith("/junction/")) {
       router.replace("/junctions");
     }
-  }, [pathname, router, setActiveJunctionId, activeJunctionId]);
+  }, [pathname, router, activeJunctionId]);
 
   // Auto-sync minimization with current route:
   useEffect(() => {
@@ -138,6 +203,8 @@ export function ActiveJunctionProvider({ children }: { children: React.ReactNode
         minimize,
         maximize,
         leaveJunction,
+        supersededNotice,
+        dismissSupersededNotice,
       }}
     >
       {children}

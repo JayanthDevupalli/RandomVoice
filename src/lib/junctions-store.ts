@@ -604,11 +604,22 @@ export async function checkPlatformSuspension(identity?: string, id?: string): P
   return false;
 }
 
+// Active participant tab tracker: `${junctionId}:${cleanParticipantIdentity}` -> { tabSessionId, updatedAt }
+const activeParticipantTabs = new Map<string, { tabSessionId: string; updatedAt: number }>();
+
 export async function addParticipantToJunction(
   junctionId: string,
-  participant: Omit<JunctionParticipant, "joinedAt">
+  participant: Omit<JunctionParticipant, "joinedAt">,
+  tabSessionId?: string
 ): Promise<{ success: boolean; error?: string; junction?: Junction }> {
   const cleanParticipantIdentity = (participant.identity || "").trim().toLowerCase();
+
+  if (tabSessionId) {
+    activeParticipantTabs.set(`${junctionId}:${cleanParticipantIdentity}`, {
+      tabSessionId,
+      updatedAt: Date.now(),
+    });
+  }
 
   // Check if participant is platform-suspended / banned by YapClub moderation
   const isSuspended = await checkPlatformSuspension(participant.identity, participant.id);
@@ -775,9 +786,25 @@ export async function addParticipantToJunction(
 export async function removeParticipantFromJunction(
   junctionId: string,
   identity: string,
-  extra?: { identities?: string[]; name?: string; participantId?: string; userId?: string }
+  extra?: { identities?: string[]; name?: string; participantId?: string; userId?: string; tabSessionId?: string }
 ) {
   invalidateJunctionsCache();
+
+  const cleanId = (identity || "").trim().toLowerCase();
+  const sessionKey = `${junctionId}:${cleanId}`;
+  const activeSession = activeParticipantTabs.get(sessionKey);
+
+  // If a tabSessionId was provided, verify it is still the active tab for this user.
+  // If an older tab's close beacon arrived after a newer tab has joined, ignore the stale leave request!
+  if (activeSession && extra?.tabSessionId && activeSession.tabSessionId !== extra.tabSessionId) {
+    console.log(`[Store] Stale leave beacon ignored for @${cleanId} (active: ${activeSession.tabSessionId}, stale: ${extra.tabSessionId})`);
+    return;
+  }
+
+  // Active tab or intentional leave, clear tracking
+  if (activeSession && (!extra?.tabSessionId || activeSession.tabSessionId === extra.tabSessionId)) {
+    activeParticipantTabs.delete(sessionKey);
+  }
 
   const targetSet = new Set<string>();
   if (identity) targetSet.add(identity.trim());

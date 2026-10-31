@@ -17,6 +17,13 @@ import { useScreenWakeLock } from "@/hooks/useScreenWakeLock";
 import { LiveKitRoom, useTracks, useLocalParticipant, useRoomContext, useConnectionState, AudioTrack, StartAudio } from "@livekit/components-react";
 import { Track, RoomEvent, ConnectionState } from "livekit-client";
 import {
+  getTabId,
+  isCurrentTabActiveOwner,
+  claimJunctionSession,
+  releaseJunctionSession,
+  listenToTabSessionEvents,
+} from "@/lib/junction-tab-coordinator";
+import {
   Mic,
   MicOff,
   Volume2,
@@ -252,28 +259,9 @@ function LiveKitDataSync({
       onParticipantSync?.();
     };
 
-    const handleParticipantDisconnected = (participant: any) => {
-      const pIdentity = participant?.identity;
-      const isLocal = Boolean(
-        localParticipant &&
-        (participant?.sid === localParticipant.sid ||
-          (pIdentity && pIdentity.toLowerCase() === localParticipant.identity?.toLowerCase()))
-      );
-      if (isLocal) {
-        // Guard: Never tell server to leave for the local participant on WebRTC reconnect/event!
-        return;
-      }
-      if (pIdentity && junctionId) {
-        // Immediately notify server to remove disconnected peer from DB
-        fetch(`/api/junctions/${junctionId}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            action: "leave",
-            identity: pIdentity,
-          }),
-        }).catch(() => { });
-      }
+    const handleParticipantDisconnected = () => {
+      // Refresh UI participants smoothly when remote peer changes.
+      // Remote clients must NEVER tell the server to remove another user from the database!
       onParticipantSync?.();
       if (room && room.state === ConnectionState.Connected) {
         publishRef.current?.({ type: "room_participants_updated" });
@@ -710,6 +698,39 @@ export function JunctionRoom({
   const [inputMessage, setInputMessage] = useState("");
   const [privateRecipient, setPrivateRecipient] = useState<string>("all");
   const [reactions, setReactions] = useState<VectorReaction[]>([]);
+
+  // Room Chat Typing Indicator state
+  const [typingUsers, setTypingUsers] = useState<Record<string, { identity: string; name: string; timestamp: number; isWhisper?: boolean }>>({});
+  const lastTypingBroadcastRef = useRef<number>(0);
+  const stopTypingTimerRef = useRef<any>(null);
+
+  const activeTypingList = useMemo(() => {
+    return Object.values(typingUsers);
+  }, [typingUsers]);
+
+  // Auto-expire typing users after 4.5s of inactivity
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      setTypingUsers((prev) => {
+        let changed = false;
+        const next: typeof prev = {};
+        for (const [key, user] of Object.entries(prev)) {
+          if (now - user.timestamp < 4500) {
+            next[key] = user;
+          } else {
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    }, 1500);
+
+    return () => {
+      clearInterval(interval);
+      if (stopTypingTimerRef.current) clearTimeout(stopTypingTimerRef.current);
+    };
+  }, []);
   const [isReactionsOpen, setIsReactionsOpen] = useState(false);
   const [isCopied, setIsCopied] = useState(false);
   const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
@@ -809,12 +830,14 @@ export function JunctionRoom({
     }
 
     try {
+      const myTabId = getTabId();
       await fetch(`/api/junctions/${junctionId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "leave",
           identity: myIdentity,
+          tabSessionId: myTabId,
         }),
       });
     } catch (e) {
@@ -863,7 +886,7 @@ export function JunctionRoom({
     if (isChatOpen) {
       scrollChatToBottom("smooth");
     }
-  }, [chatMessages.length, isChatOpen, scrollChatToBottom]);
+  }, [chatMessages.length, isChatOpen, scrollChatToBottom, activeTypingList.length]);
 
   // LiveKit Data Publish Ref & Supabase Realtime Channel
   const liveKitPublishRef = useRef<((data: any) => void) | null>(null);
@@ -891,6 +914,52 @@ export function JunctionRoom({
       console.warn("Supabase broadcast error", e);
     }
   }, []);
+
+  // Room Chat typing input handler with throttled broadcasts
+  const handleChatInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setInputMessage(val);
+
+    if (val.trim()) {
+      const now = Date.now();
+      if (now - lastTypingBroadcastRef.current > 1800) {
+        lastTypingBroadcastRef.current = now;
+        broadcastRoomUpdate({
+          type: "chat_typing",
+          payload: {
+            identity: myIdentity,
+            name: myDisplayName,
+            isTyping: true,
+            targetIdentity: privateRecipient !== "all" ? privateRecipient : undefined,
+          },
+        });
+      }
+
+      if (stopTypingTimerRef.current) clearTimeout(stopTypingTimerRef.current);
+      stopTypingTimerRef.current = setTimeout(() => {
+        broadcastRoomUpdate({
+          type: "chat_typing",
+          payload: {
+            identity: myIdentity,
+            name: myDisplayName,
+            isTyping: false,
+            targetIdentity: privateRecipient !== "all" ? privateRecipient : undefined,
+          },
+        });
+      }, 3500);
+    } else {
+      if (stopTypingTimerRef.current) clearTimeout(stopTypingTimerRef.current);
+      broadcastRoomUpdate({
+        type: "chat_typing",
+        payload: {
+          identity: myIdentity,
+          name: myDisplayName,
+          isTyping: false,
+          targetIdentity: privateRecipient !== "all" ? privateRecipient : undefined,
+        },
+      });
+    }
+  }, [broadcastRoomUpdate, myIdentity, myDisplayName, privateRecipient]);
 
   // Profile Preview Modal State
   const [previewParticipant, setPreviewParticipant] = useState<JunctionParticipant | null>(null);
@@ -1153,6 +1222,35 @@ export function JunctionRoom({
             };
 
             updated = [selfParticipant, ...updated];
+
+            // Re-sync with server DB if dropped so other peers can see us
+            if (isCurrentTabActiveOwner(junctionId)) {
+              getAuthHeaders().then((authHeaders) => {
+                fetch(`/api/junctions/${junctionId}`, {
+                  method: "POST",
+                  headers: authHeaders,
+                  body: JSON.stringify({
+                    action: "join",
+                    tabSessionId: getTabId(),
+                    participant: {
+                      id: isRegistered && user ? user.id : guest?.id || "local",
+                      identity: myIdentity,
+                      name: myDisplayName,
+                      username: myIdentity,
+                      displayName: myDisplayName,
+                      avatar: user?.avatar || guest?.avatar || "zap",
+                      color: user?.color || guest?.color || "#6366F1",
+                      cardBgColor: user?.cardBgColor || guest?.cardBgColor || "#465B73",
+                      role: (typeof window !== "undefined" && (sessionStorage.getItem(`junction_role_${junctionId}`) as any)) || "speaker",
+                      isMuted: isMutedRef.current,
+                      isMutedByMod: isMutedByModRef.current,
+                      isSpeaking: false,
+                      connectionQuality: "excellent",
+                    },
+                  }),
+                }).catch(() => {});
+              }).catch(() => {});
+            }
           }
 
           if (JSON.stringify(prev) === JSON.stringify(updated)) return prev;
@@ -1197,6 +1295,15 @@ export function JunctionRoom({
           return [...prev, payload];
         });
 
+        // Clear typing indicator for this sender immediately upon receiving their message
+        const cleanSender = (payload.senderName || payload.identity || "").toLowerCase().trim();
+        setTypingUsers((prev) => {
+          if (!prev[cleanSender]) return prev;
+          const next = { ...prev };
+          delete next[cleanSender];
+          return next;
+        });
+
         // Trigger pop-up message ONLY if:
         // 1. Message is NOT from self
         // 2. Chat drawer is completely closed
@@ -1231,6 +1338,34 @@ export function JunctionRoom({
       } else if (type === "chat_delete" && payload) {
         const { id } = payload;
         setChatMessages((prev) => prev.filter((m) => m.id !== id));
+      } else if (type === "chat_typing" && payload) {
+        const { identity, name, isTyping, targetIdentity } = payload;
+        // Ignore self broadcasts
+        if (isLocalIdentity(identity) || isLocalIdentity(name)) return;
+        // If it's a private whisper typing, only show if targetIdentity is ME
+        if (targetIdentity && !isLocalIdentity(targetIdentity)) return;
+
+        setTypingUsers((prev) => {
+          const cleanKey = (identity || name || "").toLowerCase().trim();
+          if (!cleanKey) return prev;
+
+          if (isTyping) {
+            return {
+              ...prev,
+              [cleanKey]: {
+                identity: identity || name,
+                name: name || identity,
+                timestamp: Date.now(),
+                isWhisper: Boolean(targetIdentity),
+              },
+            };
+          } else {
+            if (!prev[cleanKey]) return prev;
+            const next = { ...prev };
+            delete next[cleanKey];
+            return next;
+          }
+        });
       } else if (type === "reaction" && payload) {
         const resolvedEmoji =
           payload.emoji ||
@@ -1252,6 +1387,7 @@ export function JunctionRoom({
         }, 2300);
       } else if (type === "clear_chat") {
         setChatMessages([]);
+        setTypingUsers({});
       } else if (type === "moderation_event" && payload) {
         const { targetIdentity, action } = payload;
 
@@ -1524,12 +1660,17 @@ export function JunctionRoom({
         setConnectionProgress(25);
         setIsConnectingOverlayOpen(true);
 
+        // Claim exclusive tab session across browser tabs
+        const myTabId = getTabId();
+        claimJunctionSession(junctionId, joinIdentity, junction?.name);
+
         const authHeaders = await getAuthHeaders();
         const joinPromise = fetch(`/api/junctions/${junctionId}`, {
           method: "POST",
           headers: authHeaders,
           body: JSON.stringify({
             action: "join",
+            tabSessionId: myTabId,
             participant: {
               id: isRegistered && user ? user.id : guest.id,
               identity: joinIdentity,
@@ -1679,10 +1820,15 @@ export function JunctionRoom({
       }
 
       // If user navigated away without clicking Leave button, guarantee database exit
-      if (wasJoined) {
+      // CRITICAL: Only send leave beacon if THIS tab is still the active owner!
+      // If another tab took over the session, do NOT send leave beacon so we don't evict the other tab!
+      if (wasJoined && isCurrentTabActiveOwner(junctionId)) {
+        const myTabId = getTabId();
+        releaseJunctionSession(junctionId);
         const payload = JSON.stringify({
           action: "leave",
           identity: myIdentity,
+          tabSessionId: myTabId,
         });
 
         if (typeof navigator !== "undefined" && navigator.sendBeacon) {
@@ -1716,23 +1862,34 @@ export function JunctionRoom({
           liveKitRoomRef.current.disconnect();
         }
 
+        // CRITICAL GUARD: If this tab is NOT the active owner of this junction session
+        // (for example, another tab took over or is currently in this room),
+        // DO NOT send a leave beacon to the database!
+        if (!isCurrentTabActiveOwner(junctionId)) {
+          return;
+        }
+
+        const myTabId = getTabId();
+        releaseJunctionSession(junctionId);
+
         const payload = JSON.stringify({
           action: "leave",
           identity: myIdentity,
+          tabSessionId: myTabId,
         });
 
         // 1. sendBeacon with text/plain (avoids CORS preflight cancellation during unload)
         if (typeof navigator !== "undefined" && navigator.sendBeacon) {
           navigator.sendBeacon(`/api/junctions/${junctionId}`, new Blob([payload], { type: "text/plain" }));
+        } else {
+          // 2. keepalive fetch with text/plain
+          fetch(`/api/junctions/${junctionId}`, {
+            method: "POST",
+            headers: { "Content-Type": "text/plain" },
+            body: payload,
+            keepalive: true,
+          }).catch(() => { });
         }
-
-        // 2. keepalive fetch with text/plain
-        fetch(`/api/junctions/${junctionId}`, {
-          method: "POST",
-          headers: { "Content-Type": "text/plain" },
-          body: payload,
-          keepalive: true,
-        }).catch(() => { });
       } catch (e) { }
     };
 
@@ -1750,6 +1907,40 @@ export function JunctionRoom({
       document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, [junctionId, myIdentity]);
+
+  // Listen to cross-tab session takeover events
+  useEffect(() => {
+    const unsubscribe = listenToTabSessionEvents({
+      onSuperseded: () => {
+        // Another browser tab claimed a junction session!
+        // Immediately disconnect hardware and WebRTC so no dual-streaming occurs!
+        if (liveKitRoomRef.current) {
+          try {
+            const local = liveKitRoomRef.current.localParticipant;
+            if (local) {
+              local.audioTrackPublications?.forEach((pub: any) => {
+                try {
+                  pub.track?.stop();
+                  pub.audioTrack?.stop();
+                } catch {}
+              });
+            }
+            liveKitRoomRef.current.disconnect();
+          } catch {}
+        }
+
+        if (mediaStream) {
+          mediaStream.getTracks().forEach((t) => t.stop());
+        }
+
+        hasJoinedSuccessfullyRef.current = false;
+        joinedJunctionIdRef.current = null;
+        if (onLeave) onLeave();
+      },
+    });
+
+    return () => unsubscribe();
+  }, [onLeave, mediaStream]);
 
   // Sync local speaking state is no longer needed since LiveKit tracks speaking for all participants including local.
 
@@ -2265,6 +2456,16 @@ export function JunctionRoom({
         type: "chat_edit",
         payload: { id: editingMessage.id, text: updatedText },
       });
+      if (stopTypingTimerRef.current) clearTimeout(stopTypingTimerRef.current);
+      broadcastRoomUpdate({
+        type: "chat_typing",
+        payload: {
+          identity: myIdentity,
+          name: myDisplayName,
+          isTyping: false,
+          targetIdentity: privateRecipient !== "all" ? privateRecipient : undefined,
+        },
+      });
       setEditingMessage(null);
       setInputMessage("");
       return;
@@ -2289,6 +2490,16 @@ export function JunctionRoom({
 
     setChatMessages((prev) => [...prev, newMsg]);
     broadcastRoomUpdate({ type: "chat_message", payload: newMsg });
+    if (stopTypingTimerRef.current) clearTimeout(stopTypingTimerRef.current);
+    broadcastRoomUpdate({
+      type: "chat_typing",
+      payload: {
+        identity: myIdentity,
+        name: myDisplayName,
+        isTyping: false,
+        targetIdentity: privateRecipient !== "all" ? privateRecipient : undefined,
+      },
+    });
     setInputMessage("");
     setReplyingToMessage(null);
   };
@@ -2435,9 +2646,13 @@ export function JunctionRoom({
       } catch { }
     }
 
+    const myTabId = getTabId();
+    releaseJunctionSession(junctionId);
+
     const leavePayload = {
       action: "leave",
       identity: myIdentity,
+      tabSessionId: myTabId,
     };
 
     // 6. Dispatch database leave request with keepalive guarantee
@@ -4036,6 +4251,51 @@ export function JunctionRoom({
                   <div ref={chatMessagesEndRef} />
                 </div>
 
+                {/* Real-time Typing Indicator Bar */}
+                {activeTypingList.length > 0 && (
+                  <div className="px-4 py-1.5 bg-[#0C0D14]/90 border-t border-white/[0.06] flex items-center gap-2 text-xs text-slate-400 shrink-0 select-none animate-in fade-in slide-in-from-bottom-1 duration-150">
+                    <div className="flex items-center gap-1 py-1 px-1.5 bg-indigo-500/10 rounded-full border border-indigo-500/20 shrink-0">
+                      <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce [animation-delay:-0.3s]" />
+                      <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce [animation-delay:-0.15s]" />
+                      <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce" />
+                    </div>
+                    <span className="truncate text-[11px] text-slate-300">
+                      {activeTypingList.length === 1 ? (
+                        <>
+                          <strong className="font-semibold text-indigo-300">
+                            {activeTypingList[0].name}
+                          </strong>{" "}
+                          {activeTypingList[0].isWhisper
+                            ? "is whispering..."
+                            : "is typing..."}
+                        </>
+                      ) : activeTypingList.length === 2 ? (
+                        <>
+                          <strong className="font-semibold text-indigo-300">
+                            {activeTypingList[0].name}
+                          </strong>{" "}
+                          and{" "}
+                          <strong className="font-semibold text-indigo-300">
+                            {activeTypingList[1].name}
+                          </strong>{" "}
+                          are typing...
+                        </>
+                      ) : (
+                        <>
+                          <strong className="font-semibold text-indigo-300">
+                            {activeTypingList[0].name}
+                          </strong>
+                          ,{" "}
+                          <strong className="font-semibold text-indigo-300">
+                            {activeTypingList[1].name}
+                          </strong>{" "}
+                          and {activeTypingList.length - 2} others are typing...
+                        </>
+                      )}
+                    </span>
+                  </div>
+                )}
+
                 {/* Reply Context Banner */}
                 {replyingToMessage && (
                   <div className="px-3.5 py-2 bg-indigo-950/70 border-t border-indigo-500/30 flex items-center justify-between gap-2 shrink-0 animate-in fade-in duration-150">
@@ -4094,7 +4354,7 @@ export function JunctionRoom({
                     <input
                       type="text"
                       value={inputMessage}
-                      onChange={(e) => setInputMessage(e.target.value)}
+                      onChange={handleChatInputChange}
                       onKeyDown={(e) => {
                         if (e.key === "Escape") {
                           if (editingMessage) {
