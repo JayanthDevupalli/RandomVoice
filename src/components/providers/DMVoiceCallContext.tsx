@@ -341,13 +341,23 @@ export function DMVoiceCallProvider({ children }: { children: React.ReactNode })
   };
 
   const toggleMute = () => {
-    setIsMuted((prev) => !prev);
+    setIsMuted((prev) => {
+      const next = !prev;
+      // If unmuting while deafened (speaker off), also turn speaker back on
+      if (!next && isDeafened) {
+        setIsDeafened(false);
+      }
+      return next;
+    });
   };
 
   const toggleDeafen = () => {
     setIsDeafened((prev) => {
       const next = !prev;
-      if (next) setIsMuted(true);
+      // When turning speaker off (deafening), automatically mute microphone as well
+      if (next) {
+        setIsMuted(true);
+      }
       return next;
     });
   };

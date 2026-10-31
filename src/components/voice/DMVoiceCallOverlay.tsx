@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, useCallback } from "react";
 import { useDMVoiceCall } from "@/components/providers/DMVoiceCallContext";
 import { useUser } from "@/hooks/useUser";
 import { UserAvatar } from "@/components/ui/UserAvatar";
@@ -14,12 +14,185 @@ import {
   Minimize2, 
   Maximize2,
   Radio,
-  Sparkles,
   Wifi,
-  PhoneCall
+  Loader2
 } from "lucide-react";
-import { LiveKitRoom, RoomAudioRenderer } from "@livekit/components-react";
+import { 
+  LiveKitRoom, 
+  useTracks, 
+  useLocalParticipant, 
+  useRoomContext, 
+  AudioTrack, 
+  StartAudio 
+} from "@livekit/components-react";
+import { Track, RoomEvent } from "livekit-client";
 import { useScreenWakeLock } from "@/hooks/useScreenWakeLock";
+
+interface DMVoiceCallPipelineProps {
+  isMuted: boolean;
+  isDeafened: boolean;
+  onPeerStateChange: (state: { isPeerMuted: boolean; isPeerSpeaking: boolean; isSelfSpeaking: boolean }) => void;
+}
+
+function DMVoiceCallPipeline({
+  isMuted,
+  isDeafened,
+  onPeerStateChange,
+}: DMVoiceCallPipelineProps) {
+  const room = useRoomContext();
+  const { localParticipant } = useLocalParticipant();
+
+  // STRICTLY filter out local participant so own voice is NEVER looped back to oneself
+  const audioTracks = useTracks(
+    [Track.Source.Microphone],
+    { onlySubscribed: true }
+  ).filter((trackRef) => !trackRef.participant.isLocal && trackRef.publication?.kind === Track.Kind.Audio);
+
+  // 1. LiveKit Microphone Mute / Unmute Sync
+  useEffect(() => {
+    if (localParticipant) {
+      const shouldEnable = !isMuted && !isDeafened;
+      localParticipant
+        .setMicrophoneEnabled(shouldEnable, {
+          noiseSuppression: true,
+          echoCancellation: true,
+          autoGainControl: true,
+        })
+        .catch((err) => {
+          console.warn("LiveKit DM setMicrophoneEnabled warning:", err);
+        });
+    }
+  }, [localParticipant, isMuted, isDeafened]);
+
+  // 2. Speaker Off (Deafen) Volume & Mute Sync on all remote tracks
+  useEffect(() => {
+    if (!room) return;
+
+    try {
+      const safeVolume = isDeafened ? 0 : 1;
+      room.remoteParticipants.forEach((remoteParticipant) => {
+        // Direct remote participant volume API
+        try {
+          if (typeof remoteParticipant.setVolume === "function") {
+            remoteParticipant.setVolume(safeVolume, Track.Source.Microphone);
+          }
+        } catch (e) {}
+
+        // Track publications and attached media elements
+        remoteParticipant.audioTrackPublications.forEach((pub) => {
+          const track = pub.track;
+          if (track) {
+            try {
+              if (typeof (track as any).setVolume === "function") {
+                (track as any).setVolume(safeVolume);
+              }
+            } catch (e) {}
+
+            try {
+              const attached = (track as any).attachedElements;
+              if (attached) {
+                const els = Array.isArray(attached) ? attached : Array.from(attached);
+                for (const el of els as HTMLMediaElement[]) {
+                  if (el) {
+                    el.volume = safeVolume;
+                    el.muted = isDeafened;
+                  }
+                }
+              }
+            } catch (e) {}
+          }
+        });
+      });
+    } catch (err) {
+      console.warn("LiveKit DM volume sync warning:", err);
+    }
+  }, [room, isDeafened, audioTracks]);
+
+  // 3. Speaking and Mute State Tracking
+  useEffect(() => {
+    if (!room) return;
+
+    const checkPeerMuted = () => {
+      let peerMuted = false;
+      room.remoteParticipants.forEach((p) => {
+        const micPub = p.getTrackPublication(Track.Source.Microphone);
+        if (micPub) {
+          peerMuted = micPub.isMuted || !micPub.isEnabled;
+        }
+      });
+      return peerMuted;
+    };
+
+    const handleActiveSpeakers = (speakers: any[]) => {
+      const speakerIdentities = new Set(
+        speakers.map((s) => s.identity?.toLowerCase())
+      );
+      const localId = localParticipant?.identity?.toLowerCase();
+      const isSelfSpeaking = Boolean(localId && speakerIdentities.has(localId));
+      let isPeerSpeaking = false;
+      for (const s of speakers) {
+        if (s.identity?.toLowerCase() !== localId) {
+          isPeerSpeaking = true;
+          break;
+        }
+      }
+      onPeerStateChange({
+        isPeerMuted: checkPeerMuted(),
+        isPeerSpeaking,
+        isSelfSpeaking,
+      });
+    };
+
+    const handleTrackStateChanged = () => {
+      onPeerStateChange({
+        isPeerMuted: checkPeerMuted(),
+        isPeerSpeaking: false,
+        isSelfSpeaking: false,
+      });
+    };
+
+    room.on(RoomEvent.ActiveSpeakersChanged, handleActiveSpeakers);
+    room.on(RoomEvent.TrackMuted, handleTrackStateChanged);
+    room.on(RoomEvent.TrackUnmuted, handleTrackStateChanged);
+
+    // Initial check
+    onPeerStateChange({
+      isPeerMuted: checkPeerMuted(),
+      isPeerSpeaking: false,
+      isSelfSpeaking: false,
+    });
+
+    return () => {
+      room.off(RoomEvent.ActiveSpeakersChanged, handleActiveSpeakers);
+      room.off(RoomEvent.TrackMuted, handleTrackStateChanged);
+      room.off(RoomEvent.TrackUnmuted, handleTrackStateChanged);
+    };
+  }, [room, localParticipant, onPeerStateChange]);
+
+  return (
+    <div style={{ display: "none" }} aria-hidden="true">
+      <StartAudio label="Click to allow audio" />
+      {audioTracks.map((trackRef) => {
+        const id = trackRef.participant.identity;
+        const safeVolume = isDeafened ? 0 : 1;
+        return (
+          <AudioTrack
+            key={trackRef.publication?.trackSid || `${id}_${trackRef.source}`}
+            trackRef={trackRef}
+            volume={safeVolume}
+            muted={isDeafened}
+            ref={(element) => {
+              if (element) {
+                element.volume = safeVolume;
+                element.muted = isDeafened;
+              }
+            }}
+          />
+        );
+      })}
+    </div>
+  );
+}
 
 export function DMVoiceCallOverlay() {
   const { user } = useUser();
@@ -43,7 +216,18 @@ export function DMVoiceCallOverlay() {
 
   const [liveKitToken, setLiveKitToken] = useState<string | null>(null);
   const [liveKitUrl, setLiveKitUrl] = useState<string | null>(null);
-  const localStreamRef = useRef<MediaStream | null>(null);
+  const [peerState, setPeerState] = useState({
+    isPeerMuted: false,
+    isPeerSpeaking: false,
+    isSelfSpeaking: false,
+  });
+
+  const handlePeerStateChange = useCallback(
+    (state: { isPeerMuted: boolean; isPeerSpeaking: boolean; isSelfSpeaking: boolean }) => {
+      setPeerState(state);
+    },
+    []
+  );
 
   // Format seconds to mm:ss
   const formatTime = (totalSeconds: number) => {
@@ -56,10 +240,12 @@ export function DMVoiceCallOverlay() {
   useEffect(() => {
     if (callState === "connected" && activeCall && user) {
       const roomName = `dm_call_${activeCall.conversationId}`;
+      const uniqueIdentity = user.username || user.id;
+      const displayLabel = user.name || user.username || "User";
       fetch(
         `/api/token?room=${encodeURIComponent(roomName)}&username=${encodeURIComponent(
-          user.name || "User"
-        )}&avatar=${encodeURIComponent(user.avatar || "zap")}`
+          uniqueIdentity
+        )}&displayName=${encodeURIComponent(displayLabel)}&avatar=${encodeURIComponent(user.avatar || "zap")}`
       )
         .then((res) => res.json())
         .then((data) => {
@@ -72,49 +258,13 @@ export function DMVoiceCallOverlay() {
     } else {
       setLiveKitToken(null);
       setLiveKitUrl(null);
-    }
-  }, [callState, activeCall?.conversationId, user?.name, user?.avatar]);
-
-  // Fallback direct microphone track capture for browser audio when connected
-  useEffect(() => {
-    if (callState === "connected") {
-      if (navigator.mediaDevices?.getUserMedia) {
-        navigator.mediaDevices
-          .getUserMedia({ audio: true })
-          .then((stream) => {
-            localStreamRef.current = stream;
-            // Apply initial mute state
-            stream.getAudioTracks().forEach((track) => {
-              track.enabled = !isMuted;
-            });
-          })
-          .catch((err) => {
-            console.log("Local audio stream warning:", err.message);
-          });
-      }
-    } else {
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach((t) => t.stop());
-        localStreamRef.current = null;
-      }
-    }
-
-    return () => {
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach((t) => t.stop());
-        localStreamRef.current = null;
-      }
-    };
-  }, [callState]);
-
-  // Handle Mute toggle on fallback stream
-  useEffect(() => {
-    if (localStreamRef.current) {
-      localStreamRef.current.getAudioTracks().forEach((track) => {
-        track.enabled = !isMuted && !isDeafened;
+      setPeerState({
+        isPeerMuted: false,
+        isPeerSpeaking: false,
+        isSelfSpeaking: false,
       });
     }
-  }, [isMuted, isDeafened]);
+  }, [callState, activeCall?.conversationId, user?.id, user?.username, user?.name, user?.avatar]);
 
   if (callState === "idle" || !activeCall) return null;
 
@@ -225,7 +375,7 @@ export function DMVoiceCallOverlay() {
   if (callState === "connected") {
     return (
       <>
-        {/* Hidden LiveKit audio room connection */}
+        {/* LiveKit audio room connection with custom audio pipeline */}
         {liveKitToken && liveKitUrl && (
           <LiveKitRoom
             token={liveKitToken}
@@ -242,7 +392,11 @@ export function DMVoiceCallOverlay() {
             }}
             style={{ display: "none" }}
           >
-            <RoomAudioRenderer />
+            <DMVoiceCallPipeline
+              isMuted={isMuted}
+              isDeafened={isDeafened}
+              onPeerStateChange={handlePeerStateChange}
+            />
           </LiveKitRoom>
         )}
 
@@ -255,6 +409,9 @@ export function DMVoiceCallOverlay() {
                   <img src={peer.avatar} alt={peer.username} className="w-full h-full object-cover" />
                 ) : (
                   <UserAvatar avatar={peer.avatar} size="sm" className="!w-full !h-full" />
+                )}
+                {peerState.isPeerSpeaking && (
+                  <span className="absolute inset-0 rounded-full bg-emerald-400/40 animate-ping" />
                 )}
                 <span className="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full bg-emerald-400 border border-black" />
               </div>
@@ -273,28 +430,46 @@ export function DMVoiceCallOverlay() {
             <div className="h-4 w-px bg-white/10" />
 
             {/* Pill Controls */}
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1.5">
+              {/* Mute Mic Toggle */}
               <button
                 onClick={toggleMute}
-                className={`p-1.5 rounded-full text-xs transition-colors ${
-                  isMuted ? "bg-rose-500/20 text-rose-400" : "text-slate-300 hover:text-white"
+                className={`p-2 rounded-full text-xs transition-colors active:scale-95 ${
+                  isMuted || isDeafened
+                    ? "bg-rose-500/20 text-rose-400 border border-rose-500/30"
+                    : "text-slate-300 hover:text-white hover:bg-white/10"
                 }`}
-                title={isMuted ? "Unmute Mic" : "Mute Mic"}
+                title={isMuted ? "Unmute Microphone" : "Mute Microphone"}
               >
-                {isMuted ? <MicOff size={14} /> : <Mic size={14} />}
+                {isMuted || isDeafened ? <MicOff size={14} /> : <Mic size={14} />}
               </button>
 
+              {/* Speaker Toggle (Deafen) */}
+              <button
+                onClick={toggleDeafen}
+                className={`p-2 rounded-full text-xs transition-colors active:scale-95 ${
+                  isDeafened
+                    ? "bg-amber-500/20 text-amber-400 border border-amber-500/30"
+                    : "text-slate-300 hover:text-white hover:bg-white/10"
+                }`}
+                title={isDeafened ? "Turn Speaker On" : "Turn Speaker Off"}
+              >
+                {isDeafened ? <VolumeX size={14} /> : <Volume2 size={14} />}
+              </button>
+
+              {/* Expand Modal */}
               <button
                 onClick={() => setIsMinimized(false)}
-                className="p-1.5 rounded-full text-slate-300 hover:text-white hover:bg-white/10 transition-colors"
+                className="p-2 rounded-full text-slate-300 hover:text-white hover:bg-white/10 transition-colors active:scale-95"
                 title="Expand Call"
               >
                 <Maximize2 size={14} />
               </button>
 
+              {/* End Call */}
               <button
                 onClick={endCall}
-                className="p-1.5 rounded-full bg-rose-600 text-white hover:bg-rose-500 transition-colors ml-1"
+                className="p-2 rounded-full bg-rose-600 text-white hover:bg-rose-500 transition-colors ml-0.5 active:scale-95"
                 title="End Call"
               >
                 <PhoneOff size={14} />
@@ -308,9 +483,9 @@ export function DMVoiceCallOverlay() {
               {/* Header Bar */}
               <div className="w-full flex items-center justify-between mb-8 pb-4 border-b border-white/5 z-10">
                 <div className="flex items-center gap-2">
-                  <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
+                  <div className={`w-2.5 h-2.5 rounded-full ${liveKitToken ? "bg-emerald-400 animate-pulse" : "bg-amber-400 animate-ping"}`} />
                   <span className="text-xs font-semibold text-emerald-400 tracking-wide uppercase">
-                    Voice Call Connected
+                    {liveKitToken ? "Voice Call Connected" : "Connecting Voice..."}
                   </span>
                 </div>
 
@@ -330,11 +505,24 @@ export function DMVoiceCallOverlay() {
 
               {/* Call Participants Visual Display */}
               <div className="relative flex items-center justify-center gap-8 mb-10 w-full z-10">
-                {/* Caller / Peer */}
+                {/* Peer / Friend */}
                 <div className="flex flex-col items-center gap-2.5">
                   <div className="relative">
+                    {peerState.isPeerSpeaking && (
+                      <div className="absolute -inset-2 rounded-full bg-emerald-500/30 animate-ping blur-sm" />
+                    )}
                     <div className="absolute -inset-2 rounded-full bg-indigo-500/20 animate-pulse blur-md" />
-                    <div className="relative w-20 h-20 rounded-full bg-slate-800 border-2 border-indigo-500 overflow-hidden shadow-xl flex items-center justify-center">
+                    {peerState.isPeerMuted && (
+                      <div 
+                        className="absolute -top-1 -right-1 z-20 w-6 h-6 rounded-full bg-rose-600 text-white flex items-center justify-center border-2 border-[#0a0b12] shadow"
+                        title="Friend is muted"
+                      >
+                        <MicOff size={12} />
+                      </div>
+                    )}
+                    <div className={`relative w-20 h-20 rounded-full bg-slate-800 border-2 overflow-hidden shadow-xl flex items-center justify-center transition-all ${
+                      peerState.isPeerSpeaking ? "border-emerald-400 ring-4 ring-emerald-500/20" : "border-indigo-500"
+                    }`}>
                       {peer.avatar?.includes("http") ? (
                         <img src={peer.avatar} alt={peer.username} className="w-full h-full object-cover" />
                       ) : (
@@ -345,26 +533,74 @@ export function DMVoiceCallOverlay() {
                   <span className="text-sm font-bold text-white truncate max-w-[120px]">
                     {peer.username}
                   </span>
-                  <span className="text-[11px] text-emerald-400 font-medium">Connected</span>
+                  <span className={`text-[11px] font-medium transition-colors ${
+                    peerState.isPeerSpeaking 
+                      ? "text-emerald-400 font-semibold" 
+                      : peerState.isPeerMuted 
+                      ? "text-rose-400" 
+                      : "text-emerald-400"
+                  }`}>
+                    {peerState.isPeerSpeaking ? "Speaking..." : peerState.isPeerMuted ? "Muted" : "Connected"}
+                  </span>
                 </div>
 
                 {/* Animated Waveform Divider */}
                 <div className="flex items-center gap-1 text-indigo-400 px-2">
-                  <span className="w-1 h-6 rounded-full bg-indigo-500 animate-pulse" style={{ animationDelay: "0ms" }} />
-                  <span className="w-1 h-9 rounded-full bg-indigo-400 animate-pulse" style={{ animationDelay: "150ms" }} />
-                  <span className="w-1 h-4 rounded-full bg-indigo-600 animate-pulse" style={{ animationDelay: "300ms" }} />
-                  <span className="w-1 h-8 rounded-full bg-indigo-500 animate-pulse" style={{ animationDelay: "450ms" }} />
+                  <span 
+                    className={`w-1 rounded-full transition-all duration-150 ${
+                      peerState.isPeerSpeaking || peerState.isSelfSpeaking 
+                        ? "h-8 bg-emerald-400 animate-pulse" 
+                        : "h-5 bg-indigo-500 animate-pulse"
+                    }`} 
+                    style={{ animationDelay: "0ms" }} 
+                  />
+                  <span 
+                    className={`w-1 rounded-full transition-all duration-150 ${
+                      peerState.isPeerSpeaking || peerState.isSelfSpeaking 
+                        ? "h-11 bg-emerald-300 animate-pulse" 
+                        : "h-8 bg-indigo-400 animate-pulse"
+                    }`} 
+                    style={{ animationDelay: "150ms" }} 
+                  />
+                  <span 
+                    className={`w-1 rounded-full transition-all duration-150 ${
+                      peerState.isPeerSpeaking || peerState.isSelfSpeaking 
+                        ? "h-6 bg-emerald-500 animate-pulse" 
+                        : "h-3 bg-indigo-600 animate-pulse"
+                    }`} 
+                    style={{ animationDelay: "300ms" }} 
+                  />
+                  <span 
+                    className={`w-1 rounded-full transition-all duration-150 ${
+                      peerState.isPeerSpeaking || peerState.isSelfSpeaking 
+                        ? "h-10 bg-emerald-400 animate-pulse" 
+                        : "h-7 bg-indigo-500 animate-pulse"
+                    }`} 
+                    style={{ animationDelay: "450ms" }} 
+                  />
                 </div>
 
                 {/* User (Self) */}
                 <div className="flex flex-col items-center gap-2.5">
                   <div className="relative">
-                    {isMuted && (
-                      <div className="absolute -top-1 -right-1 z-20 w-6 h-6 rounded-full bg-rose-600 text-white flex items-center justify-center border-2 border-[#0a0b12] shadow">
+                    {peerState.isSelfSpeaking && !isMuted && !isDeafened && (
+                      <div className="absolute -inset-2 rounded-full bg-emerald-500/30 animate-ping blur-sm" />
+                    )}
+                    {(isMuted || isDeafened) && (
+                      <div 
+                        className="absolute -top-1 -right-1 z-20 w-6 h-6 rounded-full bg-rose-600 text-white flex items-center justify-center border-2 border-[#0a0b12] shadow"
+                        title={isDeafened ? "Microphone & Speaker Off" : "Microphone Muted"}
+                      >
                         <MicOff size={12} />
                       </div>
                     )}
-                    <div className="relative w-20 h-20 rounded-full bg-slate-800 border-2 border-white/20 overflow-hidden shadow-xl flex items-center justify-center">
+                    <div className={`relative w-20 h-20 rounded-full bg-slate-800 border-2 overflow-hidden shadow-xl flex items-center justify-center transition-all ${
+                      peerState.isSelfSpeaking && !isMuted && !isDeafened
+                        ? "border-emerald-400 ring-4 ring-emerald-500/20"
+                        : isMuted || isDeafened
+                        ? "border-rose-500/50"
+                        : "border-white/20"
+                    }`}>
                       {user?.avatar?.includes("http") ? (
                         <img src={user.avatar} alt={user.name || "You"} className="w-full h-full object-cover" />
                       ) : (
@@ -376,35 +612,41 @@ export function DMVoiceCallOverlay() {
                     You
                   </span>
                   <span className="text-[11px] text-slate-400 font-medium">
-                    {isMuted ? "Muted" : "Microphone On"}
+                    {isDeafened 
+                      ? "Speaker Off" 
+                      : isMuted 
+                      ? "Muted" 
+                      : peerState.isSelfSpeaking 
+                      ? "Speaking..." 
+                      : "Microphone On"}
                   </span>
                 </div>
               </div>
 
               {/* Call Controls Toolbar */}
-              <div className="flex items-center justify-center gap-4 w-full pt-4 border-t border-white/5 z-10">
+              <div className="flex items-center justify-center gap-5 w-full pt-4 border-t border-white/5 z-10">
                 {/* Mute Mic */}
                 <button
                   onClick={toggleMute}
                   className={`w-14 h-14 rounded-2xl flex items-center justify-center text-white font-semibold transition-all active:scale-95 shadow-lg ${
-                    isMuted
-                      ? "bg-rose-600 hover:bg-rose-500 shadow-rose-600/30"
+                    isMuted || isDeafened
+                      ? "bg-rose-600 hover:bg-rose-500 shadow-rose-600/30 ring-2 ring-rose-400/30"
                       : "bg-white/10 hover:bg-white/20 border border-white/10"
                   }`}
-                  title={isMuted ? "Unmute Microphone" : "Mute Microphone"}
+                  title={isMuted || isDeafened ? "Unmute Microphone" : "Mute Microphone"}
                 >
-                  {isMuted ? <MicOff size={22} /> : <Mic size={22} />}
+                  {isMuted || isDeafened ? <MicOff size={22} /> : <Mic size={22} />}
                 </button>
 
-                {/* Deafen Audio */}
+                {/* Speaker Off (Deafen Audio) */}
                 <button
                   onClick={toggleDeafen}
                   className={`w-14 h-14 rounded-2xl flex items-center justify-center text-white font-semibold transition-all active:scale-95 shadow-lg ${
                     isDeafened
-                      ? "bg-amber-600 hover:bg-amber-500 shadow-amber-600/30"
+                      ? "bg-amber-600 hover:bg-amber-500 shadow-amber-600/30 ring-2 ring-amber-400/30"
                       : "bg-white/10 hover:bg-white/20 border border-white/10"
                   }`}
-                  title={isDeafened ? "Undeafen Audio" : "Deafen Audio"}
+                  title={isDeafened ? "Turn Speaker On (Undeafen)" : "Turn Speaker Off (Deafen)"}
                 >
                   {isDeafened ? <VolumeX size={22} /> : <Volume2 size={22} />}
                 </button>

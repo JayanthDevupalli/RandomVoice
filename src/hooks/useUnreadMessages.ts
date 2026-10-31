@@ -172,6 +172,17 @@ export function useUnreadMessages() {
         return updated;
       });
 
+      // Update conversation_members table in Supabase so read receipt is persistent across devices
+      Promise.resolve(
+        supabase
+          .from("conversation_members")
+          .update({ last_read_at: safeReadTimestamp })
+          .eq("conversation_id", conversationId)
+          .eq("user_id", user.id)
+      ).catch((err) => {
+        console.warn("Failed to persist last_read_at to conversation_members:", err);
+      });
+
       if (typeof window !== "undefined") {
         window.dispatchEvent(
           new CustomEvent("yapclub_messages_read", {
@@ -315,6 +326,13 @@ export function useUnreadMessages() {
 
     for (const convId of convIds) {
       currentMap[convId] = safeReadTimestamp;
+      Promise.resolve(
+        supabase
+          .from("conversation_members")
+          .update({ last_read_at: safeReadTimestamp })
+          .eq("conversation_id", convId)
+          .eq("user_id", user.id)
+      ).catch(() => {});
     }
     lastReadMapRef.current = currentMap;
     saveLastReadMap(currentMap);

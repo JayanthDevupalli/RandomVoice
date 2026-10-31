@@ -372,11 +372,49 @@ export default function MessagesPage() {
     };
   }, [activeConversationId]);
 
+  // Realtime & persistent read receipts broadcaster
+  const broadcastReadReceipt = useCallback((latestTimestamp?: string) => {
+    if (!activeConversationId || !user?.id) return;
+    const nowMs = Date.now();
+    const latestMsgMs = latestTimestamp ? new Date(latestTimestamp).getTime() : 0;
+    const safeReadTime = new Date(Math.max(nowMs, latestMsgMs) + 15000).toISOString();
+
+    // 1. Broadcast to active chat participants over presence channel
+    if (presenceChannelRef.current) {
+      try {
+        presenceChannelRef.current.send({
+          type: "broadcast",
+          event: "read_receipt",
+          payload: {
+            user_id: user.id,
+            conversation_id: activeConversationId,
+            read_at: safeReadTime,
+          },
+        });
+        presenceChannelRef.current.track({
+          user_id: user.id,
+          online_at: Date.now(),
+          last_read_at: safeReadTime,
+        });
+      } catch (err) {}
+    }
+
+    // 2. Persist to DB conversation_members so future visits reflect seen state
+    Promise.resolve(
+      supabase
+        .from("conversation_members")
+        .update({ last_read_at: safeReadTime })
+        .eq("conversation_id", activeConversationId)
+        .eq("user_id", user.id)
+    ).catch(() => {});
+  }, [activeConversationId, user?.id]);
+
   // Mark active conversation as read
   useEffect(() => {
     if (activeConversationId) {
       const latestMsg = messages[messages.length - 1];
       markAsRead(activeConversationId, latestMsg?.created_at);
+      broadcastReadReceipt(latestMsg?.created_at);
       if (typeof window !== "undefined") {
         sessionStorage.setItem("yapclub_active_conversation", activeConversationId);
       }
@@ -391,7 +429,20 @@ export default function MessagesPage() {
         sessionStorage.removeItem("yapclub_active_conversation");
       }
     };
-  }, [activeConversationId, markAsRead, messages]);
+  }, [activeConversationId, markAsRead, broadcastReadReceipt, messages]);
+
+  // Tab focus auto-read refresh
+  useEffect(() => {
+    const handleFocus = () => {
+      if (activeConversationId && messages.length > 0) {
+        const latestMsg = messages[messages.length - 1];
+        markAsRead(activeConversationId, latestMsg?.created_at);
+        broadcastReadReceipt(latestMsg?.created_at);
+      }
+    };
+    window.addEventListener("focus", handleFocus);
+    return () => window.removeEventListener("focus", handleFocus);
+  }, [activeConversationId, messages, markAsRead, broadcastReadReceipt]);
 
   const activeConversation = conversations.find(c => c.id === activeConversationId);
 
@@ -888,6 +939,25 @@ export default function MessagesPage() {
       return;
     }
 
+    // 1. Fetch persistent read receipt timestamp from DB so previously seen messages immediately render as "seen"
+    supabase
+      .from("conversation_members")
+      .select("last_read_at")
+      .eq("conversation_id", activeConversationId)
+      .eq("user_id", otherUserId)
+      .maybeSingle()
+      .then(({ data, error }) => {
+        if (!error && data?.last_read_at) {
+          setOtherUserLastReadAt((prev) => {
+            if (!prev || new Date(data.last_read_at).getTime() > new Date(prev).getTime()) {
+              return data.last_read_at;
+            }
+            return prev;
+          });
+        }
+      });
+
+    // 2. Realtime presence & broadcast channel
     const presenceChannel = supabase.channel(`conv_presence_${activeConversationId}`, {
       config: { presence: { key: user.id } },
     });
@@ -909,7 +979,12 @@ export default function MessagesPage() {
         }
         setIsOtherUserConvOnline(isOnline);
         if (latestReadTime) {
-          setOtherUserLastReadAt(latestReadTime);
+          setOtherUserLastReadAt((prev) => {
+            if (!prev || new Date(latestReadTime!).getTime() > new Date(prev).getTime()) {
+              return latestReadTime;
+            }
+            return prev;
+          });
         }
       })
       .on("broadcast", { event: "typing" }, (payload: any) => {
@@ -923,21 +998,54 @@ export default function MessagesPage() {
       })
       .on("broadcast", { event: "read_receipt" }, (payload: any) => {
         if (payload.payload?.user_id === otherUserId && payload.payload?.read_at) {
-          setOtherUserLastReadAt(payload.payload.read_at);
+          const incomingReadAt = payload.payload.read_at;
+          setOtherUserLastReadAt((prev) => {
+            if (!prev || new Date(incomingReadAt).getTime() > new Date(prev).getTime()) {
+              return incomingReadAt;
+            }
+            return prev;
+          });
         }
       })
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
-          const nowIso = new Date().toISOString();
+          const nowIso = new Date(Date.now() + 15000).toISOString();
           await presenceChannel.track({ user_id: user.id, online_at: Date.now(), last_read_at: nowIso });
         }
       });
 
     presenceChannelRef.current = presenceChannel;
 
+    // 3. Listen to DB changes on conversation_members for live persistent updates
+    const membersChannel = supabase
+      .channel(`members_sync_${activeConversationId}_${Math.random().toString(36).substring(2, 7)}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "conversation_members",
+          filter: `conversation_id=eq.${activeConversationId}`,
+        },
+        (payload) => {
+          const updated = payload.new as any;
+          if (updated?.user_id === otherUserId && updated?.last_read_at) {
+            setOtherUserLastReadAt((prev) => {
+              if (!prev || new Date(updated.last_read_at).getTime() > new Date(prev).getTime()) {
+                return updated.last_read_at;
+              }
+              return prev;
+            });
+          }
+        }
+      )
+      .subscribe();
+
     return () => {
       if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
       supabase.removeChannel(presenceChannel);
+      supabase.removeChannel(membersChannel);
+      presenceChannelRef.current = null;
       setIsOtherUserConvOnline(false);
       setIsOtherUserTyping(false);
     };
@@ -1656,6 +1764,10 @@ export default function MessagesPage() {
                             {/* Message Bubble Container */}
                             {(() => {
                               const isGif = parsed.type === "gif" && !!parsed.gifUrl;
+                              const isMsgSeen = Boolean(
+                                otherUserLastReadAt &&
+                                (new Date(msg.created_at).getTime() <= new Date(otherUserLastReadAt).getTime() + 2000)
+                              );
                               return (
                                 <div 
                                   onClick={() => setActiveActionMsgId(prev => prev === msg.id ? null : msg.id)}
@@ -1720,7 +1832,16 @@ export default function MessagesPage() {
                                       <div className="absolute bottom-1.5 right-1.5 px-2 py-0.5 rounded-md bg-black/70 backdrop-blur-md text-[9px] font-medium text-white/90 border border-white/10 flex items-center gap-1 select-none pointer-events-none">
                                         <span>{new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                                         {isMe && activeConversation?.type !== "group" && (
-                                          <span className="text-sky-300 font-semibold">•</span>
+                                          <span className="inline-flex items-center gap-0.5 ml-0.5">
+                                            <span className="text-sky-300 font-semibold">•</span>
+                                            {isMsgSeen ? (
+                                              <span className="text-sky-300 font-semibold opacity-95">seen</span>
+                                            ) : isOtherUserOnline ? (
+                                              <span className="text-indigo-200/80 font-medium opacity-85">delivered</span>
+                                            ) : (
+                                              <span className="text-indigo-200/60 font-medium opacity-70">sent</span>
+                                            )}
+                                          </span>
                                         )}
                                       </div>
                                     </div>
@@ -1742,7 +1863,7 @@ export default function MessagesPage() {
                                       {isMe && activeConversation?.type !== "group" && (
                                         <span className="ml-1 inline-flex items-center gap-1 font-medium tracking-wide">
                                           <span className="opacity-40">•</span>
-                                          {otherUserLastReadAt && new Date(msg.created_at).getTime() <= new Date(otherUserLastReadAt).getTime() ? (
+                                          {isMsgSeen ? (
                                             <span className="text-sky-300 font-semibold opacity-95">seen</span>
                                           ) : isOtherUserOnline ? (
                                             <span className="text-indigo-200/80 font-medium opacity-85">delivered</span>
