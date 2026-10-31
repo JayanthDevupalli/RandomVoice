@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { UserAvatar } from "../ui/UserAvatar";
-import { Radio, Users, Bell, MessageSquare, Crown, Shield, Sparkles } from "lucide-react";
+import { Radio, Users, Bell, MessageCircle, Crown, Shield, Sparkles } from "lucide-react";
 import { useState } from "react";
 import { useUser } from "@/hooks/useUser";
 import { AuthModal } from "../auth/AuthModal";
@@ -90,7 +90,7 @@ export function Navbar({ totalOnline: propTotalOnline, className = "" }: NavbarP
                       className="relative flex items-center justify-center w-9 h-9 rounded-full bg-white/5 border border-white/10 text-slate-400 hover:text-white hover:bg-white/10 transition-all cursor-pointer shadow-sm shrink-0"
                       title="Messages"
                     >
-                      <MessageSquare size={15} />
+                      <MessageCircle size={15} />
                       {unreadCount > 0 && (
                         <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-indigo-600 text-white text-[10px] font-bold flex items-center justify-center border-2 border-[#090A0F] shadow-sm animate-pulse">
                           {unreadCount > 99 ? "99+" : unreadCount}

@@ -18,18 +18,15 @@ export const FloatingReactionOverlay = memo(function FloatingReactionOverlay({
       className="pointer-events-none fixed inset-0 z-40 overflow-hidden select-none [contain:strict]"
     >
       {reactions.map((r) => {
-        // Professional calm upward glide
-        let animClass = "animate-reaction-pro-center";
-        if (r.trajectory === 1 || r.sway === "left" || r.trajectory === 4) {
-          animClass = "animate-reaction-pro-left";
-        } else if (r.trajectory === 2 || r.sway === "right" || r.trajectory === 5) {
-          animClass = "animate-reaction-pro-right";
-        } else {
-          animClass = "animate-reaction-pro-center";
+        // Smooth, minimalist upward glide with calm micro-drift
+        let animClass = "animate-reaction-smooth-center";
+        if (r.sway === "left" || r.trajectory === 1) {
+          animClass = "animate-reaction-smooth-left";
+        } else if (r.sway === "right" || r.trajectory === 2) {
+          animClass = "animate-reaction-smooth-right";
         }
 
-        const animDuration = r.duration ? `${r.duration}s` : "1.4s";
-        const scale = r.scale || 1;
+        const animDuration = r.duration ? `${r.duration}s` : "2.2s";
 
         return (
           <div
@@ -38,19 +35,16 @@ export const FloatingReactionOverlay = memo(function FloatingReactionOverlay({
               left: `${r.x}%`,
               animationDuration: animDuration,
             }}
-            className={`absolute bottom-28 sm:bottom-32 flex flex-col items-center pointer-events-none ${animClass}`}
+            className={`absolute bottom-24 sm:bottom-28 flex flex-col items-center pointer-events-none select-none ${animClass}`}
           >
-            {/* Professional Reaction Emoji */}
-            <div
-              style={{ transform: `scale(${scale})` }}
-              className="text-3xl sm:text-4xl select-none filter drop-shadow-[0_4px_12px_rgba(0,0,0,0.35)]"
-            >
+            {/* Minimalist & Crisp Reaction Emoji */}
+            <div className="text-3xl sm:text-4xl select-none filter drop-shadow-[0_2px_8px_rgba(0,0,0,0.35)]">
               {r.emoji}
             </div>
 
-            {/* Clean Professional Sender Pill */}
+            {/* Subtle Minimalist Sender Pill */}
             {r.senderName && (
-              <span className="mt-1 px-2.5 py-0.5 rounded-full text-[10px] font-medium text-slate-300 bg-[#0E0F17]/85 backdrop-blur-xl border border-white/10 shadow-lg max-w-[120px] truncate tracking-wide">
+              <span className="mt-1 px-2.5 py-0.5 rounded-full text-[10px] font-medium text-slate-300 bg-black/60 backdrop-blur-md border border-white/10 shadow-sm max-w-[120px] truncate tracking-wide">
                 {r.senderName}
               </span>
             )}
@@ -60,4 +54,3 @@ export const FloatingReactionOverlay = memo(function FloatingReactionOverlay({
     </div>
   );
 });
-

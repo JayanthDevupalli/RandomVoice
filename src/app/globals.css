@@ -98,7 +98,6 @@
 
 /* Soundwave Animations (zero collision) */
 @keyframes sound-bar {
-
   0%,
   100% {
     height: 4px;
@@ -147,116 +146,118 @@
 }
 
 /* ==========================================================================
-   Voice Room Professional Floating Reactions (FaceTime / macOS Style)
-   Calm, elegant, steady vertical ascent. Perfectly upright, subtle drift,
-   refined depth, zero cartoon wobble or bouncy scaling.
+   Minimalist & Smooth Voice Room Reactions
+   Steady, slow upward glide with gentle fade-in and graceful slow dissolve.
+   Clean, calm, continuous normal speed, zero jumping, zero wobbling.
    ========================================================================== */
 
-@keyframes reactionProAscendCenter {
+@keyframes reactionSmoothFloatCenter {
   0% {
     opacity: 0;
-    transform: translate3d(-50%, 8px, 0) scale(0.85);
+    transform: translate3d(-50%, 0, 0) scale(0.92);
   }
   15% {
     opacity: 1;
-    transform: translate3d(-50%, -36px, 0) scale(1);
+    transform: translate3d(-50%, -55px, 0) scale(1);
   }
-  78% {
+  70% {
     opacity: 1;
-    transform: translate3d(-50%, -300px, 0) scale(1);
+    transform: translate3d(-50%, -320px, 0) scale(1);
   }
   100% {
     opacity: 0;
-    transform: translate3d(-50%, -400px, 0) scale(0.96);
+    transform: translate3d(-50%, -460px, 0) scale(0.96);
   }
 }
 
-@keyframes reactionProAscendLeft {
+@keyframes reactionSmoothFloatLeft {
   0% {
     opacity: 0;
-    transform: translate3d(-50%, 8px, 0) scale(0.85);
+    transform: translate3d(-50%, 0, 0) scale(0.92);
   }
   15% {
     opacity: 1;
-    transform: translate3d(calc(-50% - 4px), -36px, 0) scale(1);
+    transform: translate3d(calc(-50% - 3px), -55px, 0) scale(1);
   }
-  78% {
+  70% {
     opacity: 1;
-    transform: translate3d(calc(-50% - 14px), -300px, 0) scale(1);
+    transform: translate3d(calc(-50% - 11px), -320px, 0) scale(1);
   }
   100% {
     opacity: 0;
-    transform: translate3d(calc(-50% - 18px), -400px, 0) scale(0.96);
+    transform: translate3d(calc(-50% - 16px), -460px, 0) scale(0.96);
   }
 }
 
-@keyframes reactionProAscendRight {
+@keyframes reactionSmoothFloatRight {
   0% {
     opacity: 0;
-    transform: translate3d(-50%, 8px, 0) scale(0.85);
+    transform: translate3d(-50%, 0, 0) scale(0.92);
   }
   15% {
     opacity: 1;
-    transform: translate3d(calc(-50% + 4px), -36px, 0) scale(1);
+    transform: translate3d(calc(-50% + 3px), -55px, 0) scale(1);
   }
-  78% {
+  70% {
     opacity: 1;
-    transform: translate3d(calc(-50% + 14px), -300px, 0) scale(1);
+    transform: translate3d(calc(-50% + 11px), -320px, 0) scale(1);
   }
   100% {
     opacity: 0;
-    transform: translate3d(calc(-50% + 18px), -400px, 0) scale(0.96);
+    transform: translate3d(calc(-50% + 16px), -460px, 0) scale(0.96);
   }
 }
 
-.animate-reaction-pro-center {
-  animation: reactionProAscendCenter 1.4s cubic-bezier(0.2, 0.8, 0.25, 1) forwards;
+.animate-reaction-smooth-center {
+  animation: reactionSmoothFloatCenter 2.2s cubic-bezier(0.25, 0.1, 0.25, 1) forwards;
   will-change: transform, opacity;
 }
 
-.animate-reaction-pro-left {
-  animation: reactionProAscendLeft 1.4s cubic-bezier(0.2, 0.8, 0.25, 1) forwards;
+.animate-reaction-smooth-left {
+  animation: reactionSmoothFloatLeft 2.2s cubic-bezier(0.25, 0.1, 0.25, 1) forwards;
   will-change: transform, opacity;
 }
 
-.animate-reaction-pro-right {
-  animation: reactionProAscendRight 1.4s cubic-bezier(0.2, 0.8, 0.25, 1) forwards;
+.animate-reaction-smooth-right {
+  animation: reactionSmoothFloatRight 2.2s cubic-bezier(0.25, 0.1, 0.25, 1) forwards;
   will-change: transform, opacity;
 }
 
-/* Backward compatibility aliases */
+/* Backward compatibility mappings */
+.animate-reaction-pro-center,
 .animate-reaction-rise,
 .animate-reaction-minimal-center,
 .animate-reaction-tiktok-center,
 .animate-reaction-sway-center,
-.animate-reaction-float {
-  animation: reactionProAscendCenter 1.4s cubic-bezier(0.2, 0.8, 0.25, 1) forwards;
+.animate-reaction-float,
+.animate-reaction-meander-left,
+.animate-reaction-meander-right,
+.animate-reaction-corkscrew,
+.animate-reaction-breeze,
+.animate-reaction-rocket {
+  animation: reactionSmoothFloatCenter 2.2s cubic-bezier(0.25, 0.1, 0.25, 1) forwards;
   will-change: transform, opacity;
 }
 
+.animate-reaction-pro-left,
 .animate-reaction-minimal-left,
 .animate-reaction-tiktok-left,
-.animate-reaction-sway-left {
-  animation: reactionProAscendLeft 1.4s cubic-bezier(0.2, 0.8, 0.25, 1) forwards;
+.animate-reaction-sway-left,
+.animate-reaction-minimal-arc-left,
+.animate-reaction-tiktok-arc-left,
+.animate-reaction-fountain-left {
+  animation: reactionSmoothFloatLeft 2.2s cubic-bezier(0.25, 0.1, 0.25, 1) forwards;
   will-change: transform, opacity;
 }
 
+.animate-reaction-pro-right,
 .animate-reaction-minimal-right,
 .animate-reaction-tiktok-right,
-.animate-reaction-sway-right {
-  animation: reactionProAscendRight 1.4s cubic-bezier(0.2, 0.8, 0.25, 1) forwards;
-  will-change: transform, opacity;
-}
-
-.animate-reaction-minimal-arc-left,
-.animate-reaction-tiktok-arc-left {
-  animation: reactionProAscendLeft 1.4s cubic-bezier(0.2, 0.8, 0.25, 1) forwards;
-  will-change: transform, opacity;
-}
-
+.animate-reaction-sway-right,
 .animate-reaction-minimal-arc-right,
-.animate-reaction-tiktok-arc-right {
-  animation: reactionProAscendRight 1.4s cubic-bezier(0.2, 0.8, 0.25, 1) forwards;
+.animate-reaction-tiktok-arc-right,
+.animate-reaction-fountain-right {
+  animation: reactionSmoothFloatRight 2.2s cubic-bezier(0.25, 0.1, 0.25, 1) forwards;
   will-change: transform, opacity;
 }
 

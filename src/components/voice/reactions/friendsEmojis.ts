@@ -12,12 +12,11 @@ export interface VectorReaction {
   label: string;
   senderName: string;
   color: string;
-  x: number; // horizontal % (25% to 75%)
-  sway?: "left" | "right" | "center" | "arc-left" | "arc-right";
-  trajectory?: 1 | 2 | 3 | 4 | 5;
+  x: number; // horizontal % (35% to 65%)
+  sway?: "left" | "right" | "center";
+  trajectory?: 1 | 2 | 3;
   scale?: number;
   duration?: number;
-  combo?: number;
 }
 
 export const FRIENDS_EMOJI_REACTIONS: EmojiReactionItem[] = [

@@ -1126,15 +1126,15 @@ export function JunctionRoom({
           ...payload,
           emoji: resolvedEmoji,
           sway: payload.sway || sways[Math.floor(Math.random() * sways.length)],
-          scale: payload.scale || Number((0.95 + Math.random() * 0.3).toFixed(2)),
-          duration: payload.duration || Number((2.7 + Math.random() * 0.4).toFixed(2)),
+          scale: 1.0,
+          duration: 2.2,
         };
 
-        setReactions((prev) => [...prev.slice(-16), resolvedReaction]);
+        setReactions((prev) => [...prev.slice(-20), resolvedReaction]);
 
         setTimeout(() => {
           setReactions((prev) => prev.filter((r) => r.id !== payload.id));
-        }, 1500);
+        }, 2300);
       } else if (type === "clear_chat") {
         setChatMessages([]);
       } else if (type === "moderation_event" && payload) {
@@ -2198,27 +2198,16 @@ export function JunctionRoom({
         };
 
     const now = Date.now();
-    // TikTok Live combo multiplier: rapid taps within 1.5s increment combo count
-    if (now - lastReactionTimeRef.current < 1500 && lastReactionIdRef.current === item.id) {
-      reactionComboRef.current = Math.min(reactionComboRef.current + 1, 99);
-    } else {
-      reactionComboRef.current = 1;
-    }
     lastReactionTimeRef.current = now;
     lastReactionIdRef.current = item.id;
-    const currentCombo = reactionComboRef.current;
 
     // Gentle natural spread centered directly above the bottom picker/dock
-    const fanOffset = ((currentCombo * 5) % 22) - 11;
-    const randomJitter = (Math.random() - 0.5) * 10;
-    const finalX = Math.max(36, Math.min(64, Math.round(50 + fanOffset + randomJitter)));
+    const randomOffset = (Math.random() - 0.5) * 16;
+    const finalX = Math.max(38, Math.min(62, Math.round(50 + randomOffset)));
 
-    // Choose from 5 dynamic trajectories (left, right, center, arc-left, arc-right)
-    const trajectories: (1 | 2 | 3 | 4 | 5)[] = [1, 2, 3, 4, 5];
-    const chosenTrajectory = trajectories[Math.floor(Math.random() * trajectories.length)];
-
-    const baseScale = 1.0;
-    const randomDuration = Number((1.35 + Math.random() * 0.10).toFixed(2)); // 1.35s - 1.45s
+    // Calm subtle sway trajectory: left, right, or center
+    const sways: ("left" | "right" | "center")[] = ["left", "right", "center"];
+    const chosenSway = sways[Math.floor(Math.random() * sways.length)];
 
     const newReaction: VectorReaction = {
       id: "react_" + now + "_" + Math.random().toString(36).slice(2, 6),
@@ -2228,18 +2217,17 @@ export function JunctionRoom({
       color: item.color,
       senderName: guest.name || "Friend",
       x: finalX,
-      trajectory: chosenTrajectory,
-      scale: baseScale,
-      duration: randomDuration,
-      combo: currentCombo,
+      sway: chosenSway,
+      scale: 1.0,
+      duration: 2.2,
     };
 
-    setReactions((prev) => [...prev.slice(-16), newReaction]); // memory & layout optimized
+    setReactions((prev) => [...prev.slice(-20), newReaction]);
     broadcastRoomUpdate({ type: "reaction", payload: newReaction });
 
     setTimeout(() => {
       setReactions((prev) => prev.filter((r) => r.id !== newReaction.id));
-    }, 1500);
+    }, 2300);
   };
 
   const handleCopyLink = () => {
