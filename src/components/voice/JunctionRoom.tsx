@@ -699,6 +699,7 @@ export function JunctionRoom({
   const [inputMessage, setInputMessage] = useState("");
   const [privateRecipient, setPrivateRecipient] = useState<string>("all");
   const [reactions, setReactions] = useState<VectorReaction[]>([]);
+  const recentReactionPositionsRef = useRef<{ x: number; time: number }[]>([]);
 
   // Room Chat Typing Indicator state
   const [typingUsers, setTypingUsers] = useState<Record<string, { identity: string; name: string; timestamp: number; isWhisper?: boolean }>>({});
@@ -1454,20 +1455,29 @@ export function JunctionRoom({
           payload.emoji ||
           FRIENDS_EMOJI_REACTIONS.find((er) => er.id === payload.iconName)?.emoji ||
           "❤️";
-        const sways: ("left" | "right" | "center")[] = ["left", "right", "center"];
+        const now = Date.now();
+        recentReactionPositionsRef.current = recentReactionPositionsRef.current.filter(
+          (p) => now - p.time < 1800
+        );
+        const resolvedX = payload.x ?? 50;
+        recentReactionPositionsRef.current.push({ x: resolvedX, time: now });
+
+        const resolvedDuration = payload.duration || 2.6;
         const resolvedReaction: VectorReaction = {
           ...payload,
           emoji: resolvedEmoji,
-          sway: payload.sway || sways[Math.floor(Math.random() * sways.length)],
+          x: resolvedX,
+          sway: payload.sway || "center",
           scale: 1.0,
-          duration: 2.2,
+          duration: resolvedDuration,
+          senderName: payload.senderName || "Friend",
         };
 
-        setReactions((prev) => [...prev.slice(-20), resolvedReaction]);
+        setReactions((prev) => [...prev.slice(-30), resolvedReaction]);
 
         setTimeout(() => {
           setReactions((prev) => prev.filter((r) => r.id !== payload.id));
-        }, 2300);
+        }, (resolvedDuration + 0.3) * 1000);
       } else if (type === "clear_chat") {
         setChatMessages([]);
         setTypingUsers({});
@@ -2605,9 +2615,8 @@ export function JunctionRoom({
 
   const lastReactionTimeRef = useRef<number>(0);
   const lastReactionIdRef = useRef<string>("");
-  const reactionComboRef = useRef<number>(1);
 
-  // Send Floating Emoji Reaction - TikTok / Instagram Live fountain burst style
+  // Send Floating Emoji Reaction - Clean & Smooth with Natural Dispersal
   const handleSendReaction = (
     itemOrId: EmojiReactionItem | string,
     fallbackLabel?: string,
@@ -2627,13 +2636,53 @@ export function JunctionRoom({
     lastReactionTimeRef.current = now;
     lastReactionIdRef.current = item.id;
 
-    // Gentle natural spread centered directly above the bottom picker/dock
-    const randomOffset = (Math.random() - 0.5) * 16;
-    const finalX = Math.max(38, Math.min(62, Math.round(50 + randomOffset)));
+    // Purge reaction positions older than 1800ms
+    recentReactionPositionsRef.current = recentReactionPositionsRef.current.filter(
+      (p) => now - p.time < 1800
+    );
 
-    // Calm subtle sway trajectory: left, right, or center
-    const sways: ("left" | "right" | "center")[] = ["left", "right", "center"];
-    const chosenSway = sways[Math.floor(Math.random() * sways.length)];
+    // Smart Anti-Collision Dispersal:
+    // When multiple reactions fly, distribute across open lanes so they never clumsily stack
+    const candidateLanes = [50, 42, 58, 34, 66, 26, 74, 46, 54, 38, 62];
+    let chosenX = 50;
+
+    if (recentReactionPositionsRef.current.length === 0) {
+      chosenX = Math.round(50 + (Math.random() - 0.5) * 8);
+    } else {
+      let maxMinDist = -1;
+      for (const lane of candidateLanes) {
+        const minDist = recentReactionPositionsRef.current.reduce(
+          (min, r) => Math.min(min, Math.abs(r.x - lane)),
+          100
+        );
+        if (minDist > maxMinDist) {
+          maxMinDist = minDist;
+          chosenX = lane;
+        }
+      }
+      // Add organic micro-jitter (-2.5% to +2.5%)
+      chosenX = Math.round(Math.max(22, Math.min(78, chosenX + (Math.random() - 0.5) * 5)));
+    }
+
+    recentReactionPositionsRef.current.push({ x: chosenX, time: now });
+
+    // Organic trajectory sway aligned with lane position
+    type SwayType = "left" | "right" | "center" | "wide-left" | "wide-right" | "wave";
+    let sway: SwayType = "center";
+    if (chosenX < 40) {
+      sway = Math.random() > 0.4 ? "wide-left" : "left";
+    } else if (chosenX > 60) {
+      sway = Math.random() > 0.4 ? "wide-right" : "right";
+    } else if (chosenX <= 47) {
+      sway = Math.random() > 0.5 ? "left" : "wave";
+    } else if (chosenX >= 53) {
+      sway = Math.random() > 0.5 ? "right" : "wave";
+    } else {
+      const centerVariants: SwayType[] = ["center", "wave", "left", "right"];
+      sway = centerVariants[Math.floor(Math.random() * centerVariants.length)];
+    }
+
+    const duration = +(2.4 + Math.random() * 0.5).toFixed(2);
 
     const newReaction: VectorReaction = {
       id: "react_" + now + "_" + Math.random().toString(36).slice(2, 6),
@@ -2642,18 +2691,18 @@ export function JunctionRoom({
       label: item.label,
       color: item.color,
       senderName: guest.name || "Friend",
-      x: finalX,
-      sway: chosenSway,
+      x: chosenX,
+      sway,
       scale: 1.0,
-      duration: 2.2,
+      duration,
     };
 
-    setReactions((prev) => [...prev.slice(-20), newReaction]);
+    setReactions((prev) => [...prev.slice(-30), newReaction]);
     broadcastRoomUpdate({ type: "reaction", payload: newReaction });
 
     setTimeout(() => {
       setReactions((prev) => prev.filter((r) => r.id !== newReaction.id));
-    }, 2300);
+    }, (duration + 0.3) * 1000);
   };
 
   const handleCopyLink = () => {
@@ -3348,7 +3397,7 @@ export function JunctionRoom({
             </div>
           )}
 
-          {/* Floating Emoji Reactions Overlay - 60/120fps with Buoyant Sway & Particles */}
+          {/* Floating Emoji Reactions Overlay - Clean & Smooth */}
           <FloatingReactionOverlay reactions={reactions} />
 
           {/* Main Left Content Area */}

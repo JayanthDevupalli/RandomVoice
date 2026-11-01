@@ -12,9 +12,9 @@ export interface VectorReaction {
   label: string;
   senderName: string;
   color: string;
-  x: number; // horizontal % (35% to 65%)
-  sway?: "left" | "right" | "center";
-  trajectory?: 1 | 2 | 3;
+  x: number; // horizontal % (20% to 80%)
+  sway?: "left" | "right" | "center" | "wide-left" | "wide-right" | "wave";
+  trajectory?: 1 | 2 | 3 | 4 | 5;
   scale?: number;
   duration?: number;
 }

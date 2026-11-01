@@ -146,118 +146,175 @@
 }
 
 /* ==========================================================================
-   Minimalist & Smooth Voice Room Reactions
-   Steady, slow upward glide with gentle fade-in and graceful slow dissolve.
-   Clean, calm, continuous normal speed, zero jumping, zero wobbling.
+   Voice Room Floating Reactions - Fluid Continuous Physics
+   Decoupled axes: continuous vertical ascent (zero stutter, zero stopping),
+   independent horizontal sinusoidal sway, and spring entrance pop.
    ========================================================================== */
 
-@keyframes reactionSmoothFloatCenter {
+/* 1. Continuous Vertical Rise & Fade (100% uninterrupted smooth ascent, zero stops) */
+@keyframes reactionRiseFloat {
   0% {
     opacity: 0;
-    transform: translate3d(-50%, 0, 0) scale(0.92);
+    transform: translateY(0);
   }
-  15% {
+  10% {
     opacity: 1;
-    transform: translate3d(-50%, -55px, 0) scale(1);
   }
-  70% {
+  75% {
     opacity: 1;
-    transform: translate3d(-50%, -320px, 0) scale(1);
   }
   100% {
     opacity: 0;
-    transform: translate3d(-50%, -460px, 0) scale(0.96);
+    transform: translateY(-560px);
   }
 }
 
-@keyframes reactionSmoothFloatLeft {
+.animate-reaction-rise {
+  animation: reactionRiseFloat 2.6s cubic-bezier(0.25, 0.1, 0.25, 1) forwards;
+  will-change: transform, opacity;
+}
+
+/* 2. Horizontal Air-Current Drifts (Smooth sinusoidal sways with natural tilt) */
+@keyframes reactionSwayLeft {
   0% {
-    opacity: 0;
-    transform: translate3d(-50%, 0, 0) scale(0.92);
+    transform: translateX(0) rotate(0deg);
   }
-  15% {
-    opacity: 1;
-    transform: translate3d(calc(-50% - 3px), -55px, 0) scale(1);
-  }
-  70% {
-    opacity: 1;
-    transform: translate3d(calc(-50% - 11px), -320px, 0) scale(1);
+  50% {
+    transform: translateX(-24px) rotate(-6deg);
   }
   100% {
-    opacity: 0;
-    transform: translate3d(calc(-50% - 16px), -460px, 0) scale(0.96);
+    transform: translateX(-48px) rotate(-10deg);
   }
 }
 
-@keyframes reactionSmoothFloatRight {
+@keyframes reactionSwayRight {
   0% {
-    opacity: 0;
-    transform: translate3d(-50%, 0, 0) scale(0.92);
+    transform: translateX(0) rotate(0deg);
   }
-  15% {
-    opacity: 1;
-    transform: translate3d(calc(-50% + 3px), -55px, 0) scale(1);
-  }
-  70% {
-    opacity: 1;
-    transform: translate3d(calc(-50% + 11px), -320px, 0) scale(1);
+  50% {
+    transform: translateX(24px) rotate(6deg);
   }
   100% {
-    opacity: 0;
-    transform: translate3d(calc(-50% + 16px), -460px, 0) scale(0.96);
+    transform: translateX(48px) rotate(10deg);
   }
 }
 
-.animate-reaction-smooth-center {
-  animation: reactionSmoothFloatCenter 2.2s cubic-bezier(0.25, 0.1, 0.25, 1) forwards;
-  will-change: transform, opacity;
+@keyframes reactionSwayWideLeft {
+  0% {
+    transform: translateX(0) rotate(0deg);
+  }
+  45% {
+    transform: translateX(-50px) rotate(-8deg);
+  }
+  100% {
+    transform: translateX(-95px) rotate(-14deg);
+  }
 }
 
-.animate-reaction-smooth-left {
-  animation: reactionSmoothFloatLeft 2.2s cubic-bezier(0.25, 0.1, 0.25, 1) forwards;
-  will-change: transform, opacity;
+@keyframes reactionSwayWideRight {
+  0% {
+    transform: translateX(0) rotate(0deg);
+  }
+  45% {
+    transform: translateX(50px) rotate(8deg);
+  }
+  100% {
+    transform: translateX(95px) rotate(14deg);
+  }
 }
 
-.animate-reaction-smooth-right {
-  animation: reactionSmoothFloatRight 2.2s cubic-bezier(0.25, 0.1, 0.25, 1) forwards;
-  will-change: transform, opacity;
+@keyframes reactionSwayWave {
+  0% {
+    transform: translateX(0) rotate(0deg);
+  }
+  25% {
+    transform: translateX(-18px) rotate(-5deg);
+  }
+  75% {
+    transform: translateX(18px) rotate(5deg);
+  }
+  100% {
+    transform: translateX(0) rotate(0deg);
+  }
 }
 
-/* Backward compatibility mappings */
+@keyframes reactionSwayCenter {
+  0% {
+    transform: translateX(0) rotate(0deg);
+  }
+  35% {
+    transform: translateX(8px) rotate(2deg);
+  }
+  70% {
+    transform: translateX(-8px) rotate(-2deg);
+  }
+  100% {
+    transform: translateX(0) rotate(0deg);
+  }
+}
+
+.animate-reaction-sway-left {
+  animation: reactionSwayLeft 2.6s ease-in-out forwards;
+  will-change: transform;
+}
+
+.animate-reaction-sway-right {
+  animation: reactionSwayRight 2.6s ease-in-out forwards;
+  will-change: transform;
+}
+
+.animate-reaction-sway-wide-left {
+  animation: reactionSwayWideLeft 2.6s ease-in-out forwards;
+  will-change: transform;
+}
+
+.animate-reaction-sway-wide-right {
+  animation: reactionSwayWideRight 2.6s ease-in-out forwards;
+  will-change: transform;
+}
+
+.animate-reaction-sway-wave {
+  animation: reactionSwayWave 2.6s ease-in-out forwards;
+  will-change: transform;
+}
+
+.animate-reaction-sway-center {
+  animation: reactionSwayCenter 2.6s ease-in-out forwards;
+  will-change: transform;
+}
+
+/* Backward compatibility classes mapped to continuous float */
+.animate-reaction-buoyant-center,
+.animate-reaction-smooth-center,
 .animate-reaction-pro-center,
-.animate-reaction-rise,
 .animate-reaction-minimal-center,
 .animate-reaction-tiktok-center,
 .animate-reaction-sway-center,
 .animate-reaction-float,
-.animate-reaction-meander-left,
-.animate-reaction-meander-right,
 .animate-reaction-corkscrew,
-.animate-reaction-breeze,
-.animate-reaction-rocket {
-  animation: reactionSmoothFloatCenter 2.2s cubic-bezier(0.25, 0.1, 0.25, 1) forwards;
-  will-change: transform, opacity;
-}
-
+.animate-reaction-rocket,
+.animate-reaction-fountain-left,
+.animate-reaction-smooth-left,
 .animate-reaction-pro-left,
 .animate-reaction-minimal-left,
 .animate-reaction-tiktok-left,
 .animate-reaction-sway-left,
 .animate-reaction-minimal-arc-left,
 .animate-reaction-tiktok-arc-left,
-.animate-reaction-fountain-left {
-  animation: reactionSmoothFloatLeft 2.2s cubic-bezier(0.25, 0.1, 0.25, 1) forwards;
-  will-change: transform, opacity;
-}
-
+.animate-reaction-meander-left,
+.animate-reaction-wide-left,
+.animate-reaction-fountain-right,
+.animate-reaction-smooth-right,
 .animate-reaction-pro-right,
 .animate-reaction-minimal-right,
 .animate-reaction-tiktok-right,
 .animate-reaction-sway-right,
 .animate-reaction-minimal-arc-right,
 .animate-reaction-tiktok-arc-right,
-.animate-reaction-fountain-right {
-  animation: reactionSmoothFloatRight 2.2s cubic-bezier(0.25, 0.1, 0.25, 1) forwards;
+.animate-reaction-meander-right,
+.animate-reaction-wide-right,
+.animate-reaction-wave {
+  animation: reactionRiseFloat 2.6s cubic-bezier(0.25, 0.1, 0.25, 1) forwards;
   will-change: transform, opacity;
 }
 

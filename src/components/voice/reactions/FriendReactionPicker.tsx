@@ -90,8 +90,8 @@ export function FriendReactionPicker({
                 onClick={() => handleClick(item)}
                 onMouseEnter={() => setHoveredItem(item)}
                 onMouseLeave={() => setHoveredItem(null)}
-                className={`relative w-9 h-9 sm:w-10 sm:h-10 rounded-full text-lg sm:text-xl flex items-center justify-center cursor-pointer select-none transition-all duration-150 ease-out hover:scale-115 hover:bg-white/10 active:scale-95 ${
-                  isTapped ? "scale-110 bg-white/15" : ""
+                className={`relative w-9 h-9 sm:w-10 sm:h-10 rounded-full text-lg sm:text-xl flex items-center justify-center cursor-pointer select-none transition-all duration-150 ease-out hover:scale-120 hover:bg-white/10 active:scale-90 ${
+                  isTapped ? "scale-125 bg-white/20 shadow-[0_0_14px_rgba(255,255,255,0.3)] ring-2 ring-white/30" : ""
                 } ${isHovered ? "z-10" : ""}`}
                 title={item.label}
               >
