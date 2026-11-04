@@ -22,6 +22,7 @@ import {
 import Link from "next/link";
 import { useGuestUser } from "@/hooks/useGuestUser";
 import { useUser } from "@/hooks/useUser";
+import { useActiveJunction } from "@/components/providers/ActiveJunctionContext";
 
 interface JunctionCardProps {
   junction: Junction;
@@ -71,6 +72,7 @@ export const JunctionCard = React.memo(
   function JunctionCard({ junction, onDelete }: JunctionCardProps) {
     const { guest } = useGuestUser();
     const { user } = useUser();
+    const { activeJunctionId, setActiveJunctionId, setIsMinimized } = useActiveJunction();
     const [isDeleting, setIsDeleting] = useState(false);
 
     const isPublic = !junction.isCustom && !junction.creatorId && (!junction.id.startsWith("junc_"));
@@ -124,6 +126,12 @@ export const JunctionCard = React.memo(
         {!user?.isBanned && !isLocked && !isFull && (
           <Link
             href={`/junction/${junction.id}`}
+            onClick={() => {
+              if (activeJunctionId !== junction.id) {
+                setActiveJunctionId(junction.id);
+                setIsMinimized(false);
+              }
+            }}
             aria-label={`Join ${junction.name}`}
             className="absolute inset-0 z-0 cursor-pointer"
           />

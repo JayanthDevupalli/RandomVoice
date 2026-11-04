@@ -37,7 +37,11 @@ export async function GET(request: NextRequest) {
   const username = searchParams.get("username");
   const avatar = searchParams.get("avatar") || "zap";
   const color = searchParams.get("color") || "#6366F1";
+  const cardBgColor = searchParams.get("cardBgColor") || "#465B73";
   const displayName = searchParams.get("displayName") || searchParams.get("name") || username || "Guest";
+  const role = searchParams.get("role") || "speaker";
+  const userRole = searchParams.get("userRole") || "user";
+  const userId = searchParams.get("userId") || searchParams.get("id") || "";
 
   if (!room) {
     return NextResponse.json({ error: 'Missing "room" parameter' }, { status: 400 });
@@ -58,18 +62,31 @@ export async function GET(request: NextRequest) {
   const apiSecret = process.env.LIVEKIT_API_SECRET;
   const livekitUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL || process.env.LIVEKIT_URL || "wss://demo.livekit.cloud";
 
-  const role = searchParams.get("role") || "speaker";
   const isModerator = role === "moderator";
 
   // Check if real LiveKit Cloud / Server keys are configured
   const isRealLiveKit = apiKey && apiSecret && apiKey !== "devkey" && apiSecret !== "secret";
 
   try {
+    const metadataPayload = JSON.stringify({
+      id: userId || username,
+      identity: username,
+      username,
+      displayName,
+      name: displayName,
+      avatar,
+      color,
+      cardBgColor,
+      role,
+      userRole,
+      joinedAt: Date.now(),
+    });
+
     if (apiKey && apiSecret) {
       const at = new AccessToken(apiKey, apiSecret, {
         identity: username,
         name: displayName || undefined,
-        metadata: JSON.stringify({ avatar, color, role, displayName }),
+        metadata: metadataPayload,
         ttl: "4h",
       });
 

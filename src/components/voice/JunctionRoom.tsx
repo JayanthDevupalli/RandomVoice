@@ -14,7 +14,8 @@ import confetti from "canvas-confetti";
 import { getCardThemeStyle } from "@/lib/card-themes";
 import { supabase } from "@/lib/supabase";
 import { useScreenWakeLock } from "@/hooks/useScreenWakeLock";
-import { LiveKitRoom, useTracks, useLocalParticipant, useRoomContext, useConnectionState, AudioTrack, StartAudio } from "@livekit/components-react";
+import { useActiveJunction } from "@/components/providers/ActiveJunctionContext";
+import { LiveKitRoom, useTracks, useLocalParticipant, useRemoteParticipants, useRoomContext, useConnectionState, AudioTrack, StartAudio } from "@livekit/components-react";
 import { Track, RoomEvent, ConnectionState } from "livekit-client";
 import {
   getTabId,
@@ -213,25 +214,63 @@ function RemoteAudioPipeline({
 
 function LiveKitDataSync({
   junctionId,
+  localParticipantData,
   onMessage,
   publishRef,
   onSpeakingChange,
   onParticipantSync,
+  onRemoteParticipantsChange,
+  onParticipantLeave,
   isMuted,
   isMutedByMod,
-  isDeafened
+  isDeafened,
 }: {
   junctionId?: string;
+  localParticipantData?: JunctionParticipant | null;
   onMessage: (data: any) => void;
   publishRef: React.MutableRefObject<((data: any) => void) | null>;
   onSpeakingChange: (speakingIdentities: string[]) => void;
   onParticipantSync?: () => void;
+  onRemoteParticipantsChange?: (participants: JunctionParticipant[]) => void;
+  onParticipantLeave?: (identity: string) => void;
   isMuted: boolean;
   isMutedByMod: boolean;
   isDeafened: boolean;
 }) {
   const room = useRoomContext();
   const { localParticipant } = useLocalParticipant();
+  const remoteParticipants = useRemoteParticipants();
+
+  // Instant real-time sync of all WebRTC peers: anyone connected to voice will immediately have their card visible
+  useEffect(() => {
+    if (!onRemoteParticipantsChange) return;
+    const list: JunctionParticipant[] = remoteParticipants.map((rp) => {
+      let meta: any = {};
+      if (rp.metadata) {
+        try {
+          meta = JSON.parse(rp.metadata);
+        } catch {}
+      }
+      return {
+        id: meta.id || rp.sid || rp.identity,
+        identity: rp.identity,
+        username: meta.username || rp.identity,
+        name: rp.name || meta.name || meta.displayName || rp.identity,
+        displayName: rp.name || meta.displayName || meta.name || rp.identity,
+        avatar: meta.avatar || "zap",
+        color: meta.color || "#6366F1",
+        cardBgColor: meta.cardBgColor || "#465B73",
+        role: meta.role || "speaker",
+        userRole: meta.userRole || "user",
+        isMuted: !rp.isMicrophoneEnabled,
+        isMutedByMod: Boolean(meta.isMutedByMod),
+        isSpeaking: rp.isSpeaking,
+        connectionQuality: rp.connectionQuality === "poor" ? "poor" : "excellent",
+        joinedAt: meta.joinedAt || Date.now(),
+      };
+    });
+    onRemoteParticipantsChange(list);
+  }, [remoteParticipants, onRemoteParticipantsChange]);
 
   useEffect(() => {
     if (!room) return;
@@ -255,22 +294,27 @@ function LiveKitDataSync({
     room.on(RoomEvent.ActiveSpeakersChanged, handleActiveSpeakers);
 
     const handleParticipantChange = () => {
-      // Throttled sync handles participant UI update smoothly
       onParticipantSync?.();
     };
 
-    const handleParticipantDisconnected = () => {
-      // Refresh UI participants smoothly when remote peer changes.
-      // Remote clients must NEVER tell the server to remove another user from the database!
+    const handleParticipantDisconnected = (remotePeer: any) => {
+      if (remotePeer?.identity) {
+        onParticipantLeave?.(remotePeer.identity);
+      }
       onParticipantSync?.();
       if (room && room.state === ConnectionState.Connected) {
-        publishRef.current?.({ type: "room_participants_updated" });
+        publishRef.current?.({ type: "room_participant_left", payload: { identity: remotePeer?.identity } });
       }
+    };
+
+    const handleMetadataChange = () => {
+      onParticipantSync?.();
     };
 
     room.on(RoomEvent.Connected, handleParticipantChange);
     room.on(RoomEvent.ParticipantConnected, handleParticipantChange);
     room.on(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
+    room.on(RoomEvent.ParticipantMetadataChanged, handleMetadataChange);
 
     return () => {
       room.off(RoomEvent.DataReceived, handleData);
@@ -278,8 +322,9 @@ function LiveKitDataSync({
       room.off(RoomEvent.Connected, handleParticipantChange);
       room.off(RoomEvent.ParticipantConnected, handleParticipantChange);
       room.off(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
+      room.off(RoomEvent.ParticipantMetadataChanged, handleMetadataChange);
     };
-  }, [room, junctionId, onMessage, onSpeakingChange, onParticipantSync, publishRef]);
+  }, [room, junctionId, onMessage, onSpeakingChange, onParticipantSync, onParticipantLeave, publishRef]);
 
   useEffect(() => {
     if (localParticipant) {
@@ -303,8 +348,13 @@ function LiveKitDataSync({
 
       // Broadcast join update immediately over WebRTC ONLY if room connection is open & connected
       if (room && room.state === ConnectionState.Connected) {
+        const payloadData = localParticipantData ? {
+          type: "room_participant_joined",
+          payload: { participant: localParticipantData }
+        } : { type: "room_participants_updated" };
+
         localParticipant
-          .publishData(new TextEncoder().encode(JSON.stringify({ type: "room_participants_updated" })), {
+          .publishData(new TextEncoder().encode(JSON.stringify(payloadData)), {
             reliable: true,
           })
           .catch(() => { });
@@ -315,7 +365,7 @@ function LiveKitDataSync({
     return () => {
       publishRef.current = null;
     };
-  }, [room, localParticipant, publishRef, onParticipantSync]);
+  }, [room, localParticipant, localParticipantData, publishRef, onParticipantSync]);
 
   useEffect(() => {
     if (localParticipant) {
@@ -381,15 +431,19 @@ export function JunctionRoom({
   onLeave,
 }: JunctionRoomProps) {
   const router = useRouter();
+  const { setActiveJunctionId } = useActiveJunction();
 
   // Secure connection staging & clean exit state
   const [isConnectingOverlayOpen, setIsConnectingOverlayOpen] = useState(true);
   const [connectionStep, setConnectionStep] = useState<"auth" | "allocating" | "handshaking" | "connected">("auth");
-  const [connectionProgress, setConnectionProgress] = useState<number>(25);
+  const [connectionProgress, setConnectionProgress] = useState<number>(35);
   const [isLeaving, setIsLeaving] = useState(false);
   const [exitStep, setExitStep] = useState<"disconnecting" | "ended">("disconnecting");
   const liveKitRoomRef = useRef<any>(null);
   const isLiveKitConnectedRef = useRef(false);
+
+  // LiveKit real-time remote participants state for zero-latency card synchronization
+  const [liveKitRemoteParticipants, setLiveKitRemoteParticipants] = useState<JunctionParticipant[]>([]);
 
   // Room & participants state with instant cache retrieval
   const [junction, setJunction] = useState<Junction | null>(() => {
@@ -830,38 +884,69 @@ export function JunctionRoom({
     return () => clearInterval(interval);
   }, [fetchOtherJunctions]);
 
-  // Direct Junction Shifting
-  const handleShiftJunction = async (targetJunctionId: string, targetName: string) => {
+  // Direct Instant Junction Shifting
+  const handleShiftJunction = (targetJunctionId: string, targetName: string) => {
     if (targetJunctionId === junctionId || isSwitchingRoomId) return;
 
     setIsSwitchingRoomId(targetJunctionId);
     setSwitchingRoomName(targetName);
+
+    // 1. Immediately mute and disconnect old LiveKit room so audio ceases immediately
+    try {
+      if (liveKitRoomRef.current) {
+        const local = liveKitRoomRef.current.localParticipant;
+        if (local) {
+          try {
+            local.setMicrophoneEnabled(false).catch(() => {});
+          } catch {}
+          local.audioTrackPublications?.forEach((pub: any) => {
+            try {
+              pub.track?.stop();
+              pub.audioTrack?.stop();
+              local.unpublishTrack(pub.track).catch(() => {});
+            } catch {}
+          });
+        }
+        liveKitRoomRef.current.disconnect();
+      }
+    } catch {}
+
+    if (mediaStream) {
+      mediaStream.getTracks().forEach((t) => t.stop());
+    }
+
+    // 2. Broadcast departure to current room peers so user card disappears right away
+    broadcastRoomUpdate({
+      type: "room_participant_left",
+      payload: { identity: myIdentity },
+    });
 
     if (typeof window !== "undefined") {
       sessionStorage.removeItem(`junction_mod_muted_${junctionId}`);
       sessionStorage.removeItem(`junction_role_${junctionId}`);
     }
 
-    if (mediaStream) {
-      mediaStream.getTracks().forEach((t) => t.stop());
-    }
-
-    try {
-      const myTabId = getTabId();
-      await fetch(`/api/junctions/${junctionId}`, {
+    // 3. Fire-and-forget database leave request in the background
+    const myTabId = getTabId();
+    const leavePayload = JSON.stringify({
+      action: "leave",
+      identity: myIdentity,
+      tabSessionId: myTabId,
+    });
+    if (typeof navigator !== "undefined" && navigator.sendBeacon) {
+      navigator.sendBeacon(`/api/junctions/${junctionId}`, new Blob([leavePayload], { type: "application/json" }));
+    } else {
+      fetch(`/api/junctions/${junctionId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "leave",
-          identity: myIdentity,
-          tabSessionId: myTabId,
-        }),
-      });
-    } catch (e) {
-      console.error("Failed to leave current junction before shifting:", e);
+        body: leavePayload,
+        keepalive: true,
+      }).catch(() => {});
     }
 
-    router.push(`/junction/${targetJunctionId}`);
+    // 4. Instantly switch active junction session & route without waiting
+    setActiveJunctionId(targetJunctionId);
+    router.replace(`/junction/${targetJunctionId}`);
   };
 
   // Whisper Chat: Reply, Edit & Auto-Scroll state
@@ -1227,12 +1312,21 @@ export function JunctionRoom({
   const isRealUnmount = useRef(false);
 
   const lastPollTimeRef = useRef<number>(0);
+  const pollTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Throttled poll junction data from server (clean read-only, no recursive database writes)
-  const pollJunction = useCallback(async () => {
+  // Smart debounced poll junction data from server (clean read-only, no recursive database writes)
+  const pollJunction = useCallback(async (immediate = false) => {
     if (isRealUnmount.current) return;
     const now = Date.now();
-    if (now - lastPollTimeRef.current < 3500) return;
+    if (!immediate && now - lastPollTimeRef.current < 1500) {
+      if (!pollTimerRef.current) {
+        pollTimerRef.current = setTimeout(() => {
+          pollTimerRef.current = null;
+          pollJunction(true);
+        }, 1500);
+      }
+      return;
+    }
     lastPollTimeRef.current = now;
 
     try {
@@ -1633,13 +1727,45 @@ export function JunctionRoom({
         const locked = Boolean(payload.isLocked);
         setJunction((prev) => (prev ? { ...prev, isLocked: locked } : prev));
         pollJunction();
+      } else if (type === "room_participant_joined" && payload?.participant) {
+        const newP: JunctionParticipant = payload.participant;
+        const cleanTarget = (newP.identity || "").toLowerCase().trim();
+        if (cleanTarget) {
+          setParticipants((prev) => {
+            const exists = prev.some((p) => (p.identity || "").toLowerCase().trim() === cleanTarget);
+            if (exists) {
+              return prev.map((p) => (p.identity || "").toLowerCase().trim() === cleanTarget ? { ...p, ...newP } : p);
+            }
+            return [...prev, newP];
+          });
+        }
+      } else if (type === "room_participant_left" && payload?.identity) {
+        const cleanTarget = (payload.identity || "").toLowerCase().trim();
+        if (cleanTarget) {
+          setParticipants((prev) => prev.filter((p) => (p.identity || "").toLowerCase().trim() !== cleanTarget));
+        }
       } else if (type === "room_participants_updated") {
-        pollJunction();
+        pollJunction(true);
       }
     } catch (err) {
       console.error("Error processing room message", err);
     }
   }, [isLocalIdentity, isLocalParticipant, junctionId, user?.id, guest?.id, refreshUser, pollJunction, isPrivateRoom, mediaStream]);
+
+  const handleParticipantLeave = useCallback((ident: string) => {
+    const clean = ident.toLowerCase().trim();
+    if (!clean) return;
+    setParticipants((prev) => prev.filter((p) => (p.identity || "").toLowerCase().trim() !== clean));
+  }, []);
+
+  const handleLiveKitConnected = useCallback(() => {
+    isLiveKitConnectedRef.current = true;
+    setConnectionStep("connected");
+    setConnectionProgress(100);
+    setTimeout(() => {
+      setIsConnectingOverlayOpen(false);
+    }, 100);
+  }, []);
 
   const pollJunctionRef = useRef(pollJunction);
   pollJunctionRef.current = pollJunction;
@@ -1763,10 +1889,9 @@ export function JunctionRoom({
     hasJoinedSuccessfullyRef.current = false;
 
     async function loadAndJoinJunction() {
-      const startTime = Date.now();
       try {
-        setConnectionStep("auth");
-        setConnectionProgress(25);
+        setConnectionStep("allocating");
+        setConnectionProgress(35);
         setIsConnectingOverlayOpen(true);
 
         // Read stored session flags to survive page reloads
@@ -1779,14 +1904,27 @@ export function JunctionRoom({
         const participantColor = isRegistered && user ? user.color : (guest.color || "#6366F1");
         const participantCardBg = isRegistered && user ? user.cardBgColor : (guest.cardBgColor || "#465B73");
 
-        // Stage 1: Auth & credentials check (deliberate 500ms pacing)
-        setConnectionStep("auth");
-        setConnectionProgress(25);
-        setIsConnectingOverlayOpen(true);
-
         // Claim exclusive tab session across browser tabs
         const myTabId = getTabId();
         claimJunctionSession(junctionId, joinIdentity, junction?.name);
+
+        const selfParticipant: JunctionParticipant = {
+          id: isRegistered && user ? user.id : guest.id,
+          identity: joinIdentity,
+          name: joinDisplayName,
+          username: joinIdentity,
+          displayName: joinDisplayName,
+          avatar: participantAvatar,
+          color: participantColor,
+          cardBgColor: participantCardBg,
+          role: (storedRole as any) || "speaker",
+          userRole: myEffectiveRole,
+          isMuted: true, // Always start MUTED by default
+          isMutedByMod: storedModMuted,
+          isSpeaking: false,
+          joinedAt: localJoinedAtRef.current || Date.now(),
+          connectionQuality: "excellent",
+        };
 
         const authHeaders = await getAuthHeaders();
         const joinPromise = fetch(`/api/junctions/${junctionId}`, {
@@ -1795,21 +1933,7 @@ export function JunctionRoom({
           body: JSON.stringify({
             action: "join",
             tabSessionId: myTabId,
-            participant: {
-              id: isRegistered && user ? user.id : guest.id,
-              identity: joinIdentity,
-              name: joinDisplayName,
-              username: joinIdentity,
-              displayName: joinDisplayName,
-              avatar: participantAvatar,
-              color: participantColor,
-              cardBgColor: participantCardBg,
-              role: storedRole || "speaker",
-              isMuted: true, // Always start MUTED by default
-              isMutedByMod: storedModMuted,
-              isSpeaking: false,
-              connectionQuality: "excellent",
-            },
+            participant: selfParticipant,
           }),
         });
 
@@ -1820,23 +1944,15 @@ export function JunctionRoom({
             joinDisplayName
           )}&avatar=${encodeURIComponent(participantAvatar)}&color=${encodeURIComponent(
             participantColor
+          )}&cardBgColor=${encodeURIComponent(participantCardBg || "#465B73")}&userRole=${encodeURIComponent(
+            myEffectiveRole
+          )}&userId=${encodeURIComponent(
+            isRegistered && user ? user.id : guest?.id || ""
           )}&role=${encodeURIComponent(storedRole || "speaker")}`
         );
 
-        // Keep Stage 1 visible for a clear, deliberate 500ms
-        await new Promise((r) => setTimeout(r, 500));
-        if (!isMounted) return false;
-
-        // Stage 2: Allocating room seat and audio buffers
-        setConnectionStep("allocating");
-        setConnectionProgress(60);
-
-        // Await responses with guaranteed deliberate pacing (minimum 600ms)
-        const [joinRes, lkRes] = await Promise.all([
-          joinPromise,
-          tokenPromise,
-          new Promise((r) => setTimeout(r, 600)),
-        ]);
+        // Fetch seating and voice credentials in parallel without artificial delays!
+        const [joinRes, lkRes] = await Promise.all([joinPromise, tokenPromise]);
         if (!isMounted) return false;
 
         const [joinData, lkData] = await Promise.all([joinRes.json(), lkRes.json()]);
@@ -1857,7 +1973,7 @@ export function JunctionRoom({
           return false;
         }
 
-        // Stage 3: Handshaking encrypted WebRTC voice tunnel
+        // WebRTC Handshake
         setConnectionStep("handshaking");
         setConnectionProgress(85);
 
@@ -1869,8 +1985,11 @@ export function JunctionRoom({
         joinedJunctionIdRef.current = junctionId;
         hasJoinedSuccessfullyRef.current = true;
 
-        // Broadcast room participant update across both channels
-        broadcastRoomUpdate({ type: "room_participants_updated" });
+        // Broadcast join across both channels
+        broadcastRoomUpdate({
+          type: "room_participant_joined",
+          payload: { participant: selfParticipant },
+        });
 
         // Sync local state if participant is mod-muted or has specific role in DB or session
         const myParticipant = joinData.junction.participants?.find((p: any) => isLocalParticipant(p));
@@ -1887,19 +2006,16 @@ export function JunctionRoom({
 
         setChatMessages([]);
 
-        // Stage 3 deliberate duration: 700ms for encrypted WebRTC tunnel handshake
-        await new Promise((r) => setTimeout(r, 700));
-        if (!isMounted) return false;
-
-        // Stage 4: 100% Connected confirmation
-        setConnectionStep("connected");
-        setConnectionProgress(100);
-
-        // Keep 100% Connected confirmation visible for a solid 850ms so user clearly sees 100% verified status!
-        await new Promise((r) => setTimeout(r, 850));
-        if (isMounted) {
-          setIsConnectingOverlayOpen(false);
-        }
+        // Fast fallback timer: if LiveKit connects slower than 650ms or in test mode, ensure overlay closes
+        setTimeout(() => {
+          if (isMounted) {
+            setConnectionStep("connected");
+            setConnectionProgress(100);
+            setTimeout(() => {
+              if (isMounted) setIsConnectingOverlayOpen(false);
+            }, 100);
+          }
+        }, 650);
 
         return true;
       } catch (err: any) {
@@ -2754,21 +2870,25 @@ export function JunctionRoom({
   const handleLeave = async () => {
     if (isLeaving) return;
     setIsLeaving(true);
-    setExitStep("disconnecting");
+    setExitStep("ended");
 
-    // 1. Broadcast departure immediately across both channels so peers update UI right away
+    // 1. Broadcast departure immediately so peers update UI right away
+    broadcastRoomUpdate({
+      type: "room_participant_left",
+      payload: { identity: myIdentity },
+    });
     broadcastRoomUpdate({
       type: "room_participants_updated",
       payload: { action: "leave", identity: myIdentity },
     });
 
-    // 2. Hardware mic teardown: disable microphone & stop tracks so mic indicator immediately turns off
+    // 2. Immediate hardware mic teardown
     try {
       if (liveKitRoomRef.current) {
         const local = liveKitRoomRef.current.localParticipant;
         if (local) {
           try {
-            await local.setMicrophoneEnabled(false);
+            local.setMicrophoneEnabled(false).catch(() => {});
           } catch { }
           local.audioTrackPublications?.forEach((pub: any) => {
             try {
@@ -2778,25 +2898,23 @@ export function JunctionRoom({
             } catch { }
           });
         }
-        await liveKitRoomRef.current.disconnect();
       }
     } catch (e) {
       console.warn("LiveKit disconnect notice:", e);
     }
 
-    // 3. Stop browser MediaStream
     if (mediaStream) {
       mediaStream.getTracks().forEach((t) => t.stop());
     }
 
-    // 4. Remove all session storage keys
+    // 3. Remove all session storage keys
     if (typeof window !== "undefined") {
       sessionStorage.removeItem(`junction_mod_muted_${junctionId}`);
       sessionStorage.removeItem(`junction_role_${junctionId}`);
       sessionStorage.removeItem("yapclub_active_junction_id");
     }
 
-    // 5. Update cached lobby state in sessionStorage so leaving user disappears from lobby immediately
+    // 4. Update cached lobby state in sessionStorage so leaving user disappears from lobby immediately
     if (typeof window !== "undefined") {
       try {
         const cachedStr = sessionStorage.getItem("yapclub_cached_junctions");
@@ -2805,7 +2923,7 @@ export function JunctionRoom({
           const updatedList = list.map((j) => {
             if (j.id === junctionId) {
               const remaining = j.participants.filter(
-                (p) => { const pIdent = (p.identity || "").toLowerCase().trim(); const pName = (p.name || "").toLowerCase().trim(); const pUser = (p.username || "").toLowerCase().trim(); const pDisp = (p.displayName || "").toLowerCase().trim(); const myIdent = myIdentity.toLowerCase().trim(); const myDisp = myDisplayName.toLowerCase().trim(); return pIdent !== myIdent && pName !== myDisp && pUser !== myIdent && pDisp !== myDisp; }
+                (p) => (p.identity || "").toLowerCase().trim() !== myIdentity.toLowerCase().trim()
               );
               return { ...j, participants: remaining, currentCount: remaining.length, moderatorIdentity: remaining.length === 0 ? "" : j.moderatorIdentity };
             }
@@ -2821,45 +2939,40 @@ export function JunctionRoom({
     const myTabId = getTabId();
     releaseJunctionSession(junctionId);
 
-    const leavePayload = {
+    const leavePayload = JSON.stringify({
       action: "leave",
       identity: myIdentity,
       tabSessionId: myTabId,
-    };
+    });
 
-    // 6. Dispatch database leave request with keepalive guarantee
-    try {
-      const leavePromise = fetch(`/api/junctions/${junctionId}`, {
+    // 5. Fire-and-forget database leave request with keepalive guarantee
+    if (typeof navigator !== "undefined" && navigator.sendBeacon) {
+      navigator.sendBeacon(`/api/junctions/${junctionId}`, new Blob([leavePayload], { type: "application/json" }));
+    } else {
+      fetch(`/api/junctions/${junctionId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(leavePayload),
+        body: leavePayload,
         keepalive: true,
-      });
-
-      // Allow up to 3000ms for database leave response, but do NOT abort keepalive if it takes longer
-      // (keepalive ensures the browser finishes freeing the seat safely in the background)
-      await Promise.race([
-        leavePromise,
-        new Promise((r) => setTimeout(r, 3000)),
-      ]);
-    } catch (e: any) {
-      if (e?.name !== "AbortError") {
-        console.warn("Notice during leave dispatch:", e);
-      }
+      }).catch(() => {});
     }
 
-    // 7. Reassuring confirmation: show Clean End state
-    setExitStep("ended");
+    // 6. Disconnect LiveKit in background
+    if (liveKitRoomRef.current) {
+      try {
+        liveKitRoomRef.current.disconnect();
+      } catch {}
+    }
+
     if (typeof window !== "undefined") {
       window.dispatchEvent(new CustomEvent("yapclub_junction_left", { detail: { junctionId } }));
     }
-    await new Promise((r) => setTimeout(r, 600));
 
     // Clear joined refs so component won't re-join
     joinedJunctionIdRef.current = null;
     hasJoinedSuccessfullyRef.current = false;
 
-    // 8. Complete exit navigation
+    // 7. Instant exit navigation
     if (onLeave) {
       onLeave();
     } else {
@@ -2940,54 +3053,73 @@ export function JunctionRoom({
   // Compute speech & effective participants with useMemo unconditionally (React Rules of Hooks)
   const isLocalSpeaking = activeSpeakers.some((s) => isLocalIdentity(s));
   const isSomeoneSpeaking = activeSpeakers.length > 0;
-  const isLocalInParticipants = participants.some((p) => isLocalParticipant(p));
+  const isLocalInParticipants = participants.some((p) => isLocalParticipant(p)) || liveKitRemoteParticipants.some((p) => isLocalParticipant(p));
   const effectiveParticipants: JunctionParticipant[] = useMemo(() => {
-    let list: JunctionParticipant[];
+    const list: JunctionParticipant[] = [];
+
+    // 1. Add local participant if joined and not yet present in server list
     if (hasJoinedSuccessfullyRef.current && !isLocalInParticipants) {
-      list = [
-        {
-          id: isRegistered && user ? user.id : guest?.id || "local",
-          identity: myIdentity,
-          name: myDisplayName,
-          displayName: myDisplayName,
-          username: myIdentity,
-          avatar: user?.avatar || guest?.avatar || "zap",
-          color: user?.color || guest?.color || "#6366F1",
-          cardBgColor: user?.cardBgColor || guest?.cardBgColor || "#465B73",
-          role: "speaker",
-          userRole: myEffectiveRole,
-          isMuted: isMuted,
-          isMutedByMod: isMutedByMod,
-          isSpeaking: isLocalSpeaking,
-          joinedAt: localJoinedAtRef.current,
-          connectionQuality: "excellent",
-        },
-        ...participants,
-      ];
-    } else {
-      list = [...participants];
+      list.push({
+        id: isRegistered && user ? user.id : guest?.id || "local",
+        identity: myIdentity,
+        name: myDisplayName,
+        displayName: myDisplayName,
+        username: myIdentity,
+        avatar: user?.avatar || guest?.avatar || "zap",
+        color: user?.color || guest?.color || "#6366F1",
+        cardBgColor: user?.cardBgColor || guest?.cardBgColor || "#465B73",
+        role: "speaker",
+        userRole: myEffectiveRole,
+        isMuted: isMuted,
+        isMutedByMod: isMutedByMod,
+        isSpeaking: isLocalSpeaking,
+        joinedAt: localJoinedAtRef.current,
+        connectionQuality: "excellent",
+      });
     }
 
-    // Deduplicate by identity / id
-    const seen = new Set<string>();
-    const deduped: JunctionParticipant[] = [];
+    // 2. Add database participants
+    list.push(...participants);
+
+    // 3. Add LiveKit real-time remote participants (guarantees voice peers have immediate cards!)
+    list.push(...liveKitRemoteParticipants);
+
+    // 4. Deduplicate and merge by identity / id with richest field retention
+    const map = new Map<string, JunctionParticipant>();
     for (const p of list) {
       const key = (p.identity || p.id || p.name || "").toLowerCase().trim();
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      deduped.push(p);
+      if (!key) continue;
+      const existing = map.get(key);
+      if (!existing) {
+        map.set(key, p);
+      } else {
+        map.set(key, {
+          ...existing,
+          ...p,
+          isMuted: isLocalParticipant(p) ? isMuted : (p.isMuted !== undefined ? p.isMuted : existing.isMuted),
+          isMutedByMod: isLocalParticipant(p) ? isMutedByMod : (p.isMutedByMod ?? existing.isMutedByMod),
+          isSpeaking: isLocalParticipant(p) ? isLocalSpeaking : (activeSpeakers.some(s => s.toLowerCase() === key) || p.isSpeaking || existing.isSpeaking),
+          avatar: p.avatar && p.avatar !== "zap" ? p.avatar : existing.avatar,
+          cardBgColor: p.cardBgColor && p.cardBgColor !== "#465B73" ? p.cardBgColor : existing.cardBgColor,
+          userRole: p.userRole && p.userRole !== "user" ? p.userRole : existing.userRole,
+          joinedAt: existing.joinedAt || p.joinedAt || Date.now(),
+        });
+      }
     }
+
+    const deduped = Array.from(map.values());
 
     // Deterministic first-come first-served sequential sort by immutable arrival time with stable tie-breaker
     return deduped.sort((a, b) => {
-      const timeA = a.joinedAt || 0;
-      const timeB = b.joinedAt || 0;
+      const timeA = typeof a.joinedAt === "number" ? a.joinedAt : Number(a.joinedAt) || 0;
+      const timeB = typeof b.joinedAt === "number" ? b.joinedAt : Number(b.joinedAt) || 0;
       if (timeA !== timeB) return timeA - timeB;
       return (a.identity || a.name || "").localeCompare(b.identity || b.name || "");
     });
   }, [
     isLocalInParticipants,
     participants,
+    liveKitRemoteParticipants,
     myIdentity,
     myDisplayName,
     user,
@@ -2996,7 +3128,8 @@ export function JunctionRoom({
     isMuted,
     isMutedByMod,
     isLocalSpeaking,
-    isRegistered,
+    activeSpeakers,
+    isLocalParticipant,
   ]);
   const speakingParticipant = effectiveParticipants.find((p) => activeSpeakers.some((s) => s.toLowerCase() === p.identity?.toLowerCase())) || effectiveParticipants[0];
   const SEAT_SLOTS = Array.from({ length: junction?.maxParticipants || (isPrivateRoom ? 2 : 10) });
@@ -3124,17 +3257,18 @@ export function JunctionRoom({
             onRoomInstance={(r) => {
               liveKitRoomRef.current = r;
             }}
-            onConnected={() => {
-              isLiveKitConnectedRef.current = true;
-            }}
+            onConnected={handleLiveKitConnected}
           />
           <RoomConnectionOverlay />
           <LiveKitDataSync
             junctionId={junctionId}
+            localParticipantData={myParticipant}
             onMessage={onRoomMessage}
             publishRef={liveKitPublishRef}
             onSpeakingChange={setActiveSpeakers}
             onParticipantSync={pollJunction}
+            onRemoteParticipantsChange={setLiveKitRemoteParticipants}
+            onParticipantLeave={handleParticipantLeave}
             isMuted={isMuted}
             isMutedByMod={isMutedByMod}
             isDeafened={isDeafened}

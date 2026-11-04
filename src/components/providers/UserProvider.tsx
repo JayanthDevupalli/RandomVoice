@@ -86,29 +86,32 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
             });
           }
         } else {
-          // User is logged out. Ensure the guest profile in localStorage is a genuine guest persona,
-          // not contaminated with a registered member's username.
-          try {
-            const rawStored = localStorage.getItem("junction_guest_profile");
-            if (rawStored) {
-              const parsed = JSON.parse(rawStored);
-              if (parsed?.name) {
-                const { data: existingProf } = await supabase
-                  .from("profiles")
-                  .select("id")
-                  .ilike("username", parsed.name.trim())
-                  .maybeSingle();
+          // User is logged out / guest.
+          // Perform guest persona collision check asynchronously in the background so website entry is instantaneous!
+          setTimeout(async () => {
+            if (!mounted) return;
+            try {
+              const rawStored = localStorage.getItem("junction_guest_profile");
+              if (rawStored) {
+                const parsed = JSON.parse(rawStored);
+                if (parsed?.name) {
+                  const { data: existingProf } = await supabase
+                    .from("profiles")
+                    .select("id")
+                    .ilike("username", parsed.name.trim())
+                    .maybeSingle();
 
-                if (existingProf && mounted) {
-                  const newGuest = generateRandomGuest();
-                  localStorage.setItem("junction_guest_profile", JSON.stringify(newGuest));
-                  window.dispatchEvent(
-                    new CustomEvent("yapclub_guest_profile_sync", { detail: { guest: newGuest, onboarded: true } })
-                  );
+                  if (existingProf && mounted) {
+                    const newGuest = generateRandomGuest();
+                    localStorage.setItem("junction_guest_profile", JSON.stringify(newGuest));
+                    window.dispatchEvent(
+                      new CustomEvent("yapclub_guest_profile_sync", { detail: { guest: newGuest, onboarded: true } })
+                    );
+                  }
                 }
               }
-            }
-          } catch {}
+            } catch {}
+          }, 0);
         }
       } catch (err) {
         console.warn("Failed to check auth in UserProvider:", err);
