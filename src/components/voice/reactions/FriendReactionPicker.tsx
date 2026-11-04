@@ -61,24 +61,18 @@ export function FriendReactionPicker({
       className="z-50 select-none animate-in fade-in zoom-in-95 duration-200"
     >
       <div className="relative flex flex-col items-center">
-        {/* Floating Tooltip Label (fluid pill directly above on hover) */}
+        {/* Minimalist Floating Tooltip Label */}
         {hoveredItem && (
-          <div className="absolute -top-9 pointer-events-none z-20 animate-in fade-in zoom-in-95 slide-in-from-bottom-1 duration-150">
-            <div className="px-2.5 py-0.5 rounded-full text-[11px] font-medium tracking-wide backdrop-blur-2xl border border-white/15 bg-[#0E0F17]/95 text-slate-200 shadow-xl flex items-center gap-1.5 whitespace-nowrap">
+          <div className="absolute -top-8 sm:-top-9 pointer-events-none z-20 animate-in fade-in zoom-in-95 duration-100">
+            <div className="px-2.5 py-0.5 rounded-full text-[10px] font-medium tracking-wide backdrop-blur-xl border border-white/10 bg-[#0E0F17]/95 text-slate-300 shadow-md flex items-center gap-1 whitespace-nowrap">
               <span>{hoveredItem.emoji}</span>
               <span>{hoveredItem.label}</span>
             </div>
           </div>
         )}
 
-        {/* Fluid Rounded Pill Capsule Bar */}
-        <div className="relative flex items-center gap-1 sm:gap-1.5 px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-full bg-[#0E0F17]/92 backdrop-blur-3xl border border-white/15 shadow-[0_16px_50px_rgba(0,0,0,0.85),inset_0_1px_1px_rgba(255,255,255,0.18)] max-w-[94vw] sm:max-w-none overflow-x-auto [&::-webkit-scrollbar]:hidden">
-          {/* Subtle Ambient Backlight Glow Matching Hovered Color */}
-          <div
-            className="absolute -inset-1 rounded-full blur-xl opacity-20 transition-all duration-300 pointer-events-none"
-            style={{ backgroundColor: hoveredItem?.color || "transparent" }}
-          />
-
+        {/* Minimalist Emoji Bar: 9x2 compact grid on mobile, sleek single-row pill on desktop */}
+        <div className="relative grid grid-cols-9 gap-1 sm:flex sm:flex-row sm:items-center sm:gap-1 p-2 sm:px-3 sm:py-2.5 rounded-2xl sm:rounded-full bg-[#0E0F17]/90 backdrop-blur-2xl border border-white/10 shadow-[0_12px_36px_rgba(0,0,0,0.65)] max-w-[96vw] overflow-x-auto sm:overflow-visible [&::-webkit-scrollbar]:hidden">
           {FRIENDS_EMOJI_REACTIONS.map((item) => {
             const isHovered = hoveredItem?.id === item.id;
             const isTapped = activeTapId === item.id;
@@ -90,12 +84,12 @@ export function FriendReactionPicker({
                 onClick={() => handleClick(item)}
                 onMouseEnter={() => setHoveredItem(item)}
                 onMouseLeave={() => setHoveredItem(null)}
-                className={`relative w-9 h-9 sm:w-10 sm:h-10 rounded-full text-lg sm:text-xl flex items-center justify-center cursor-pointer select-none transition-all duration-150 ease-out hover:scale-120 hover:bg-white/10 active:scale-90 ${
-                  isTapped ? "scale-125 bg-white/20 shadow-[0_0_14px_rgba(255,255,255,0.3)] ring-2 ring-white/30" : ""
+                className={`relative w-8 h-8 sm:w-8.5 sm:h-8.5 rounded-full text-base sm:text-lg flex items-center justify-center cursor-pointer select-none transition-all duration-150 ease-out hover:scale-125 hover:bg-white/10 active:scale-95 ${
+                  isTapped ? "scale-115 bg-white/20 ring-1 ring-white/30" : ""
                 } ${isHovered ? "z-10" : ""}`}
                 title={item.label}
               >
-                <span className="transform transition-transform filter drop-shadow-[0_2px_4px_rgba(0,0,0,0.25)]">
+                <span className="select-none leading-none filter drop-shadow-sm transition-transform">
                   {item.emoji}
                 </span>
               </button>
@@ -106,4 +100,3 @@ export function FriendReactionPicker({
     </div>
   );
 }
-

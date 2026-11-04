@@ -148,19 +148,19 @@
 /* ==========================================================================
    Voice Room Floating Reactions - Fluid Continuous Physics
    Decoupled axes: continuous vertical ascent (zero stutter, zero stopping),
-   independent horizontal sinusoidal sway, and spring entrance pop.
+   independent horizontal sinusoidal sway, and calm 4.0s floating speed.
    ========================================================================== */
 
-/* 1. Continuous Vertical Rise & Fade (100% uninterrupted smooth ascent, zero stops) */
+/* 1. Continuous Vertical Rise & Fade (Calm, 4.0s smooth ascent, zero stops) */
 @keyframes reactionRiseFloat {
   0% {
     opacity: 0;
     transform: translateY(0);
   }
-  10% {
+  8% {
     opacity: 1;
   }
-  75% {
+  80% {
     opacity: 1;
   }
   100% {
@@ -170,20 +170,20 @@
 }
 
 .animate-reaction-rise {
-  animation: reactionRiseFloat 2.6s cubic-bezier(0.25, 0.1, 0.25, 1) forwards;
+  animation: reactionRiseFloat 4.0s cubic-bezier(0.25, 0.1, 0.25, 1) forwards;
   will-change: transform, opacity;
 }
 
-/* 2. Horizontal Air-Current Drifts (Smooth sinusoidal sways with natural tilt) */
+/* 2. Horizontal Air-Current Drifts (Gentle micro-sways tailored for stream corridor) */
 @keyframes reactionSwayLeft {
   0% {
     transform: translateX(0) rotate(0deg);
   }
   50% {
-    transform: translateX(-24px) rotate(-6deg);
+    transform: translateX(-12px) rotate(-4deg);
   }
   100% {
-    transform: translateX(-48px) rotate(-10deg);
+    transform: translateX(-18px) rotate(-6deg);
   }
 }
 
@@ -192,10 +192,10 @@
     transform: translateX(0) rotate(0deg);
   }
   50% {
-    transform: translateX(24px) rotate(6deg);
+    transform: translateX(12px) rotate(4deg);
   }
   100% {
-    transform: translateX(48px) rotate(10deg);
+    transform: translateX(18px) rotate(6deg);
   }
 }
 
@@ -204,10 +204,10 @@
     transform: translateX(0) rotate(0deg);
   }
   45% {
-    transform: translateX(-50px) rotate(-8deg);
+    transform: translateX(-18px) rotate(-5deg);
   }
   100% {
-    transform: translateX(-95px) rotate(-14deg);
+    transform: translateX(-26px) rotate(-8deg);
   }
 }
 
@@ -216,10 +216,10 @@
     transform: translateX(0) rotate(0deg);
   }
   45% {
-    transform: translateX(50px) rotate(8deg);
+    transform: translateX(18px) rotate(5deg);
   }
   100% {
-    transform: translateX(95px) rotate(14deg);
+    transform: translateX(26px) rotate(8deg);
   }
 }
 
@@ -228,10 +228,10 @@
     transform: translateX(0) rotate(0deg);
   }
   25% {
-    transform: translateX(-18px) rotate(-5deg);
+    transform: translateX(-10px) rotate(-3deg);
   }
   75% {
-    transform: translateX(18px) rotate(5deg);
+    transform: translateX(10px) rotate(3deg);
   }
   100% {
     transform: translateX(0) rotate(0deg);
@@ -243,10 +243,10 @@
     transform: translateX(0) rotate(0deg);
   }
   35% {
-    transform: translateX(8px) rotate(2deg);
+    transform: translateX(5px) rotate(2deg);
   }
   70% {
-    transform: translateX(-8px) rotate(-2deg);
+    transform: translateX(-5px) rotate(-2deg);
   }
   100% {
     transform: translateX(0) rotate(0deg);
@@ -254,33 +254,62 @@
 }
 
 .animate-reaction-sway-left {
-  animation: reactionSwayLeft 2.6s ease-in-out forwards;
+  animation: reactionSwayLeft 4.0s ease-in-out forwards;
   will-change: transform;
 }
 
 .animate-reaction-sway-right {
-  animation: reactionSwayRight 2.6s ease-in-out forwards;
+  animation: reactionSwayRight 4.0s ease-in-out forwards;
   will-change: transform;
 }
 
 .animate-reaction-sway-wide-left {
-  animation: reactionSwayWideLeft 2.6s ease-in-out forwards;
+  animation: reactionSwayWideLeft 4.0s ease-in-out forwards;
   will-change: transform;
 }
 
 .animate-reaction-sway-wide-right {
-  animation: reactionSwayWideRight 2.6s ease-in-out forwards;
+  animation: reactionSwayWideRight 4.0s ease-in-out forwards;
   will-change: transform;
 }
 
 .animate-reaction-sway-wave {
-  animation: reactionSwayWave 2.6s ease-in-out forwards;
+  animation: reactionSwayWave 4.0s ease-in-out forwards;
   will-change: transform;
 }
 
 .animate-reaction-sway-center {
-  animation: reactionSwayCenter 2.6s ease-in-out forwards;
+  animation: reactionSwayCenter 4.0s ease-in-out forwards;
   will-change: transform;
+}
+
+/* 3. Sender Pill Early Dissolve (fades out at ~35% height to keep upper screen clean) */
+@keyframes reactionSenderFade {
+  0% {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+  10% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  35% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0;
+    transform: scale(0.85);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.85);
+  }
+}
+
+.animate-sender-fade {
+  animation: reactionSenderFade 4.0s ease-out forwards;
+  will-change: transform, opacity;
 }
 
 /* Backward compatibility classes mapped to continuous float */
@@ -314,7 +343,7 @@
 .animate-reaction-meander-right,
 .animate-reaction-wide-right,
 .animate-reaction-wave {
-  animation: reactionRiseFloat 2.6s cubic-bezier(0.25, 0.1, 0.25, 1) forwards;
+  animation: reactionRiseFloat 4.0s cubic-bezier(0.25, 0.1, 0.25, 1) forwards;
   will-change: transform, opacity;
 }
 

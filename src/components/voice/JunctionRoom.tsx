@@ -748,6 +748,8 @@ export function JunctionRoom({
   const [inRoomPopups, setInRoomPopups] = useState<InRoomPopupMessage[]>([]);
 
   // Refs for real-time LiveKit handlers to avoid stale closures
+  const participantsRef = useRef(participants);
+  participantsRef.current = participants;
   const isChatOpenRef = useRef(isChatOpen);
   isChatOpenRef.current = isChatOpen;
   const rightPanelTabRef = useRef(rightPanelTab);
@@ -1451,6 +1453,9 @@ export function JunctionRoom({
           }
         });
       } else if (type === "reaction" && payload) {
+        const reactionId = payload.id;
+        if (!reactionId) return;
+
         const resolvedEmoji =
           payload.emoji ||
           FRIENDS_EMOJI_REACTIONS.find((er) => er.id === payload.iconName)?.emoji ||
@@ -1459,24 +1464,50 @@ export function JunctionRoom({
         recentReactionPositionsRef.current = recentReactionPositionsRef.current.filter(
           (p) => now - p.time < 1800
         );
-        const resolvedX = payload.x ?? 50;
+        // Anchor to dedicated right-hand stream corridor (78% to 92%)
+        const rawX = typeof payload.x === "number" ? payload.x : 84;
+        const resolvedX = Math.max(78, Math.min(92, rawX));
         recentReactionPositionsRef.current.push({ x: resolvedX, time: now });
 
-        const resolvedDuration = payload.duration || 2.6;
+        // Resolve accurate sender name for every peer
+        let resolvedSenderName = payload.senderName;
+        if (!resolvedSenderName || resolvedSenderName === "Friend") {
+          const senderIdent = payload.senderIdentity || payload.senderId;
+          if (senderIdent) {
+            const match = participantsRef.current.find(
+              (p) =>
+                p.identity?.toLowerCase() === senderIdent.toLowerCase() ||
+                p.username?.toLowerCase() === senderIdent.toLowerCase() ||
+                p.id?.toLowerCase() === senderIdent.toLowerCase()
+            );
+            if (match) {
+              resolvedSenderName = match.displayName || match.name || match.username;
+            }
+          }
+        }
+        resolvedSenderName = resolvedSenderName || "Friend";
+
+        const resolvedDuration = payload.duration || 4.0;
         const resolvedReaction: VectorReaction = {
           ...payload,
+          id: reactionId,
           emoji: resolvedEmoji,
           x: resolvedX,
           sway: payload.sway || "center",
           scale: 1.0,
           duration: resolvedDuration,
-          senderName: payload.senderName || "Friend",
+          senderName: resolvedSenderName,
+          hideSender: false,
         };
 
-        setReactions((prev) => [...prev.slice(-30), resolvedReaction]);
+        // Hard cap pool to 10 reactions max and prevent duplicate rendering from dual-channels
+        setReactions((prev) => {
+          if (prev.some((r) => r.id === reactionId)) return prev;
+          return [...prev.slice(-9), resolvedReaction];
+        });
 
         setTimeout(() => {
-          setReactions((prev) => prev.filter((r) => r.id !== payload.id));
+          setReactions((prev) => prev.filter((r) => r.id !== reactionId));
         }, (resolvedDuration + 0.3) * 1000);
       } else if (type === "clear_chat") {
         setChatMessages([]);
@@ -2633,6 +2664,10 @@ export function JunctionRoom({
         };
 
     const now = Date.now();
+    // 1. Client-side click throttle: min 280ms between reaction sends (prevents screen freeze & spam flooding)
+    if (now - lastReactionTimeRef.current < 280) {
+      return;
+    }
     lastReactionTimeRef.current = now;
     lastReactionIdRef.current = item.id;
 
@@ -2641,13 +2676,13 @@ export function JunctionRoom({
       (p) => now - p.time < 1800
     );
 
-    // Smart Anti-Collision Dispersal:
-    // When multiple reactions fly, distribute across open lanes so they never clumsily stack
-    const candidateLanes = [50, 42, 58, 34, 66, 26, 74, 46, 54, 38, 62];
-    let chosenX = 50;
+    // 2. Dedicated Right-Hand Stream Corridor (78% to 92%)
+    // Emojis stream on the right edge so participant/speaker cards remain 100% clean and visible
+    const candidateLanes = [84, 88, 80, 86, 82, 90];
+    let chosenX = 84;
 
     if (recentReactionPositionsRef.current.length === 0) {
-      chosenX = Math.round(50 + (Math.random() - 0.5) * 8);
+      chosenX = Math.round(84 + (Math.random() - 0.5) * 6);
     } else {
       let maxMinDist = -1;
       for (const lane of candidateLanes) {
@@ -2660,29 +2695,28 @@ export function JunctionRoom({
           chosenX = lane;
         }
       }
-      // Add organic micro-jitter (-2.5% to +2.5%)
-      chosenX = Math.round(Math.max(22, Math.min(78, chosenX + (Math.random() - 0.5) * 5)));
+      chosenX = Math.round(Math.max(78, Math.min(92, chosenX + (Math.random() - 0.5) * 3)));
     }
 
     recentReactionPositionsRef.current.push({ x: chosenX, time: now });
 
-    // Organic trajectory sway aligned with lane position
+    // 3. Gentle trajectory sway tailored to the right-side corridor
     type SwayType = "left" | "right" | "center" | "wide-left" | "wide-right" | "wave";
-    let sway: SwayType = "center";
-    if (chosenX < 40) {
-      sway = Math.random() > 0.4 ? "wide-left" : "left";
-    } else if (chosenX > 60) {
-      sway = Math.random() > 0.4 ? "wide-right" : "right";
-    } else if (chosenX <= 47) {
-      sway = Math.random() > 0.5 ? "left" : "wave";
-    } else if (chosenX >= 53) {
-      sway = Math.random() > 0.5 ? "right" : "wave";
-    } else {
-      const centerVariants: SwayType[] = ["center", "wave", "left", "right"];
-      sway = centerVariants[Math.floor(Math.random() * centerVariants.length)];
-    }
+    const sways: SwayType[] = ["center", "left", "right", "wave"];
+    const sway = sways[Math.floor(Math.random() * sways.length)];
 
-    const duration = +(2.4 + Math.random() * 0.5).toFixed(2);
+    // 4. Calm, relaxed floating velocity (3.8s to 4.3s duration)
+    const duration = +(3.8 + Math.random() * 0.5).toFixed(2);
+
+    // Resolve accurate sender name for local user
+    const resolvedSenderName =
+      myDisplayName ||
+      user?.displayName ||
+      user?.name ||
+      guest?.displayName ||
+      guest?.name ||
+      myIdentity ||
+      "Friend";
 
     const newReaction: VectorReaction = {
       id: "react_" + now + "_" + Math.random().toString(36).slice(2, 6),
@@ -2690,14 +2724,20 @@ export function JunctionRoom({
       emoji: item.emoji,
       label: item.label,
       color: item.color,
-      senderName: guest.name || "Friend",
+      senderName: resolvedSenderName,
+      senderIdentity: myIdentity,
       x: chosenX,
       sway,
       scale: 1.0,
       duration,
+      hideSender: false,
     };
 
-    setReactions((prev) => [...prev.slice(-30), newReaction]);
+    // 5. Hard concurrency cap: max 10 active reactions on screen to eliminate lag/freeze
+    setReactions((prev) => {
+      if (prev.some((r) => r.id === newReaction.id)) return prev;
+      return [...prev.slice(-9), newReaction];
+    });
     broadcastRoomUpdate({ type: "reaction", payload: newReaction });
 
     setTimeout(() => {

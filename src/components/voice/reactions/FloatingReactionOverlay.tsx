@@ -28,7 +28,7 @@ const FloatingReactionItem = memo(function FloatingReactionItem({
     swayClass = "animate-reaction-sway-wave";
   }
 
-  const animDuration = r.duration ? `${r.duration}s` : "2.6s";
+  const animDuration = r.duration ? `${r.duration}s` : "4.0s";
 
   return (
     // Layer 1: Continuous, uninterrupted vertical ascent (Y-axis only: zero stops, zero stutter)
@@ -37,7 +37,7 @@ const FloatingReactionItem = memo(function FloatingReactionItem({
         left: `${r.x}%`,
         animationDuration: animDuration,
       }}
-      className="absolute bottom-24 sm:bottom-28 -translate-x-1/2 flex flex-col items-center pointer-events-none select-none animate-reaction-rise"
+      className="absolute bottom-20 sm:bottom-24 -translate-x-1/2 flex flex-col items-center pointer-events-none select-none animate-reaction-rise"
     >
       {/* Layer 2: Fluid horizontal air-current drift */}
       <div
@@ -45,13 +45,15 @@ const FloatingReactionItem = memo(function FloatingReactionItem({
         className={`flex flex-col items-center pointer-events-none select-none ${swayClass}`}
       >
         {/* Reaction Emoji */}
-        <div className="text-3xl sm:text-4xl select-none filter drop-shadow-[0_2px_8px_rgba(0,0,0,0.35)]">
+        <div className="text-2xl sm:text-3xl select-none filter drop-shadow-[0_2px_8px_rgba(0,0,0,0.35)]">
           {r.emoji}
         </div>
 
-        {/* Sender Name Pill Directly Below the Emoji */}
+        {/* Sender Name Pill Directly Below Emoji - Consistently visible throughout flight */}
         {r.senderName && (
-          <span className="mt-1 px-2.5 py-0.5 rounded-full text-[10px] font-medium text-slate-200 bg-black/60 backdrop-blur-md border border-white/10 shadow-sm max-w-[120px] truncate tracking-wide pointer-events-none">
+          <span
+            className="mt-1 px-2 py-0.5 rounded-full text-[9px] sm:text-[10px] font-semibold text-slate-100 bg-black/70 backdrop-blur-md border border-white/15 shadow-sm max-w-[85px] sm:max-w-[105px] truncate tracking-wide pointer-events-none text-center"
+          >
             {r.senderName}
           </span>
         )}
