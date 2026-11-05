@@ -74,8 +74,12 @@ import {
   Zap,
   UserX,
   UserMinus,
-  ChevronLeft
+  Disc3,
+  Headphones,
 } from "lucide-react";
+import { MusicDeck } from "./music/MusicDeck";
+import { MusicModal } from "./music/MusicModal";
+import { RoomMusicState, MusicTrack } from "@/lib/music-types";
 import { RoleBadge, RoleAvatarDot } from "@/components/ui/RoleBadge";
 import {
   VectorReaction,
@@ -568,6 +572,22 @@ export function JunctionRoom({
 
   const [isDirectMessengerOpen, setIsDirectMessengerOpen] = useState(false);
   const [isLeaveModalOpen, setIsLeaveModalOpen] = useState(false);
+
+  // ─── Music & Media Mode State (The AUX Cord & Shared Jukebox) ───
+  const [musicState, setMusicState] = useState<RoomMusicState>({
+    isActive: false,
+    auxHolderIdentity: null,
+    auxHolderName: null,
+    auxStartedAt: null,
+    currentTrack: null,
+    isPlaying: false,
+    seekTime: 0,
+    lastSyncTime: Date.now(),
+  });
+  const musicStateRef = useRef(musicState);
+  musicStateRef.current = musicState;
+  const [isMusicModalOpen, setIsMusicModalOpen] = useState(false);
+  const [isMusicExpanded, setIsMusicExpanded] = useState(false);
 
   // Floating Minimized Draggable Pill State & Handlers
   const [minimizedPillPos, setMinimizedPillPos] = useState<{ x: number; y: number } | null>(null);
@@ -1115,6 +1135,154 @@ export function JunctionRoom({
       });
     }
   }, [broadcastRoomUpdate, myIdentity, myDisplayName, privateRecipient]);
+
+  // ─── Music Mode Action Handlers (The AUX Cord) ───
+  // Rule: When one person grabs AUX, others cannot change or control the music.
+  const handleClaimAux = useCallback(() => {
+    const currentHolder = musicStateRef.current.auxHolderIdentity;
+    if (currentHolder && currentHolder.toLowerCase().trim() !== myIdentity.toLowerCase().trim()) {
+      console.warn("AUX cord is already held by another participant");
+      return;
+    }
+
+    const update: RoomMusicState = {
+      ...musicStateRef.current,
+      auxHolderIdentity: myIdentity,
+      auxHolderName: myDisplayName,
+      auxStartedAt: Date.now(),
+    };
+    setMusicState(update);
+    broadcastRoomUpdate({
+      type: "music_aux_claim",
+      payload: { identity: myIdentity, name: myDisplayName },
+    });
+  }, [myIdentity, myDisplayName, broadcastRoomUpdate]);
+
+  const handleReleaseAux = useCallback(() => {
+    const currentHolder = musicStateRef.current.auxHolderIdentity;
+    if (currentHolder && currentHolder.toLowerCase().trim() !== myIdentity.toLowerCase().trim()) {
+      return;
+    }
+
+    const update: RoomMusicState = {
+      ...musicStateRef.current,
+      auxHolderIdentity: null,
+      auxHolderName: null,
+      auxStartedAt: null,
+    };
+    setMusicState(update);
+    broadcastRoomUpdate({
+      type: "music_aux_release",
+      payload: { previousIdentity: myIdentity },
+    });
+  }, [myIdentity, broadcastRoomUpdate]);
+
+  const handlePassAux = useCallback((targetIdentity: string, targetName: string) => {
+    const currentHolder = musicStateRef.current.auxHolderIdentity;
+    if (currentHolder && currentHolder.toLowerCase().trim() !== myIdentity.toLowerCase().trim()) {
+      return;
+    }
+
+    const update: RoomMusicState = {
+      ...musicStateRef.current,
+      auxHolderIdentity: targetIdentity,
+      auxHolderName: targetName,
+      auxStartedAt: Date.now(),
+    };
+    setMusicState(update);
+    broadcastRoomUpdate({
+      type: "music_aux_pass",
+      payload: { targetIdentity, targetName },
+    });
+  }, [myIdentity, broadcastRoomUpdate]);
+
+  const handleSelectMusicTrack = useCallback((track: MusicTrack) => {
+    const currentHolder = musicStateRef.current.auxHolderIdentity;
+    // When someone already grabbed AUX, others cannot change the music!
+    if (currentHolder && currentHolder.toLowerCase().trim() !== myIdentity.toLowerCase().trim()) {
+      console.warn("Only the AUX holder can change music");
+      return;
+    }
+
+    const activeHolderId = currentHolder || myIdentity;
+    const activeHolderName = musicStateRef.current.auxHolderName || myDisplayName;
+    const update: RoomMusicState = {
+      isActive: true,
+      auxHolderIdentity: activeHolderId,
+      auxHolderName: activeHolderName,
+      auxStartedAt: musicStateRef.current.auxStartedAt || Date.now(),
+      currentTrack: track,
+      isPlaying: true,
+      seekTime: 0,
+      lastSyncTime: Date.now(),
+    };
+    setMusicState(update);
+    broadcastRoomUpdate({
+      type: "music_track_change",
+      payload: { track, auxHolderIdentity: activeHolderId, auxHolderName: activeHolderName },
+    });
+  }, [myIdentity, myDisplayName, broadcastRoomUpdate]);
+
+  const handleToggleMusicPlayback = useCallback((isPlaying: boolean, currentSeek: number) => {
+    const currentHolder = musicStateRef.current.auxHolderIdentity;
+    if (currentHolder && currentHolder.toLowerCase().trim() !== myIdentity.toLowerCase().trim()) {
+      return;
+    }
+
+    const update: RoomMusicState = {
+      ...musicStateRef.current,
+      isPlaying,
+      seekTime: currentSeek,
+      lastSyncTime: Date.now(),
+    };
+    setMusicState(update);
+    broadcastRoomUpdate({
+      type: "music_playback_toggle",
+      payload: { isPlaying, seekTime: currentSeek, timestamp: Date.now(), senderIdentity: myIdentity },
+    });
+  }, [myIdentity, broadcastRoomUpdate]);
+
+  const handleSeekMusic = useCallback((seekTime: number) => {
+    const currentHolder = musicStateRef.current.auxHolderIdentity;
+    if (currentHolder && currentHolder.toLowerCase().trim() !== myIdentity.toLowerCase().trim()) {
+      return;
+    }
+
+    const update: RoomMusicState = {
+      ...musicStateRef.current,
+      seekTime,
+      lastSyncTime: Date.now(),
+    };
+    setMusicState(update);
+    broadcastRoomUpdate({
+      type: "music_seek",
+      payload: { seekTime, timestamp: Date.now(), senderIdentity: myIdentity },
+    });
+  }, [myIdentity, broadcastRoomUpdate]);
+
+  const handleStopMusic = useCallback(() => {
+    const currentHolder = musicStateRef.current.auxHolderIdentity;
+    if (currentHolder && currentHolder.toLowerCase().trim() !== myIdentity.toLowerCase().trim()) {
+      return;
+    }
+
+    const update: RoomMusicState = {
+      isActive: false,
+      auxHolderIdentity: null,
+      auxHolderName: null,
+      auxStartedAt: null,
+      currentTrack: null,
+      isPlaying: false,
+      seekTime: 0,
+      lastSyncTime: Date.now(),
+    };
+    setMusicState(update);
+    setIsMusicExpanded(false);
+    broadcastRoomUpdate({
+      type: "music_stop",
+      payload: { senderIdentity: myIdentity },
+    });
+  }, [myIdentity, broadcastRoomUpdate]);
 
   // Profile Preview Modal State
   const [previewParticipant, setPreviewParticipant] = useState<JunctionParticipant | null>(null);
@@ -1746,16 +1914,123 @@ export function JunctionRoom({
         }
       } else if (type === "room_participants_updated") {
         pollJunction(true);
+      } else if (type === "music_sync_request") {
+        if (musicStateRef.current.isActive && isLocalIdentity(musicStateRef.current.auxHolderIdentity || "")) {
+          broadcastRoomUpdate({
+            type: "music_sync",
+            payload: musicStateRef.current,
+          });
+        }
+      } else if (type === "music_sync" && payload) {
+        setMusicState({
+          ...payload,
+          lastSyncTime: Date.now(),
+        });
+      } else if (type === "music_aux_claim" && payload) {
+        // Only allow claiming if AUX is free or claimed by current holder
+        const currentHolder = musicStateRef.current.auxHolderIdentity;
+        if (!currentHolder || currentHolder.toLowerCase().trim() === payload.identity?.toLowerCase().trim()) {
+          setMusicState((prev) => ({
+            ...prev,
+            auxHolderIdentity: payload.identity,
+            auxHolderName: payload.name,
+            auxStartedAt: Date.now(),
+          }));
+        }
+      } else if (type === "music_aux_release" && payload) {
+        const currentHolder = musicStateRef.current.auxHolderIdentity;
+        if (!currentHolder || !payload.previousIdentity || currentHolder.toLowerCase().trim() === payload.previousIdentity.toLowerCase().trim()) {
+          setMusicState((prev) => ({
+            ...prev,
+            auxHolderIdentity: null,
+            auxHolderName: null,
+            auxStartedAt: null,
+          }));
+        }
+      } else if (type === "music_aux_pass" && payload) {
+        setMusicState((prev) => ({
+          ...prev,
+          auxHolderIdentity: payload.targetIdentity,
+          auxHolderName: payload.targetName,
+          auxStartedAt: Date.now(),
+        }));
+      } else if (type === "music_track_change" && payload) {
+        const currentHolder = musicStateRef.current.auxHolderIdentity;
+        // If someone grabbed AUX, others cannot change the music!
+        if (currentHolder && payload.auxHolderIdentity && currentHolder.toLowerCase().trim() !== payload.auxHolderIdentity.toLowerCase().trim()) {
+          console.warn("Ignored unauthorized music change from non-AUX holder");
+        } else {
+          setMusicState((prev) => ({
+            ...prev,
+            isActive: true,
+            auxHolderIdentity: payload.auxHolderIdentity || prev.auxHolderIdentity,
+            auxHolderName: payload.auxHolderName || prev.auxHolderName,
+            currentTrack: payload.track,
+            isPlaying: true,
+            seekTime: 0,
+            lastSyncTime: Date.now(),
+          }));
+        }
+      } else if (type === "music_playback_toggle" && payload) {
+        const currentHolder = musicStateRef.current.auxHolderIdentity;
+        if (currentHolder && payload.senderIdentity && currentHolder.toLowerCase().trim() !== payload.senderIdentity.toLowerCase().trim()) {
+          console.warn("Ignored playback toggle from non-AUX holder");
+        } else {
+          setMusicState((prev) => ({
+            ...prev,
+            isPlaying: payload.isPlaying,
+            seekTime: payload.seekTime,
+            lastSyncTime: payload.timestamp || Date.now(),
+          }));
+        }
+      } else if (type === "music_seek" && payload) {
+        const currentHolder = musicStateRef.current.auxHolderIdentity;
+        if (currentHolder && payload.senderIdentity && currentHolder.toLowerCase().trim() !== payload.senderIdentity.toLowerCase().trim()) {
+          console.warn("Ignored seek from non-AUX holder");
+        } else {
+          setMusicState((prev) => ({
+            ...prev,
+            seekTime: payload.seekTime,
+            lastSyncTime: payload.timestamp || Date.now(),
+          }));
+        }
+      } else if (type === "music_stop") {
+        const currentHolder = musicStateRef.current.auxHolderIdentity;
+        if (currentHolder && payload?.senderIdentity && currentHolder.toLowerCase().trim() !== payload.senderIdentity.toLowerCase().trim()) {
+          console.warn("Ignored stop from non-AUX holder");
+        } else {
+          setMusicState({
+            isActive: false,
+            auxHolderIdentity: null,
+            auxHolderName: null,
+            auxStartedAt: null,
+            currentTrack: null,
+            isPlaying: false,
+            seekTime: 0,
+            lastSyncTime: Date.now(),
+          });
+          setIsMusicExpanded(false);
+        }
       }
     } catch (err) {
       console.error("Error processing room message", err);
     }
-  }, [isLocalIdentity, isLocalParticipant, junctionId, user?.id, guest?.id, refreshUser, pollJunction, isPrivateRoom, mediaStream]);
+  }, [isLocalIdentity, isLocalParticipant, junctionId, user?.id, guest?.id, refreshUser, pollJunction, isPrivateRoom, mediaStream, broadcastRoomUpdate]);
 
   const handleParticipantLeave = useCallback((ident: string) => {
     const clean = ident.toLowerCase().trim();
     if (!clean) return;
     setParticipants((prev) => prev.filter((p) => (p.identity || "").toLowerCase().trim() !== clean));
+
+    // Release AUX cord if the participant who left was holding it
+    if (musicStateRef.current.auxHolderIdentity?.toLowerCase().trim() === clean) {
+      setMusicState((prev) => ({
+        ...prev,
+        auxHolderIdentity: null,
+        auxHolderName: null,
+        auxStartedAt: null,
+      }));
+    }
   }, []);
 
   const handleLiveKitConnected = useCallback(() => {
@@ -1764,8 +2039,10 @@ export function JunctionRoom({
     setConnectionProgress(100);
     setTimeout(() => {
       setIsConnectingOverlayOpen(false);
+      // Ask peers for current room music state upon connecting
+      broadcastRoomUpdate({ type: "music_sync_request" });
     }, 100);
-  }, []);
+  }, [broadcastRoomUpdate]);
 
   const pollJunctionRef = useRef(pollJunction);
   pollJunctionRef.current = pollJunction;
@@ -3579,17 +3856,8 @@ export function JunctionRoom({
             {/* Top Room Header - Lightweight & Fluid */}
             <div className="w-full max-w-7xl mx-auto px-3.5 sm:px-6 pt-3.5 sm:pt-3 pb-2 sm:pb-3">
               <div className="flex items-center justify-between gap-2 sm:gap-4">
-                {/* Left: Back / Title / Occupant Count / Role in one compact, clean row */}
+                {/* Left: Title / Occupant Count / Role in one compact, clean row */}
                 <div className="min-w-0 flex items-center gap-2 sm:gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setIsLeaveModalOpen(true)}
-                    className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 flex items-center justify-center text-slate-400 hover:text-white transition-all cursor-pointer shrink-0 active:scale-95"
-                    title="Leave or Minimize Room"
-                  >
-                    <ChevronLeft size={16} />
-                  </button>
-
                   <div className="min-w-0 flex flex-col justify-center">
                     <div className="min-w-0 flex items-center gap-1.5 sm:gap-2 flex-wrap">
                       <h1 className="text-sm sm:text-base font-bold text-white tracking-tight truncate drop-shadow-sm leading-tight">
@@ -3803,6 +4071,23 @@ export function JunctionRoom({
                     </button>
                   )}
 
+                  {/* Music Mode Trigger Button (Beside Share) */}
+                  <button
+                    type="button"
+                    onClick={() => setIsMusicModalOpen(true)}
+                    className={`w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95 relative ${
+                      musicState.isActive
+                        ? "bg-indigo-600 text-white border border-indigo-400/50 shadow-[0_0_15px_rgba(99,102,241,0.5)]"
+                        : "bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10"
+                    }`}
+                    title={musicState.isActive ? `Music: ${musicState.currentTrack?.title || "Playing"}` : "Music & Media (AUX Cord)"}
+                  >
+                    <Headphones size={15} className={musicState.isPlaying ? "text-white animate-pulse" : "text-indigo-400"} />
+                    {musicState.isActive && (
+                      <span className="absolute top-0 right-0 w-2.5 h-2.5 bg-emerald-400 rounded-full ring-2 ring-[#0E0F17] animate-pulse" />
+                    )}
+                  </button>
+
                   {/* Invite Friends */}
                   <button
                     type="button"
@@ -3825,6 +4110,21 @@ export function JunctionRoom({
                 </div>
               </div>
             </div>
+
+            {/* Synchronized Music & Media Stage (The AUX Cord) */}
+            <MusicDeck
+              musicState={musicState}
+              currentIdentity={myIdentity}
+              currentName={myDisplayName}
+              isExpanded={isMusicExpanded}
+              onToggleExpand={() => setIsMusicExpanded((prev) => !prev)}
+              onOpenMusicModal={() => setIsMusicModalOpen(true)}
+              onTogglePlayback={handleToggleMusicPlayback}
+              onSeek={handleSeekMusic}
+              onReleaseAux={handleReleaseAux}
+              onClaimAux={handleClaimAux}
+              onStopMusic={handleStopMusic}
+            />
 
             {/* Dynamic Seat Stage Grid */}
             <div className={`w-full mx-auto px-2.5 sm:px-6 my-auto py-2 sm:py-4 ${SEAT_SLOTS.length <= 2 ? "max-w-2xl" :
@@ -3857,6 +4157,20 @@ export function JunctionRoom({
                     const participantAvatar = (isLocal && user?.avatar)
                       ? user.avatar
                       : (participant.avatar || "zap");
+
+                    const isParticipantAuxHolder = Boolean(
+                      musicState.isActive &&
+                      musicState.auxHolderIdentity && (
+                        (participant.identity && participant.identity.toLowerCase().trim() === musicState.auxHolderIdentity.toLowerCase().trim()) ||
+                        (participant.username && participant.username.toLowerCase().trim() === musicState.auxHolderIdentity.toLowerCase().trim()) ||
+                        (participant.name && participant.name.toLowerCase().trim() === musicState.auxHolderIdentity.toLowerCase().trim())
+                      )
+                    );
+                    const isListeningToMusic = Boolean(
+                      musicState.isActive &&
+                      musicState.isPlaying &&
+                      !(isLocal && isDeafened)
+                    );
 
                     return (
                       <div
@@ -3896,6 +4210,26 @@ export function JunctionRoom({
                               <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
                               <span>#{index + 1}</span>
                             </div>
+
+                            {/* Small Icon on Top of User Card when Listening to Music */}
+                            {isListeningToMusic && (
+                              isParticipantAuxHolder ? (
+                                <span
+                                  className="h-5 px-1.5 rounded-full bg-indigo-500/25 border border-indigo-400/40 text-indigo-300 text-[9px] font-bold flex items-center gap-1 shadow-xs backdrop-blur-md shrink-0 animate-pulse"
+                                  title={`AUX DJ — Playing: ${musicState.currentTrack?.title || "Music"}`}
+                                >
+                                  <Headphones size={10} className="text-indigo-400" />
+                                  <span className="text-[8px] font-black uppercase text-indigo-200">AUX</span>
+                                </span>
+                              ) : (
+                                <span
+                                  className="w-5 h-5 rounded-full bg-indigo-500/20 border border-indigo-400/30 text-indigo-300 flex items-center justify-center shadow-xs backdrop-blur-md shrink-0"
+                                  title={`Listening to ${musicState.currentTrack?.title || "Music"}`}
+                                >
+                                  <Headphones size={10} className="text-indigo-300 animate-pulse" />
+                                </span>
+                              )
+                            )}
                             {!isLocal && (() => {
                               const pIdent = participant.identity || "";
                               const pName = participant.name || "";
@@ -5664,6 +5998,21 @@ export function JunctionRoom({
           </div>
         </div>
       )}
+
+      {/* Music & Media Mode Modal */}
+      <MusicModal
+        isOpen={isMusicModalOpen}
+        onClose={() => setIsMusicModalOpen(false)}
+        musicState={musicState}
+        participants={participants}
+        currentIdentity={myIdentity}
+        currentName={myDisplayName}
+        onClaimAux={handleClaimAux}
+        onReleaseAux={handleReleaseAux}
+        onPassAux={handlePassAux}
+        onSelectTrack={handleSelectMusicTrack}
+        onStopMusic={handleStopMusic}
+      />
     </>
   );
 }
