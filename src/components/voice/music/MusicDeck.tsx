@@ -35,6 +35,7 @@ interface MusicDeckProps {
   onReleaseAux: () => void;
   onClaimAux: () => void;
   onStopMusic: () => void;
+  onHeartbeatSync?: (liveSeek: number) => void;
 }
 
 declare global {
@@ -56,6 +57,7 @@ export function MusicDeck({
   onReleaseAux,
   onClaimAux,
   onStopMusic,
+  onHeartbeatSync,
 }: MusicDeckProps) {
   // Local volume control (0-100) and mute
   const [localVolume, setLocalVolume] = useState<number>(() => {
@@ -73,6 +75,8 @@ export function MusicDeck({
   const iframeContainerRef = useRef<HTMLDivElement>(null);
   const onTogglePlaybackRef = useRef(onTogglePlayback);
   onTogglePlaybackRef.current = onTogglePlayback;
+  const onHeartbeatSyncRef = useRef(onHeartbeatSync);
+  onHeartbeatSyncRef.current = onHeartbeatSync;
   const [isPlayerReady, setIsPlayerReady] = useState(false);
   const [currentTime, setCurrentTime] = useState<number>(0);
   const [duration, setDuration] = useState<number>(0);
@@ -171,14 +175,26 @@ export function MusicDeck({
               target.setVolume(isLocalMuted ? 0 : localVolume);
               if (isLocalMuted) target.mute();
 
-              // Calculate expected current time from room state
-              const now = Date.now();
-              const elapsed = musicState.isPlaying
-                ? (now - (musicState.lastSyncTime || now)) / 1000
-                : 0;
-              const expectedTime = Math.max(0, (musicState.seekTime || 0) + elapsed);
+              const isLive = Boolean(musicState.currentTrack?.isLive);
 
-              target.seekTo(expectedTime, true);
+              if (isLive) {
+                // Live streams: Snap directly to the live broadcast head
+                try {
+                  const dur = target.getDuration?.() || 0;
+                  if (dur > 0) {
+                    target.seekTo(dur, true);
+                  }
+                } catch {}
+              } else {
+                // Recorded videos/tracks: Calculate expected playback time from room state
+                const now = Date.now();
+                const elapsed = musicState.isPlaying
+                  ? (now - (musicState.lastSyncTime || now)) / 1000
+                  : 0;
+                const expectedTime = Math.max(0, (musicState.seekTime || 0) + elapsed);
+                target.seekTo(expectedTime, true);
+              }
+
               if (musicState.isPlaying) {
                 target.playVideo();
               } else {
@@ -190,10 +206,21 @@ export function MusicDeck({
               } catch {}
             },
             onStateChange: (event: any) => {
-              // YT.PlayerState.ENDED = 0
-              if (event.data === 0 && isAuxHolder) {
+              if (!isAuxHolder) return;
+              // YT.PlayerState: 0=ENDED, 1=PLAYING, 2=PAUSED
+              const state = event.data;
+              const target = event.target;
+              const currentPos = target?.getCurrentTime?.() || 0;
+
+              if (state === 0) {
                 // Track finished!
                 onTogglePlaybackRef.current(false, 0);
+              } else if (state === 1 && !musicState.isPlaying) {
+                // AUX holder started playback via YouTube native controls
+                onTogglePlaybackRef.current(true, currentPos);
+              } else if (state === 2 && musicState.isPlaying) {
+                // AUX holder paused playback via YouTube native controls
+                onTogglePlaybackRef.current(false, currentPos);
               }
             },
           },
@@ -222,47 +249,84 @@ export function MusicDeck({
     if (!playerRef.current || !isPlayerReady) return;
 
     try {
-      const now = Date.now();
-      const elapsed = musicState.isPlaying
-        ? (now - (musicState.lastSyncTime || now)) / 1000
-        : 0;
-      const expectedTime = Math.max(0, (musicState.seekTime || 0) + elapsed);
-
       if (musicState.isPlaying) {
         playerRef.current.playVideo();
       } else {
         playerRef.current.pauseVideo();
       }
 
-      // Check drift: if local player drifts by > 2.5s from expectedTime, gently seek
-      const actualTime = playerRef.current.getCurrentTime?.() || 0;
-      if (Math.abs(actualTime - expectedTime) > 2.5 && !musicState.currentTrack?.isLive) {
-        playerRef.current.seekTo(expectedTime, true);
+      // Only adjust seeking for listeners to keep them locked to the AUX holder
+      if (!isAuxHolder && !musicState.currentTrack?.isLive) {
+        const now = Date.now();
+        const elapsed = musicState.isPlaying
+          ? (now - (musicState.lastSyncTime || now)) / 1000
+          : 0;
+        const expectedTime = Math.max(0, (musicState.seekTime || 0) + elapsed);
+        const actualTime = playerRef.current.getCurrentTime?.() || 0;
+
+        // If drift is over 1.2s, gently snap to expectedTime
+        if (Math.abs(actualTime - expectedTime) > 1.2) {
+          playerRef.current.seekTo(expectedTime, true);
+        }
       }
     } catch (e) {}
-  }, [musicState.isPlaying, musicState.seekTime, musicState.lastSyncTime, isPlayerReady, musicState.currentTrack?.isLive]);
+  }, [musicState.isPlaying, musicState.seekTime, musicState.lastSyncTime, isPlayerReady, isAuxHolder, musicState.currentTrack?.isLive]);
 
-  // Track progress ticker
+  // Periodic heartbeat broadcast from AUX holder to all peers (every 3 seconds)
+  useEffect(() => {
+    if (!isAuxHolder || !musicState.isPlaying || !isPlayerReady) return;
+
+    const heartbeatTimer = setInterval(() => {
+      if (playerRef.current && typeof playerRef.current.getCurrentTime === "function") {
+        try {
+          const liveSec = playerRef.current.getCurrentTime() || 0;
+          onHeartbeatSyncRef.current?.(liveSec);
+        } catch {}
+      }
+    }, 3000);
+
+    return () => clearInterval(heartbeatTimer);
+  }, [isAuxHolder, musicState.isPlaying, isPlayerReady]);
+
+  // Track progress ticker & continuous listener drift correction (every 500ms)
   useEffect(() => {
     if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
 
     if (musicState.isPlaying && isPlayerReady) {
       progressIntervalRef.current = setInterval(() => {
-        if (playerRef.current) {
-          try {
-            const current = playerRef.current.getCurrentTime() || 0;
-            const dur = playerRef.current.getDuration() || 0;
-            setCurrentTime(current);
-            if (dur > 0) setDuration(dur);
-          } catch {}
-        }
+        if (!playerRef.current) return;
+        try {
+          const current = playerRef.current.getCurrentTime?.() || 0;
+          const dur = playerRef.current.getDuration?.() || 0;
+          setCurrentTime(current);
+          if (dur > 0) setDuration(dur);
+
+          // Listeners: Check drift to stay in lock-step
+          if (!isAuxHolder) {
+            const isLive = Boolean(musicState.currentTrack?.isLive);
+            if (isLive) {
+              // Live streams: snap if listener falls behind the live edge by > 4s
+              if (dur > 0 && dur - current > 4) {
+                playerRef.current.seekTo(dur, true);
+              }
+            } else {
+              // Recorded videos: snap if listener drifts by > 1.2s
+              const now = Date.now();
+              const elapsed = (now - (musicState.lastSyncTime || now)) / 1000;
+              const expectedTime = Math.max(0, (musicState.seekTime || 0) + elapsed);
+              if (Math.abs(current - expectedTime) > 1.2) {
+                playerRef.current.seekTo(expectedTime, true);
+              }
+            }
+          }
+        } catch {}
       }, 500);
     }
 
     return () => {
       if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
     };
-  }, [musicState.isPlaying, isPlayerReady]);
+  }, [musicState.isPlaying, musicState.lastSyncTime, musicState.seekTime, musicState.currentTrack?.isLive, isPlayerReady, isAuxHolder]);
 
   const formatSeconds = (sec: number) => {
     if (!sec || isNaN(sec) || sec <= 0) return "0:00";
@@ -296,13 +360,13 @@ export function MusicDeck({
   const track = musicState.currentTrack;
 
   return (
-    <div className="w-full transition-all duration-300">
+    <div className="w-full transition-all duration-300 relative z-30">
       {/* ─── SINGLE STABLE YOUTUBE PLAYER CONTAINER ─── */}
       {/* Kept permanently mounted in DOM to prevent React removeChild collision with YouTube Iframe API */}
       <div
         className={
           isExpanded
-            ? "relative w-full max-w-4xl mx-auto mt-3 sm:mt-4 mb-3 bg-[#0B0C12]/95 border border-indigo-500/25 rounded-3xl overflow-hidden shadow-[0_12px_45px_rgba(0,0,0,0.7)] block"
+            ? "relative z-30 w-full max-w-4xl mx-auto mt-3 sm:mt-4 mb-3 bg-[#0B0C12]/95 border border-indigo-500/25 rounded-3xl overflow-hidden shadow-[0_12px_45px_rgba(0,0,0,0.7)] block"
             : "w-0 h-0 overflow-hidden opacity-0 pointer-events-none absolute -z-50"
         }
       >
@@ -446,8 +510,8 @@ export function MusicDeck({
       {/* ─── COMPACT MINI-BAR / ADAPTIVE AUDIO DECK ─── */}
       {/* Visible only when isExpanded is FALSE */}
       {!isExpanded && (
-        <div className="w-full max-w-7xl mx-auto px-3.5 sm:px-6 mt-3 sm:mt-4 mb-2.5">
-          <div className="relative bg-[#0E1017]/95 backdrop-blur-2xl border border-white/10 rounded-2xl sm:rounded-full px-2.5 py-1.5 sm:px-4 sm:py-2 shadow-[0_8px_30px_rgba(0,0,0,0.6)] flex items-center justify-between gap-2 sm:gap-3">
+        <div className="relative z-30 w-full max-w-7xl mx-auto px-3.5 sm:px-6 mt-3 sm:mt-4 mb-2.5">
+          <div className="relative z-30 bg-[#0E1017]/95 backdrop-blur-2xl border border-white/10 rounded-2xl sm:rounded-full px-2.5 py-1.5 sm:px-4 sm:py-2 shadow-[0_8px_30px_rgba(0,0,0,0.6)] flex items-center justify-between gap-2 sm:gap-3">
             {/* Track Info (Clickable to open Music Modal) */}
             <div
               onClick={onOpenMusicModal}
@@ -514,7 +578,7 @@ export function MusicDeck({
               )}
 
               {/* Personal Volume Dropdown */}
-              <div className="relative">
+              <div className="relative z-40">
                 <button
                   onClick={() => setIsVolumeSliderOpen(!isVolumeSliderOpen)}
                   className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white transition-all flex items-center justify-center shrink-0 cursor-pointer"

@@ -1284,6 +1284,27 @@ export function JunctionRoom({
     });
   }, [myIdentity, broadcastRoomUpdate]);
 
+  const handleHeartbeatSync = useCallback((liveSeek: number) => {
+    const currentHolder = musicStateRef.current.auxHolderIdentity;
+    if (!currentHolder || currentHolder.toLowerCase().trim() !== myIdentity.toLowerCase().trim()) {
+      return;
+    }
+    // Update local state without triggering full React re-render during smooth playback
+    musicStateRef.current = {
+      ...musicStateRef.current,
+      seekTime: liveSeek,
+      lastSyncTime: Date.now(),
+    };
+    broadcastRoomUpdate({
+      type: "music_sync_heartbeat",
+      payload: {
+        seekTime: liveSeek,
+        timestamp: Date.now(),
+        senderIdentity: myIdentity,
+      },
+    });
+  }, [myIdentity, broadcastRoomUpdate]);
+
   // Profile Preview Modal State
   const [previewParticipant, setPreviewParticipant] = useState<JunctionParticipant | null>(null);
 
@@ -1916,16 +1937,36 @@ export function JunctionRoom({
         pollJunction(true);
       } else if (type === "music_sync_request") {
         if (musicStateRef.current.isActive && isLocalIdentity(musicStateRef.current.auxHolderIdentity || "")) {
+          const now = Date.now();
+          const elapsed = musicStateRef.current.isPlaying
+            ? (now - (musicStateRef.current.lastSyncTime || now)) / 1000
+            : 0;
+          const liveSeek = Math.max(0, (musicStateRef.current.seekTime || 0) + elapsed);
+
           broadcastRoomUpdate({
             type: "music_sync",
-            payload: musicStateRef.current,
+            payload: {
+              ...musicStateRef.current,
+              seekTime: liveSeek,
+              lastSyncTime: now,
+            },
           });
         }
       } else if (type === "music_sync" && payload) {
         setMusicState({
           ...payload,
-          lastSyncTime: Date.now(),
+          lastSyncTime: payload.lastSyncTime || Date.now(),
         });
+      } else if (type === "music_sync_heartbeat" && payload) {
+        const currentHolder = musicStateRef.current.auxHolderIdentity;
+        // Verify heartbeat is from AUX holder
+        if (currentHolder && payload.senderIdentity && currentHolder.toLowerCase().trim() === payload.senderIdentity.toLowerCase().trim()) {
+          setMusicState((prev) => ({
+            ...prev,
+            seekTime: payload.seekTime,
+            lastSyncTime: payload.timestamp || Date.now(),
+          }));
+        }
       } else if (type === "music_aux_claim" && payload) {
         // Only allow claiming if AUX is free or claimed by current holder
         const currentHolder = musicStateRef.current.auxHolderIdentity;
@@ -4112,22 +4153,25 @@ export function JunctionRoom({
             </div>
 
             {/* Synchronized Music & Media Stage (The AUX Cord) */}
-            <MusicDeck
-              musicState={musicState}
-              currentIdentity={myIdentity}
-              currentName={myDisplayName}
-              isExpanded={isMusicExpanded}
-              onToggleExpand={() => setIsMusicExpanded((prev) => !prev)}
-              onOpenMusicModal={() => setIsMusicModalOpen(true)}
-              onTogglePlayback={handleToggleMusicPlayback}
-              onSeek={handleSeekMusic}
-              onReleaseAux={handleReleaseAux}
-              onClaimAux={handleClaimAux}
-              onStopMusic={handleStopMusic}
-            />
+            <div className="relative z-30">
+              <MusicDeck
+                musicState={musicState}
+                currentIdentity={myIdentity}
+                currentName={myDisplayName}
+                isExpanded={isMusicExpanded}
+                onToggleExpand={() => setIsMusicExpanded((prev) => !prev)}
+                onOpenMusicModal={() => setIsMusicModalOpen(true)}
+                onTogglePlayback={handleToggleMusicPlayback}
+                onSeek={handleSeekMusic}
+                onReleaseAux={handleReleaseAux}
+                onClaimAux={handleClaimAux}
+                onStopMusic={handleStopMusic}
+                onHeartbeatSync={handleHeartbeatSync}
+              />
+            </div>
 
             {/* Dynamic Seat Stage Grid */}
-            <div className={`w-full mx-auto px-2.5 sm:px-6 my-auto py-2 sm:py-4 ${SEAT_SLOTS.length <= 2 ? "max-w-2xl" :
+            <div className={`relative z-10 w-full mx-auto px-2.5 sm:px-6 my-auto py-2 sm:py-4 ${SEAT_SLOTS.length <= 2 ? "max-w-2xl" :
                 SEAT_SLOTS.length <= 4 ? "max-w-3xl" :
                   SEAT_SLOTS.length <= 6 ? "max-w-4xl" :
                     SEAT_SLOTS.length <= 8 ? "max-w-5xl" :
