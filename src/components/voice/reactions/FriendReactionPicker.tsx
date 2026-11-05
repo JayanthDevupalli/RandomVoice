@@ -26,6 +26,7 @@ export function FriendReactionPicker({
   useEffect(() => {
     if (!isOpen) return;
 
+
     const handlePointerDown = (e: MouseEvent | TouchEvent) => {
       if (
         containerRef.current &&
@@ -84,9 +85,8 @@ export function FriendReactionPicker({
                 onClick={() => handleClick(item)}
                 onMouseEnter={() => setHoveredItem(item)}
                 onMouseLeave={() => setHoveredItem(null)}
-                className={`relative w-8 h-8 sm:w-8.5 sm:h-8.5 rounded-full text-base sm:text-lg flex items-center justify-center cursor-pointer select-none transition-all duration-150 ease-out hover:scale-125 hover:bg-white/10 active:scale-95 ${
-                  isTapped ? "scale-115 bg-white/20 ring-1 ring-white/30" : ""
-                } ${isHovered ? "z-10" : ""}`}
+                className={`relative w-8 h-8 sm:w-8.5 sm:h-8.5 rounded-full text-base sm:text-lg flex items-center justify-center cursor-pointer select-none transition-all duration-150 ease-out hover:scale-125 hover:bg-white/10 active:scale-95 ${isTapped ? "scale-115 bg-white/20 ring-1 ring-white/30" : ""
+                  } ${isHovered ? "z-10" : ""}`}
                 title={item.label}
               >
                 <span className="select-none leading-none filter drop-shadow-sm transition-transform">
