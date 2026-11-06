@@ -88,12 +88,13 @@ export const JunctionCard = React.memo(
       ? (CITY_FAMOUS_MAP[junction.name] || junction.description?.replace(/^Famous for /i, ""))
       : junction.description;
 
-    const participantCount = junction.participants?.length ?? junction.currentCount;
+    const participantCount = typeof junction.currentCount === "number" ? junction.currentCount : (junction.participants?.length || 0);
+    const displayedParticipants = participantCount === 0 ? [] : (junction.participants || []);
     const maxCapacity = junction.maxParticipants || (isPublic ? 10 : 2);
     const isFull = participantCount >= maxCapacity;
     const isLocked = junction.isLocked;
     const isCreator = guest?.name === junction.creatorId;
-    const firstParticipant = junction.participants?.[0];
+    const firstParticipant = displayedParticipants[0];
 
     const handleDelete = async (e: React.MouseEvent) => {
       e.preventDefault();
@@ -199,10 +200,10 @@ export const JunctionCard = React.memo(
         <div className="relative z-10 pt-2.5 border-t border-white/[0.05] flex items-center justify-between gap-2">
           {/* Left: Active Facepile or Clean Open Stage */}
           <div className="flex items-center min-w-0 pointer-events-none">
-            {participantCount > 0 ? (
+            {participantCount > 0 && displayedParticipants.length > 0 ? (
               <div className="flex items-center gap-2 min-w-0">
                 <div className="flex items-center -space-x-1.5 shrink-0">
-                  {junction.participants.slice(0, 3).map((p, idx) => {
+                  {displayedParticipants.slice(0, 3).map((p, idx) => {
                     const userRole = p.userRole;
                     const badgeRole = userRole && userRole !== "user" ? userRole : undefined;
                     return (
@@ -221,9 +222,9 @@ export const JunctionCard = React.memo(
                       </div>
                     );
                   })}
-                  {junction.participants.length > 3 && (
+                  {displayedParticipants.length > 3 && (
                     <div className="w-6 h-6 rounded-full bg-white/[0.08] text-[9px] font-bold text-slate-300 flex items-center justify-center ring-2 ring-[#12131A] shrink-0">
-                      +{junction.participants.length - 3}
+                      +{displayedParticipants.length - 3}
                     </div>
                   )}
                 </div>

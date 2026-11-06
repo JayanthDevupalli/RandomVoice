@@ -49,10 +49,13 @@ export function generateRandomGuest(): GuestUser {
   const randomPreset = AVATAR_PRESETS[Math.floor(Math.random() * AVATAR_PRESETS.length)];
   const randomColor = COLOR_PALETTES[Math.floor(Math.random() * COLOR_PALETTES.length)];
   const id = "guest_" + Math.random().toString(36).substring(2, 9);
+  const name = generateRandomNickname();
 
   return {
     id,
-    name: generateRandomNickname(),
+    name,
+    displayName: name,
+    username: id,
     avatar: randomPreset.id,
     color: randomColor,
   };

@@ -91,12 +91,14 @@ export function useGuestUser() {
     setGuest((prev) => {
       const current = prev || readStoredGuest() || generateRandomGuest();
       const cleanName = updates.name !== undefined ? updates.name.trim() : current.name;
+      const guestId = current.id || "guest_" + Math.random().toString(36).substring(2, 9);
       const updated: GuestUser = {
         ...current,
+        id: guestId,
         ...updates,
         name: cleanName,
         displayName: updates.displayName !== undefined ? updates.displayName.trim() : cleanName,
-        username: updates.username !== undefined ? updates.username.trim() : cleanName.toLowerCase().replace(/[^a-z0-9_]/g, ""),
+        username: updates.username !== undefined ? updates.username.trim() : (current.username || guestId),
       };
 
       try {
@@ -113,12 +115,14 @@ export function useGuestUser() {
   const completeOnboarding = useCallback((personaUpdates?: Partial<GuestUser>) => {
     const current = readStoredGuest() || guest || generateRandomGuest();
     const cleanName = personaUpdates?.name ? personaUpdates.name.trim() : (current.name || "Guest");
+    const guestId = current.id || "guest_" + Math.random().toString(36).substring(2, 9);
     const updated: GuestUser = {
       ...current,
+      id: guestId,
       ...personaUpdates,
       name: cleanName,
       displayName: cleanName,
-      username: cleanName.toLowerCase().replace(/[^a-z0-9_]/g, ""),
+      username: personaUpdates?.username?.trim() || current.username || guestId,
       avatar: personaUpdates?.avatar || current.avatar || "zap",
       color: personaUpdates?.color || current.color || "#6366F1",
     };

@@ -342,7 +342,7 @@ function getGlobalPresenceChannel() {
   return globalPresenceChannel;
 }
 
-export async function broadcastGlobalPresence(junctionId: string, count: number, totalOnline?: number) {
+export async function broadcastGlobalPresence(junctionId: string, count: number, totalOnline?: number, participants?: any[]) {
   try {
     const ch = getGlobalPresenceChannel();
     await ch.send({
@@ -352,6 +352,7 @@ export async function broadcastGlobalPresence(junctionId: string, count: number,
         junctionId,
         count,
         totalOnline,
+        participants: participants || [],
         timestamp: Date.now(),
       },
     });
@@ -363,12 +364,12 @@ export async function broadcastGlobalPresence(junctionId: string, count: number,
 // ─── Sync current_count helper ──────────────────────────────────────────────
 
 async function syncCount(junctionId: string) {
-  const { count } = await supabase
+  const { data: currentRows, count } = await supabase
     .from("junction_participants")
-    .select("*", { count: "exact", head: true })
+    .select("id, identity, name, avatar, color, card_bg_color, role, is_speaking")
     .eq("junction_id", junctionId);
 
-  const newCount = count || 0;
+  const newCount = count !== null && count !== undefined ? count : (currentRows ? currentRows.length : 0);
   const updatePayload: Record<string, any> = { current_count: newCount };
   if (newCount === 0) {
     updatePayload.moderator_identity = "";
@@ -387,7 +388,18 @@ async function syncCount(junctionId: string) {
     .from("junction_participants")
     .select("*", { count: "exact", head: true });
 
-  broadcastGlobalPresence(junctionId, newCount, totalOnline ?? newCount).catch(() => {});
+  const participantsList = (currentRows || []).map((r) => ({
+    id: r.id,
+    identity: r.identity,
+    name: r.name,
+    avatar: r.avatar,
+    color: r.color,
+    cardBgColor: r.card_bg_color,
+    role: r.role,
+    isSpeaking: r.is_speaking,
+  }));
+
+  broadcastGlobalPresence(junctionId, newCount, totalOnline ?? newCount, participantsList).catch(() => {});
 }
 
 // ─── Touch Heartbeat to Keep Active Participants Fresh ─────────────────────────

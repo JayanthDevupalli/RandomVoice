@@ -134,36 +134,30 @@ export async function POST(
         if (!participant.id || !participant.id.startsWith("guest_")) {
           participant.id = "guest_" + (participant.id || Date.now().toString());
         }
-        // 2. Guest can NEVER have elevated platform roles
+        // 2. Identity for guests MUST be unique. Use the unique participant.id
+        // to prevent collisions between multiple guests who share the same display name
+        participant.identity = participant.id;
+        participant.username = participant.id;
+        // 3. Guest can NEVER have elevated platform roles
         participant.userRole = "user";
-        // 3. Prevent guest from spoofing a registered user's username or identity
-        if (participant.identity || participant.name) {
-          const cleanIdent = (participant.identity || "").trim().toLowerCase();
+        // 4. Ensure name is clean
+        if (!participant.name) {
+          participant.name = generateRandomNickname();
+          participant.displayName = participant.name;
+        }
+        // 5. Prevent guest from spoofing a registered user's display name
+        if (participant.name) {
           const cleanName = (participant.name || "").trim().toLowerCase();
-          let matched = false;
-          if (cleanIdent) {
-            const { data: existingUser } = await sbAdmin
-              .from("profiles")
-              .select("id")
-              .ilike("username", cleanIdent)
-              .maybeSingle();
-            if (existingUser) matched = true;
-          }
-          if (!matched && cleanName) {
-            const { data: existingUser } = await sbAdmin
-              .from("profiles")
-              .select("id")
-              .ilike("username", cleanName)
-              .maybeSingle();
-            if (existingUser) matched = true;
-          }
-          if (matched) {
-            // A registered user owns this name/identity. An unauthenticated guest must be assigned a clean guest nickname.
+          const { data: existingUser } = await sbAdmin
+            .from("profiles")
+            .select("id")
+            .ilike("username", cleanName)
+            .maybeSingle();
+          if (existingUser) {
+            // A registered user owns this name. An unauthenticated guest must be assigned a clean guest nickname.
             const guestNickname = generateRandomNickname();
             participant.name = guestNickname;
             participant.displayName = guestNickname;
-            participant.identity = "guest_" + Math.random().toString(36).substring(2, 9);
-            participant.username = participant.identity;
           }
         }
       }

@@ -504,8 +504,9 @@ export function JunctionRoom({
   const { user, isRegistered, refreshUser } = useUser();
   const { unreadCount } = useUnreadMessages();
 
-  const myIdentity = (isRegistered && user?.username) || guest?.username || guest?.name || "Guest";
-  const myDisplayName = user?.displayName || user?.name || guest?.displayName || guest?.name || myIdentity;
+  const myId = (isRegistered && user?.id) || guest?.id || "guest_" + Date.now();
+  const myIdentity = (isRegistered && user?.username) ? user.username : myId;
+  const myDisplayName = (isRegistered && (user?.displayName || user?.name)) || guest?.displayName || guest?.name || "Guest";
 
   const [localRoleOverride, setLocalRoleOverride] = useState<UserRole | null>(null);
   const localRoleOverrideRef = useRef<UserRole | null>(null);
@@ -515,15 +516,16 @@ export function JunctionRoom({
     if (!target) return false;
     const clean = target.trim().toLowerCase();
     const myIdClean = (myIdentity || "").trim().toLowerCase();
-    return Boolean(myIdClean && clean === myIdClean);
-  }, [myIdentity]);
+    const myUniqueIdClean = (myId || "").trim().toLowerCase();
+    return Boolean((myIdClean && clean === myIdClean) || (myUniqueIdClean && clean === myUniqueIdClean));
+  }, [myIdentity, myId]);
 
   const isLocalParticipant = useCallback((p?: { id?: string; identity?: string; name?: string; username?: string; displayName?: string } | null) => {
     if (!p) return false;
+    if (p.id && myId && p.id.toLowerCase().trim() === myId.toLowerCase().trim()) return true;
     if (p.identity && isLocalIdentity(p.identity)) return true;
-    if (p.username && isLocalIdentity(p.username)) return true;
     return false;
-  }, [isLocalIdentity]);
+  }, [isLocalIdentity, myId]);
 
   const joinedJunctionIdRef = useRef<string | null>(null);
   const isJoiningRef = useRef<boolean>(false);
@@ -938,7 +940,7 @@ export function JunctionRoom({
     // 2. Broadcast departure to current room peers so user card disappears right away
     broadcastRoomUpdate({
       type: "room_participant_left",
-      payload: { identity: myIdentity },
+      payload: { identity: myIdentity, id: myId },
     });
 
     if (typeof window !== "undefined") {
@@ -951,6 +953,7 @@ export function JunctionRoom({
     const leavePayload = JSON.stringify({
       action: "leave",
       identity: myIdentity,
+      participantId: myId,
       tabSessionId: myTabId,
     });
     if (typeof navigator !== "undefined" && navigator.sendBeacon) {
@@ -1557,11 +1560,11 @@ export function JunctionRoom({
             const localFromPrev = prev.find((p) => isLocalParticipant(p));
             const originalJoinedAt = localFromPrev?.joinedAt || localJoinedAtRef.current || Date.now();
             const selfParticipant: JunctionParticipant = localFromPrev || {
-              id: isRegistered && user ? user.id : guest?.id || "local",
+              id: myId,
               identity: myIdentity,
               name: myDisplayName,
               displayName: myDisplayName,
-              username: myIdentity,
+              username: (isRegistered && user?.username) || guest?.username || myIdentity,
               avatar: user?.avatar || guest?.avatar || "zap",
               color: user?.color || guest?.color || "#6366F1",
               cardBgColor: user?.cardBgColor || guest?.cardBgColor || "#465B73",
@@ -1586,10 +1589,10 @@ export function JunctionRoom({
                     action: "join",
                     tabSessionId: getTabId(),
                     participant: {
-                      id: isRegistered && user ? user.id : guest?.id || "local",
+                      id: myId,
                       identity: myIdentity,
                       name: myDisplayName,
-                      username: myIdentity,
+                      username: (isRegistered && user?.username) || guest?.username || myIdentity,
                       displayName: myDisplayName,
                       avatar: user?.avatar || guest?.avatar || "zap",
                       color: user?.color || guest?.color || "#6366F1",
@@ -1919,19 +1922,40 @@ export function JunctionRoom({
       } else if (type === "room_participant_joined" && payload?.participant) {
         const newP: JunctionParticipant = payload.participant;
         const cleanTarget = (newP.identity || "").toLowerCase().trim();
-        if (cleanTarget) {
+        const cleanId = (newP.id || "").toLowerCase().trim();
+        if (cleanTarget || cleanId) {
           setParticipants((prev) => {
-            const exists = prev.some((p) => (p.identity || "").toLowerCase().trim() === cleanTarget);
+            const exists = prev.some((p) => {
+              const pIdent = (p.identity || "").toLowerCase().trim();
+              const pId = (p.id || "").toLowerCase().trim();
+              return (cleanTarget && pIdent === cleanTarget) || (cleanId && pId === cleanId);
+            });
             if (exists) {
-              return prev.map((p) => (p.identity || "").toLowerCase().trim() === cleanTarget ? { ...p, ...newP } : p);
+              return prev.map((p) => {
+                const pIdent = (p.identity || "").toLowerCase().trim();
+                const pId = (p.id || "").toLowerCase().trim();
+                if ((cleanTarget && pIdent === cleanTarget) || (cleanId && pId === cleanId)) {
+                  return { ...p, ...newP };
+                }
+                return p;
+              });
             }
             return [...prev, newP];
           });
         }
-      } else if (type === "room_participant_left" && payload?.identity) {
+      } else if (type === "room_participant_left" && payload) {
         const cleanTarget = (payload.identity || "").toLowerCase().trim();
-        if (cleanTarget) {
-          setParticipants((prev) => prev.filter((p) => (p.identity || "").toLowerCase().trim() !== cleanTarget));
+        const cleanId = (payload.id || "").toLowerCase().trim();
+        if (cleanTarget || cleanId) {
+          setParticipants((prev) =>
+            prev.filter((p) => {
+              const pIdent = (p.identity || "").toLowerCase().trim();
+              const pId = (p.id || "").toLowerCase().trim();
+              if (cleanTarget && pIdent === cleanTarget) return false;
+              if (cleanId && pId === cleanId) return false;
+              return true;
+            })
+          );
         }
       } else if (type === "room_participants_updated") {
         pollJunction(true);
@@ -2061,7 +2085,13 @@ export function JunctionRoom({
   const handleParticipantLeave = useCallback((ident: string) => {
     const clean = ident.toLowerCase().trim();
     if (!clean) return;
-    setParticipants((prev) => prev.filter((p) => (p.identity || "").toLowerCase().trim() !== clean));
+    setParticipants((prev) =>
+      prev.filter((p) => {
+        const pIdent = (p.identity || "").toLowerCase().trim();
+        const pId = (p.id || "").toLowerCase().trim();
+        return pIdent !== clean && pId !== clean;
+      })
+    );
 
     // Release AUX cord if the participant who left was holding it
     if (musicStateRef.current.auxHolderIdentity?.toLowerCase().trim() === clean) {
@@ -2216,8 +2246,8 @@ export function JunctionRoom({
         const storedModMuted = typeof window !== "undefined" && sessionStorage.getItem(`junction_mod_muted_${junctionId}`) === "true";
         const storedRole = typeof window !== "undefined" ? sessionStorage.getItem(`junction_role_${junctionId}`) : null;
 
-        const joinIdentity = (isRegistered && user?.username) || guest?.username || guest?.name || "Guest";
-        const joinDisplayName = (isRegistered && (user?.displayName || user?.name)) || guest?.displayName || guest?.name || joinIdentity;
+        const joinIdentity = myIdentity;
+        const joinDisplayName = myDisplayName;
         const participantAvatar = isRegistered && user ? user.avatar : (guest.avatar || "zap");
         const participantColor = isRegistered && user ? user.color : (guest.color || "#6366F1");
         const participantCardBg = isRegistered && user ? user.cardBgColor : (guest.cardBgColor || "#465B73");
@@ -2227,10 +2257,10 @@ export function JunctionRoom({
         claimJunctionSession(junctionId, joinIdentity, junction?.name);
 
         const selfParticipant: JunctionParticipant = {
-          id: isRegistered && user ? user.id : guest.id,
+          id: myId,
           identity: joinIdentity,
           name: joinDisplayName,
-          username: joinIdentity,
+          username: (isRegistered && user?.username) || guest?.username || myIdentity,
           displayName: joinDisplayName,
           avatar: participantAvatar,
           color: participantColor,
@@ -2265,7 +2295,7 @@ export function JunctionRoom({
           )}&cardBgColor=${encodeURIComponent(participantCardBg || "#465B73")}&userRole=${encodeURIComponent(
             myEffectiveRole
           )}&userId=${encodeURIComponent(
-            isRegistered && user ? user.id : guest?.id || ""
+            myId
           )}&role=${encodeURIComponent(storedRole || "speaker")}`
         );
 
@@ -3188,116 +3218,132 @@ export function JunctionRoom({
   const handleLeave = async () => {
     if (isLeaving) return;
     setIsLeaving(true);
-    setExitStep("ended");
+    setExitStep("disconnecting");
 
-    // 1. Broadcast departure immediately so peers update UI right away
-    broadcastRoomUpdate({
-      type: "room_participant_left",
-      payload: { identity: myIdentity },
-    });
-    broadcastRoomUpdate({
-      type: "room_participants_updated",
-      payload: { action: "leave", identity: myIdentity },
-    });
-
-    // 2. Immediate hardware mic teardown
     try {
-      if (liveKitRoomRef.current) {
-        const local = liveKitRoomRef.current.localParticipant;
-        if (local) {
-          try {
-            local.setMicrophoneEnabled(false).catch(() => {});
-          } catch { }
-          local.audioTrackPublications?.forEach((pub: any) => {
+      // 1. Broadcast departure immediately so peers update UI right away
+      broadcastRoomUpdate({
+        type: "room_participant_left",
+        payload: { identity: myIdentity, id: myId },
+      });
+      broadcastRoomUpdate({
+        type: "room_participants_updated",
+        payload: { action: "leave", identity: myIdentity, id: myId },
+      });
+
+      // 2. Immediate hardware mic teardown
+      try {
+        if (liveKitRoomRef.current) {
+          const local = liveKitRoomRef.current.localParticipant;
+          if (local) {
             try {
-              pub.track?.stop();
-              pub.audioTrack?.stop();
-              local.unpublishTrack(pub.track).catch(() => { });
+              await local.setMicrophoneEnabled(false);
             } catch { }
-          });
+            local.audioTrackPublications?.forEach((pub: any) => {
+              try {
+                pub.track?.stop();
+                pub.audioTrack?.stop();
+                local.unpublishTrack(pub.track).catch(() => { });
+              } catch { }
+            });
+          }
         }
+      } catch (e) {
+        console.warn("LiveKit disconnect notice:", e);
       }
-    } catch (e) {
-      console.warn("LiveKit disconnect notice:", e);
-    }
 
-    if (mediaStream) {
-      mediaStream.getTracks().forEach((t) => t.stop());
-    }
+      if (mediaStream) {
+        mediaStream.getTracks().forEach((t) => t.stop());
+      }
 
-    // 3. Remove all session storage keys
-    if (typeof window !== "undefined") {
-      sessionStorage.removeItem(`junction_mod_muted_${junctionId}`);
-      sessionStorage.removeItem(`junction_role_${junctionId}`);
-      sessionStorage.removeItem("yapclub_active_junction_id");
-    }
+      // 3. Remove all session storage keys
+      if (typeof window !== "undefined") {
+        sessionStorage.removeItem(`junction_mod_muted_${junctionId}`);
+        sessionStorage.removeItem(`junction_role_${junctionId}`);
+        sessionStorage.removeItem("yapclub_active_junction_id");
+      }
 
-    // 4. Update cached lobby state in sessionStorage so leaving user disappears from lobby immediately
-    if (typeof window !== "undefined") {
+      const myTabId = getTabId();
+      releaseJunctionSession(junctionId);
+
+      const leavePayloadObj = {
+        action: "leave",
+        identity: myIdentity,
+        participantId: myId,
+        userId: user?.id,
+        tabSessionId: myTabId,
+      };
+      const leavePayload = JSON.stringify(leavePayloadObj);
+
+      // 4. Await database leave request so the server removes the participant completely
       try {
-        const cachedStr = sessionStorage.getItem("yapclub_cached_junctions");
-        if (cachedStr) {
-          const list: Junction[] = JSON.parse(cachedStr);
-          const updatedList = list.map((j) => {
-            if (j.id === junctionId) {
-              const remaining = j.participants.filter(
-                (p) => (p.identity || "").toLowerCase().trim() !== myIdentity.toLowerCase().trim()
-              );
-              return { ...j, participants: remaining, currentCount: remaining.length, moderatorIdentity: remaining.length === 0 ? "" : j.moderatorIdentity };
-            }
-            return j;
-          });
-          sessionStorage.setItem("yapclub_cached_junctions", JSON.stringify(updatedList));
-          const newTotal = updatedList.reduce((acc, it) => acc + (it.participants?.length || it.currentCount || 0), 0);
-          sessionStorage.setItem("yapclub_cached_total_online", String(newTotal));
-        }
-      } catch { }
+        await fetch(`/api/junctions/${junctionId}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: leavePayload,
+        });
+      } catch (e) {
+        console.warn("Failed to complete leave API call:", e);
+      }
+
+      // Fallback keepalive beacon
+      if (typeof navigator !== "undefined" && navigator.sendBeacon) {
+        navigator.sendBeacon(`/api/junctions/${junctionId}`, new Blob([leavePayload], { type: "application/json" }));
+      }
+
+      // 5. Cleanly disconnect LiveKit
+      if (liveKitRoomRef.current) {
+        try {
+          await liveKitRoomRef.current.disconnect();
+        } catch {}
+      }
+
+      // 6. Update cached lobby state in sessionStorage so leaving user disappears from lobby immediately
+      if (typeof window !== "undefined") {
+        try {
+          const cachedStr = sessionStorage.getItem("yapclub_cached_junctions");
+          if (cachedStr) {
+            const list: Junction[] = JSON.parse(cachedStr);
+            const updatedList = list.map((j) => {
+              if (j.id === junctionId) {
+                const remaining = (j.participants || []).filter(
+                  (p) =>
+                    (p.identity || "").toLowerCase().trim() !== myIdentity.toLowerCase().trim() &&
+                    (p.id || "").toLowerCase().trim() !== (myId || "").toLowerCase().trim()
+                );
+                return { ...j, participants: remaining, currentCount: remaining.length, moderatorIdentity: remaining.length === 0 ? "" : j.moderatorIdentity };
+              }
+              return j;
+            });
+            sessionStorage.setItem("yapclub_cached_junctions", JSON.stringify(updatedList));
+            const newTotal = updatedList.reduce((acc, it) => acc + (it.participants?.length || it.currentCount || 0), 0);
+            sessionStorage.setItem("yapclub_cached_total_online", String(newTotal));
+          }
+        } catch { }
+      }
+
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("yapclub_junction_left", { detail: { junctionId } }));
+      }
+
+      // Clear joined refs so component won't re-join
+      joinedJunctionIdRef.current = null;
+      hasJoinedSuccessfullyRef.current = false;
+
+      setExitStep("ended");
+      // Brief pause to allow user to see "Disconnected" state
+      await new Promise((r) => setTimeout(r, 200));
+
+      // 7. Finally trigger navigation / exit
+      if (onLeave) {
+        onLeave();
+      } else {
+        router.replace("/junctions");
+      }
+    } finally {
+      setIsLeaving(false);
+      setIsLeaveModalOpen(false);
     }
-
-    const myTabId = getTabId();
-    releaseJunctionSession(junctionId);
-
-    const leavePayload = JSON.stringify({
-      action: "leave",
-      identity: myIdentity,
-      tabSessionId: myTabId,
-    });
-
-    // 5. Fire-and-forget database leave request with keepalive guarantee
-    if (typeof navigator !== "undefined" && navigator.sendBeacon) {
-      navigator.sendBeacon(`/api/junctions/${junctionId}`, new Blob([leavePayload], { type: "application/json" }));
-    } else {
-      fetch(`/api/junctions/${junctionId}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: leavePayload,
-        keepalive: true,
-      }).catch(() => {});
-    }
-
-    // 6. Disconnect LiveKit in background
-    if (liveKitRoomRef.current) {
-      try {
-        liveKitRoomRef.current.disconnect();
-      } catch {}
-    }
-
-    if (typeof window !== "undefined") {
-      window.dispatchEvent(new CustomEvent("yapclub_junction_left", { detail: { junctionId } }));
-    }
-
-    // Clear joined refs so component won't re-join
-    joinedJunctionIdRef.current = null;
-    hasJoinedSuccessfullyRef.current = false;
-
-    // 7. Instant exit navigation
-    if (onLeave) {
-      onLeave();
-    } else {
-      router.replace("/junctions");
-    }
-
-    setIsLeaving(false);
   };
 
   const handleMinimize = () => {
@@ -3378,11 +3424,11 @@ export function JunctionRoom({
     // 1. Add local participant if joined and not yet present in server list
     if (hasJoinedSuccessfullyRef.current && !isLocalInParticipants) {
       list.push({
-        id: isRegistered && user ? user.id : guest?.id || "local",
+        id: myId,
         identity: myIdentity,
         name: myDisplayName,
         displayName: myDisplayName,
-        username: myIdentity,
+        username: (isRegistered && user?.username) || guest?.username || myIdentity,
         avatar: user?.avatar || guest?.avatar || "zap",
         color: user?.color || guest?.color || "#6366F1",
         cardBgColor: user?.cardBgColor || guest?.cardBgColor || "#465B73",
@@ -3405,7 +3451,7 @@ export function JunctionRoom({
     // 4. Deduplicate and merge by identity / id with richest field retention
     const map = new Map<string, JunctionParticipant>();
     for (const p of list) {
-      const key = (p.identity || p.id || p.name || "").toLowerCase().trim();
+      const key = (p.id || p.identity || "").toLowerCase().trim();
       if (!key) continue;
       const existing = map.get(key);
       if (!existing) {
@@ -3432,7 +3478,7 @@ export function JunctionRoom({
       const timeA = typeof a.joinedAt === "number" ? a.joinedAt : Number(a.joinedAt) || 0;
       const timeB = typeof b.joinedAt === "number" ? b.joinedAt : Number(b.joinedAt) || 0;
       if (timeA !== timeB) return timeA - timeB;
-      return (a.identity || a.name || "").localeCompare(b.identity || b.name || "");
+      return (a.id || a.identity || "").localeCompare(b.id || b.identity || "");
     });
   }, [
     isLocalInParticipants,
@@ -3440,6 +3486,7 @@ export function JunctionRoom({
     liveKitRemoteParticipants,
     myIdentity,
     myDisplayName,
+    myId,
     user,
     guest,
     myEffectiveRole,
@@ -3460,7 +3507,7 @@ export function JunctionRoom({
     const seats: (JunctionParticipant | null)[] = Array.from({ length: maxSeats }, () => null);
 
     const getPKey = (p: JunctionParticipant) =>
-      (p.identity || p.username || p.name || p.id || "").toLowerCase().trim();
+      (p.id || p.identity || "").toLowerCase().trim();
 
     // 1. Deterministically sort all active participants by arrival time (FCFS)
     const sorted = [...effectiveParticipants].sort((a, b) => {
@@ -5973,7 +6020,9 @@ export function JunctionRoom({
       {isLeaveModalOpen && (
         <div
           className="fixed inset-0 z-[150] flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-fadeIn"
-          onClick={() => setIsLeaveModalOpen(false)}
+          onClick={() => {
+            if (!isLeaving) setIsLeaveModalOpen(false);
+          }}
         >
           <div
             onClick={(e) => e.stopPropagation()}
@@ -5993,24 +6042,34 @@ export function JunctionRoom({
             <div className="flex flex-col gap-2 pt-1">
               <button
                 type="button"
+                disabled={isLeaving}
                 onClick={() => {
-                  setIsLeaveModalOpen(false);
                   handleLeave();
                 }}
-                className="w-full py-2.5 rounded-xl bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 text-white font-bold text-xs sm:text-sm shadow-lg shadow-rose-600/30 active:scale-95 transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                className="w-full py-2.5 rounded-xl bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 text-white font-bold text-xs sm:text-sm shadow-lg shadow-rose-600/30 active:scale-95 transition-all cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50"
               >
-                <PhoneOff size={15} />
-                <span>Leave Call</span>
+                {isLeaving ? (
+                  <>
+                    <Loader2 size={15} className="animate-spin" />
+                    <span>Leaving Junction...</span>
+                  </>
+                ) : (
+                  <>
+                    <PhoneOff size={15} />
+                    <span>Leave Call</span>
+                  </>
+                )}
               </button>
 
               {!isMinimized && onMinimize && (
                 <button
                   type="button"
+                  disabled={isLeaving}
                   onClick={() => {
                     setIsLeaveModalOpen(false);
                     handleMinimize();
                   }}
-                  className="w-full py-2.5 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/30 text-indigo-300 font-semibold text-xs sm:text-sm active:scale-95 transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                  className="w-full py-2.5 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/30 text-indigo-300 font-semibold text-xs sm:text-sm active:scale-95 transition-all cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50"
                 >
                   <Minimize2 size={15} />
                   <span>Minimize Call (Stay Connected)</span>
@@ -6020,11 +6079,12 @@ export function JunctionRoom({
               {isMinimized && onMaximize && (
                 <button
                   type="button"
+                  disabled={isLeaving}
                   onClick={() => {
                     setIsLeaveModalOpen(false);
                     onMaximize();
                   }}
-                  className="w-full py-2.5 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/30 text-indigo-300 font-semibold text-xs sm:text-sm active:scale-95 transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                  className="w-full py-2.5 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/30 text-indigo-300 font-semibold text-xs sm:text-sm active:scale-95 transition-all cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50"
                 >
                   <Maximize2 size={15} />
                   <span>Open Full Room</span>
@@ -6033,8 +6093,9 @@ export function JunctionRoom({
 
               <button
                 type="button"
+                disabled={isLeaving}
                 onClick={() => setIsLeaveModalOpen(false)}
-                className="w-full py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white font-semibold text-xs transition-colors cursor-pointer"
+                className="w-full py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white font-semibold text-xs transition-colors cursor-pointer disabled:opacity-50"
               >
                 {isMinimized ? "Keep Minimized" : "Stay in Room"}
               </button>

@@ -141,14 +141,12 @@ export default function JunctionsPage() {
       if (leftId) {
         const currentUser = userRef.current;
         const currentGuest = guestRef.current;
-        const myIdentities = new Set(
+        const myIds = new Set(
           [
             currentUser?.username,
-            currentUser?.name,
             currentUser?.id,
-            currentGuest?.username,
-            currentGuest?.name,
             currentGuest?.id,
+            currentGuest?.username,
           ]
             .filter(Boolean)
             .map((s) => (s as string).toLowerCase().trim())
@@ -159,14 +157,12 @@ export default function JunctionsPage() {
             if (j.id === leftId) {
               const remaining = (j.participants || []).filter((p) => {
                 const pIdent = (p.identity || "").toLowerCase().trim();
-                const pName = (p.name || "").toLowerCase().trim();
                 const pUser = (p.username || "").toLowerCase().trim();
                 const pId = (p.id || "").toLowerCase().trim();
                 return (
-                  !myIdentities.has(pIdent) &&
-                  !myIdentities.has(pName) &&
-                  !myIdentities.has(pUser) &&
-                  !myIdentities.has(pId)
+                  !myIds.has(pIdent) &&
+                  !myIds.has(pUser) &&
+                  !myIds.has(pId)
                 );
               });
               return {
@@ -196,7 +192,7 @@ export default function JunctionsPage() {
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
         fetchJunctions();
-      }, 1500);
+      }, 1000);
     };
 
     // Instant global presence updates via WebSocket broadcast
@@ -205,9 +201,18 @@ export default function JunctionsPage() {
       .on("broadcast", { event: "presence_updated" }, (msg: any) => {
         const payload = msg?.payload;
         if (!payload) return;
-        const { junctionId: updatedId, count: newCount, totalOnline: newTotal } = payload;
+        const { junctionId: updatedId, count: newCount, totalOnline: newTotal, participants: updatedParticipants } = payload;
         setJunctions((prev) => {
-          const updated = prev.map((j) => (j.id === updatedId ? { ...j, currentCount: newCount } : j));
+          const updated = prev.map((j) => {
+            if (j.id === updatedId) {
+              return {
+                ...j,
+                currentCount: newCount,
+                participants: updatedParticipants !== undefined ? updatedParticipants : (newCount === 0 ? [] : j.participants),
+              };
+            }
+            return j;
+          });
           try {
             sessionStorage.setItem("yapclub_cached_junctions", JSON.stringify(updated));
           } catch {}
@@ -219,6 +224,7 @@ export default function JunctionsPage() {
             sessionStorage.setItem("yapclub_cached_total_online", String(newTotal));
           } catch {}
         }
+        triggerDebouncedFetch();
       })
       .subscribe();
 
