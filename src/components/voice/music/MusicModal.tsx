@@ -93,8 +93,9 @@ export function MusicModal({
 
   // If nobody holds the AUX or the person who claimed it is no longer in the room, the AUX is free!
   const isAuxFree = !musicState.auxHolderIdentity || !isHolderInRoom;
-  // When AUX is free, or held by self, or user has moderator permissions, music can be controlled.
-  const canControlMusic = isAuxFree || isAuxHolder || Boolean(canModerateAux);
+  // STRICT RULE: Unless someone grab AUX... No one has access to play music!
+  // First need to grab AUX, then that user can play music, others can't.
+  const canControlMusic = isAuxHolder;
 
   // Filter other participants for passing the AUX
   const otherParticipants = participants.filter(
@@ -104,18 +105,25 @@ export function MusicModal({
   );
 
   const handleSelectStation = (station: CuratedStation) => {
-    if (!canControlMusic) return;
-
-    if (isAuxFree) {
-      onClaimAux();
+    if (!canControlMusic) {
+      if (isAuxFree) {
+        onClaimAux();
+      }
+      return;
     }
+
     onSelectTrack(station.track);
     onClose();
   };
 
   const handleAddYouTube = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canControlMusic) return;
+    if (!canControlMusic) {
+      if (isAuxFree) {
+        onClaimAux();
+      }
+      return;
+    }
 
     setInputError(null);
 
@@ -123,10 +131,6 @@ export function MusicModal({
     if (!videoId) {
       setInputError("Please enter a valid YouTube video or stream link");
       return;
-    }
-
-    if (isAuxFree) {
-      onClaimAux();
     }
 
     const title =
@@ -199,8 +203,9 @@ export function MusicModal({
               <span className="text-sm shrink-0">🔌</span>
               <div className="text-xs truncate">
                 {isAuxFree ? (
-                  <span className="text-emerald-400 font-medium">
-                    AUX is free — pick a track to play!
+                  <span className="text-emerald-400 font-medium flex items-center gap-1.5">
+                    <Sparkles size={12} className="text-emerald-400 shrink-0" />
+                    AUX is free — Grab AUX first to play music
                   </span>
                 ) : isAuxHolder ? (
                   <span className="text-indigo-300 font-semibold flex items-center gap-1.5">
@@ -220,7 +225,7 @@ export function MusicModal({
               {isAuxFree ? (
                 <button
                   onClick={onClaimAux}
-                  className="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 text-[11px] font-semibold transition-all active:scale-95 flex items-center gap-1"
+                  className="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 text-[11px] font-semibold transition-all active:scale-95 flex items-center gap-1 cursor-pointer shadow-xs shadow-emerald-500/20"
                 >
                   <Sparkles size={11} />
                   Grab AUX
@@ -229,13 +234,13 @@ export function MusicModal({
                 <>
                   <button
                     onClick={() => setActiveTab("pass_aux")}
-                    className="px-2 py-0.5 rounded-lg bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-500/40 text-indigo-300 text-[10px] font-semibold transition-all"
+                    className="px-2 py-0.5 rounded-lg bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-500/40 text-indigo-300 text-[10px] font-semibold transition-all cursor-pointer"
                   >
                     Pass
                   </button>
                   <button
                     onClick={onReleaseAux}
-                    className="px-2 py-0.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 text-[10px] font-semibold transition-all"
+                    className="px-2 py-0.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 text-[10px] font-semibold transition-all cursor-pointer"
                   >
                     Drop
                   </button>
@@ -303,100 +308,211 @@ export function MusicModal({
           <div className="p-3.5 sm:p-5 overflow-y-auto space-y-3 min-h-[220px]">
             {/* 1. Curated Stations Tab */}
             {activeTab === "stations" && (
-              <div className="space-y-1.5">
-                {!canControlMusic && (
-                  <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-center gap-2 text-[11px] text-amber-300 mb-2">
-                    <Lock size={13} className="shrink-0 text-amber-400" />
-                    <span>
-                      <strong className="text-white">{musicState.auxHolderName || "Participant"}</strong> holds the AUX cord. Only they can change stations.
-                    </span>
+              <div className="space-y-2">
+                {isAuxFree ? (
+                  <div className="p-3 rounded-2xl bg-gradient-to-r from-emerald-950/50 via-[#0E1B1B] to-indigo-950/40 border border-emerald-500/30 flex items-center justify-between gap-3 shadow-sm">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-300 flex items-center justify-center shrink-0 border border-emerald-500/30">
+                        <Sparkles size={15} />
+                      </div>
+                      <div className="min-w-0">
+                        <h4 className="text-xs font-bold text-white">The AUX Cord is Free</h4>
+                        <p className="text-[10px] text-emerald-300/80">
+                          Grab the AUX cord first to start playing music in this junction.
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={onClaimAux}
+                      className="px-3 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs shrink-0 transition-all active:scale-95 shadow-md shadow-emerald-500/20 cursor-pointer flex items-center gap-1.5"
+                    >
+                      <Sparkles size={12} />
+                      Grab AUX
+                    </button>
+                  </div>
+                ) : isAuxHolder ? (
+                  <div className="p-2.5 rounded-xl bg-indigo-500/10 border border-indigo-500/25 flex items-center justify-between gap-2 text-[11px] text-indigo-300">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Headphones size={13} className="shrink-0 text-indigo-400" />
+                      <span className="truncate">
+                        <strong className="text-white">You have the AUX cord!</strong> Tap any station below to play in the room.
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={onReleaseAux}
+                      className="px-2 py-0.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 text-[10px] font-semibold shrink-0 cursor-pointer transition-all"
+                      title="Drop AUX cord"
+                    >
+                      Drop AUX
+                    </button>
+                  </div>
+                ) : (
+                  <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-center justify-between gap-2 text-[11px] text-amber-300">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Lock size={13} className="shrink-0 text-amber-400" />
+                      <span className="truncate">
+                        <strong className="text-white">{musicState.auxHolderName || "Participant"}</strong> holds the AUX cord. Only they can change stations.
+                      </span>
+                    </div>
+                    {canModerateAux && (
+                      <button
+                        type="button"
+                        onClick={onClaimAux}
+                        className="px-2 py-0.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 text-[10px] font-semibold shrink-0 cursor-pointer transition-all"
+                        title="Moderator Override: Take AUX cord"
+                      >
+                        Take AUX
+                      </button>
+                    )}
                   </div>
                 )}
 
-                {CURATED_STATIONS.map((station) => {
-                  const IconComp = ICON_MAP[station.icon] || Radio;
-                  const isSelected = musicState.currentTrack?.id === station.track.id;
+                <div className="space-y-1.5">
+                  {CURATED_STATIONS.map((station) => {
+                    const IconComp = ICON_MAP[station.icon] || Radio;
+                    const isSelected = musicState.currentTrack?.id === station.track.id;
 
-                  return (
-                    <div
-                      key={station.id}
-                      onClick={() => {
-                        if (canControlMusic) {
-                          handleSelectStation(station);
-                        }
-                      }}
-                      className={`p-2.5 sm:p-3 rounded-2xl border transition-all flex items-center justify-between gap-3 ${
-                        !canControlMusic
-                          ? "opacity-55 cursor-not-allowed bg-white/[0.01] border-white/5"
-                          : isSelected
+                    return (
+                      <div
+                        key={station.id}
+                        onClick={() => {
+                          if (isAuxHolder) {
+                            handleSelectStation(station);
+                          } else if (isAuxFree) {
+                            onClaimAux();
+                          }
+                        }}
+                        className={`p-2.5 sm:p-3 rounded-2xl border transition-all flex items-center justify-between gap-3 ${
+                          isSelected
                             ? "bg-indigo-600/20 border-indigo-500/60 shadow-[0_0_15px_rgba(99,102,241,0.2)] cursor-pointer group"
-                            : "bg-white/[0.02] hover:bg-white/[0.06] border-white/5 hover:border-white/10 cursor-pointer group"
-                      }`}
-                    >
-                      <div className="flex items-center gap-3 min-w-0 flex-1">
-                        <div
-                          className="w-10 h-10 sm:w-11 sm:h-11 rounded-xl flex items-center justify-center shrink-0 border"
-                          style={{
-                            backgroundColor: `${station.accentColor}18`,
-                            borderColor: `${station.accentColor}35`,
-                            color: station.accentColor,
-                          }}
-                        >
-                          <IconComp size={18} />
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2">
-                            <h4 className="text-xs sm:text-sm font-semibold text-white truncate group-hover:text-indigo-300 transition-colors">
-                              {station.name}
-                            </h4>
-                            <span
-                              className="px-1.5 py-0.2 rounded text-[9px] font-semibold border shrink-0"
-                              style={{
-                                backgroundColor: `${station.accentColor}12`,
-                                borderColor: `${station.accentColor}30`,
-                                color: station.accentColor,
-                              }}
-                            >
-                              {station.category}
-                            </span>
+                            : isAuxHolder
+                              ? "bg-white/[0.02] hover:bg-white/[0.06] border-white/5 hover:border-white/10 cursor-pointer group"
+                              : isAuxFree
+                                ? "bg-white/[0.02] hover:bg-emerald-950/20 border-white/5 hover:border-emerald-500/30 cursor-pointer group"
+                                : "opacity-50 cursor-not-allowed bg-white/[0.01] border-white/5"
+                        }`}
+                      >
+                        <div className="flex items-center gap-3 min-w-0 flex-1">
+                          <div
+                            className="w-10 h-10 sm:w-11 sm:h-11 rounded-xl flex items-center justify-center shrink-0 border"
+                            style={{
+                              backgroundColor: `${station.accentColor}18`,
+                              borderColor: `${station.accentColor}35`,
+                              color: station.accentColor,
+                            }}
+                          >
+                            <IconComp size={18} />
                           </div>
-                          <p className="text-[10px] sm:text-[11px] text-slate-400 truncate mt-0.5 font-light">
-                            {station.description}
-                          </p>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <h4 className="text-xs sm:text-sm font-semibold text-white truncate group-hover:text-indigo-300 transition-colors">
+                                {station.name}
+                              </h4>
+                              <span
+                                className="px-1.5 py-0.2 rounded text-[9px] font-semibold border shrink-0"
+                                style={{
+                                  backgroundColor: `${station.accentColor}12`,
+                                  borderColor: `${station.accentColor}30`,
+                                  color: station.accentColor,
+                                }}
+                              >
+                                {station.category}
+                              </span>
+                            </div>
+                            <p className="text-[10px] sm:text-[11px] text-slate-400 truncate mt-0.5 font-light">
+                              {station.description}
+                            </p>
+                          </div>
                         </div>
-                      </div>
 
-                      <div className="shrink-0">
-                        {isSelected ? (
-                          <span className="px-2 py-1 rounded-lg text-[10px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1.5">
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-                            Playing
-                          </span>
-                        ) : !canControlMusic ? (
-                          <div className="w-8 h-8 rounded-full bg-white/5 text-slate-500 flex items-center justify-center">
-                            <Lock size={12} />
-                          </div>
-                        ) : (
-                          <div className="w-8 h-8 rounded-full bg-white/5 group-hover:bg-indigo-600 text-slate-400 group-hover:text-white flex items-center justify-center transition-all">
-                            <Play size={13} className="ml-0.5" />
-                          </div>
-                        )}
+                        <div className="shrink-0">
+                          {isSelected ? (
+                            <span className="px-2 py-1 rounded-lg text-[10px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1.5">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                              Playing
+                            </span>
+                          ) : isAuxHolder ? (
+                            <div className="w-8 h-8 rounded-full bg-white/5 group-hover:bg-indigo-600 text-slate-400 group-hover:text-white flex items-center justify-center transition-all">
+                              <Play size={13} className="ml-0.5" />
+                            </div>
+                          ) : isAuxFree ? (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onClaimAux();
+                              }}
+                              className="px-2 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/30 border border-emerald-500/35 text-emerald-300 text-[10px] font-semibold flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
+                              title="Grab AUX first"
+                            >
+                              <Sparkles size={10} />
+                              Grab AUX
+                            </button>
+                          ) : (
+                            <div className="w-8 h-8 rounded-full bg-white/5 text-slate-500 flex items-center justify-center">
+                              <Lock size={12} />
+                            </div>
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  );
-                })}
+                    );
+                  })}
+                </div>
               </div>
             )}
 
             {/* 2. YouTube Search / URL Tab */}
             {activeTab === "youtube" && (
               <form onSubmit={handleAddYouTube} className="space-y-3">
-                {!canControlMusic && (
-                  <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-center gap-2 text-[11px] text-amber-300 mb-2">
-                    <Lock size={13} className="shrink-0 text-amber-400" />
+                {isAuxFree ? (
+                  <div className="p-3 rounded-2xl bg-gradient-to-r from-emerald-950/50 via-[#0E1B1B] to-indigo-950/40 border border-emerald-500/30 flex items-center justify-between gap-3 shadow-sm">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-300 flex items-center justify-center shrink-0 border border-emerald-500/30">
+                        <Sparkles size={15} />
+                      </div>
+                      <div className="min-w-0">
+                        <h4 className="text-xs font-bold text-white">Grab AUX to Play YouTube</h4>
+                        <p className="text-[10px] text-emerald-300/80">
+                          The AUX cord is free. Grab it first to queue videos and streams.
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={onClaimAux}
+                      className="px-3 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs shrink-0 transition-all active:scale-95 shadow-md shadow-emerald-500/20 cursor-pointer flex items-center gap-1.5"
+                    >
+                      <Sparkles size={12} />
+                      Grab AUX
+                    </button>
+                  </div>
+                ) : isAuxHolder ? (
+                  <div className="p-2.5 rounded-xl bg-indigo-500/10 border border-indigo-500/25 flex items-center gap-2 text-[11px] text-indigo-300">
+                    <Headphones size={13} className="shrink-0 text-indigo-400" />
                     <span>
-                      <strong className="text-white">{musicState.auxHolderName || "Participant"}</strong> holds the AUX cord. Only they can play YouTube videos.
+                      <strong className="text-white">You have the AUX cord!</strong> Paste any YouTube video or livestream to broadcast.
                     </span>
+                  </div>
+                ) : (
+                  <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-center justify-between gap-2 text-[11px] text-amber-300">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Lock size={13} className="shrink-0 text-amber-400" />
+                      <span className="truncate">
+                        <strong className="text-white">{musicState.auxHolderName || "Participant"}</strong> holds the AUX cord. Only they can play YouTube videos.
+                      </span>
+                    </div>
+                    {canModerateAux && (
+                      <button
+                        type="button"
+                        onClick={onClaimAux}
+                        className="px-2 py-0.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 text-[10px] font-semibold shrink-0 cursor-pointer transition-all"
+                        title="Moderator Override: Take AUX cord"
+                      >
+                        Take AUX
+                      </button>
+                    )}
                   </div>
                 )}
 
@@ -415,8 +531,14 @@ export function MusicModal({
                       setCustomUrl(e.target.value);
                       if (inputError) setInputError(null);
                     }}
-                    disabled={!canControlMusic}
-                    placeholder="https://www.youtube.com/watch?v=..."
+                    disabled={!isAuxHolder}
+                    placeholder={
+                      isAuxHolder
+                        ? "https://www.youtube.com/watch?v=..."
+                        : isAuxFree
+                          ? "Grab the AUX cord first to queue YouTube links..."
+                          : `Locked: AUX held by ${musicState.auxHolderName || "DJ"}`
+                    }
                     className="w-full px-3 py-2.5 rounded-xl bg-white/[0.04] border border-white/10 text-white placeholder-slate-500 text-xs focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/40 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                   />
                   {inputError && (
@@ -432,29 +554,40 @@ export function MusicModal({
                     type="text"
                     value={customTitle}
                     onChange={(e) => setCustomTitle(e.target.value)}
-                    disabled={!canControlMusic}
+                    disabled={!isAuxHolder}
                     placeholder="e.g. My Favorite Chill Song"
                     className="w-full px-3 py-2.5 rounded-xl bg-white/[0.04] border border-white/10 text-white placeholder-slate-500 text-xs focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/40 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                   />
                 </div>
 
-                <button
-                  type="submit"
-                  disabled={!canControlMusic || !customUrl.trim()}
-                  className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold text-xs transition-all shadow-md shadow-indigo-600/25 flex items-center justify-center gap-2 active:scale-[0.98] cursor-pointer"
-                >
-                  {!canControlMusic ? (
-                    <>
-                      <Lock size={14} />
-                      AUX Locked to {musicState.auxHolderName || "DJ"}
-                    </>
-                  ) : (
-                    <>
-                      <Play size={14} />
-                      Play in Room
-                    </>
-                  )}
-                </button>
+                {isAuxHolder ? (
+                  <button
+                    type="submit"
+                    disabled={!customUrl.trim()}
+                    className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold text-xs transition-all shadow-md shadow-indigo-600/25 flex items-center justify-center gap-2 active:scale-[0.98] cursor-pointer"
+                  >
+                    <Play size={14} />
+                    Play in Room
+                  </button>
+                ) : isAuxFree ? (
+                  <button
+                    type="button"
+                    onClick={onClaimAux}
+                    className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition-all shadow-md shadow-emerald-600/25 flex items-center justify-center gap-2 active:scale-[0.98] cursor-pointer"
+                  >
+                    <Sparkles size={14} />
+                    Grab AUX to Play
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled
+                    className="w-full py-2.5 rounded-xl bg-white/5 opacity-50 cursor-not-allowed text-slate-400 font-semibold text-xs flex items-center justify-center gap-2"
+                  >
+                    <Lock size={14} />
+                    AUX Locked to {musicState.auxHolderName || "DJ"}
+                  </button>
+                )}
               </form>
             )}
 
@@ -520,7 +653,7 @@ export function MusicModal({
                 </span>
               </div>
 
-              {(isAuxHolder || isAuxFree || canModerateAux) && (
+              {(isAuxHolder || canModerateAux) && (
                 <button
                   onClick={() => {
                     onStopMusic();

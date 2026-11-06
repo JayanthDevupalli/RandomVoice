@@ -1282,20 +1282,22 @@ export function JunctionRoom({
   const handleSelectMusicTrack = useCallback((track: MusicTrack) => {
     const currentHolder = musicStateRef.current.auxHolderIdentity;
     const hasModClearance = isCurrentModerator || isStaff;
-    const holderInRoom = isAuxHolderInRoom();
+    const isHolder = Boolean(currentHolder && isLocalIdentity(currentHolder));
 
-    if (currentHolder && !isLocalIdentity(currentHolder) && holderInRoom && !hasModClearance) {
-      console.warn("Only the AUX holder can change music");
+    // STRICT RULE: Unless someone grab AUX... No one has access to play music!
+    // First need to grab AUX, then that user can play music, others can't.
+    if (!isHolder && !hasModClearance) {
+      console.warn("You must grab the AUX cord first to play music");
       return;
     }
 
-    const activeHolderId = myIdentity;
-    const activeHolderName = myDisplayName;
+    const activeHolderId = currentHolder || myIdentity;
+    const activeHolderName = musicStateRef.current.auxHolderName || myDisplayName;
     const update: RoomMusicState = {
       isActive: true,
       auxHolderIdentity: activeHolderId,
       auxHolderName: activeHolderName,
-      auxStartedAt: Date.now(),
+      auxStartedAt: musicStateRef.current.auxStartedAt || Date.now(),
       currentTrack: track,
       isPlaying: true,
       seekTime: 0,
@@ -1306,12 +1308,13 @@ export function JunctionRoom({
       type: "music_track_change",
       payload: { track, auxHolderIdentity: activeHolderId, auxHolderName: activeHolderName },
     });
-  }, [myIdentity, myDisplayName, broadcastRoomUpdate, isAuxHolderInRoom, isLocalIdentity, isCurrentModerator, isStaff]);
+  }, [myIdentity, myDisplayName, broadcastRoomUpdate, isLocalIdentity, isCurrentModerator, isStaff]);
 
   const handleToggleMusicPlayback = useCallback((isPlaying: boolean, currentSeek: number) => {
     const currentHolder = musicStateRef.current.auxHolderIdentity;
     const hasModClearance = isCurrentModerator || isStaff;
-    if (currentHolder && !isLocalIdentity(currentHolder) && isAuxHolderInRoom() && !hasModClearance) {
+    const isHolder = Boolean(currentHolder && isLocalIdentity(currentHolder));
+    if (!isHolder && !hasModClearance) {
       return;
     }
 
@@ -1326,12 +1329,13 @@ export function JunctionRoom({
       type: "music_playback_toggle",
       payload: { isPlaying, seekTime: currentSeek, timestamp: Date.now(), senderIdentity: myIdentity },
     });
-  }, [myIdentity, broadcastRoomUpdate, isAuxHolderInRoom, isLocalIdentity, isCurrentModerator, isStaff]);
+  }, [myIdentity, broadcastRoomUpdate, isLocalIdentity, isCurrentModerator, isStaff]);
 
   const handleSeekMusic = useCallback((seekTime: number) => {
     const currentHolder = musicStateRef.current.auxHolderIdentity;
     const hasModClearance = isCurrentModerator || isStaff;
-    if (currentHolder && !isLocalIdentity(currentHolder) && isAuxHolderInRoom() && !hasModClearance) {
+    const isHolder = Boolean(currentHolder && isLocalIdentity(currentHolder));
+    if (!isHolder && !hasModClearance) {
       return;
     }
 
@@ -1345,12 +1349,13 @@ export function JunctionRoom({
       type: "music_seek",
       payload: { seekTime, timestamp: Date.now(), senderIdentity: myIdentity },
     });
-  }, [myIdentity, broadcastRoomUpdate, isAuxHolderInRoom, isLocalIdentity, isCurrentModerator, isStaff]);
+  }, [myIdentity, broadcastRoomUpdate, isLocalIdentity, isCurrentModerator, isStaff]);
 
   const handleStopMusic = useCallback(() => {
     const currentHolder = musicStateRef.current.auxHolderIdentity;
     const hasModClearance = isCurrentModerator || isStaff;
-    if (currentHolder && !isLocalIdentity(currentHolder) && isAuxHolderInRoom() && !hasModClearance) {
+    const isHolder = Boolean(currentHolder && isLocalIdentity(currentHolder));
+    if (!isHolder && !hasModClearance) {
       return;
     }
 
@@ -1365,12 +1370,12 @@ export function JunctionRoom({
       lastSyncTime: Date.now(),
     };
     setMusicState(update);
-    setIsMusicExpanded(false);
     broadcastRoomUpdate({
       type: "music_stop",
       payload: { senderIdentity: myIdentity },
     });
-  }, [myIdentity, broadcastRoomUpdate, isAuxHolderInRoom, isLocalIdentity, isCurrentModerator, isStaff]);
+    setIsMusicExpanded(false);
+  }, [myIdentity, broadcastRoomUpdate, isLocalIdentity, isCurrentModerator, isStaff]);
 
   const handleHeartbeatSync = useCallback((liveSeek: number) => {
     const currentHolder = musicStateRef.current.auxHolderIdentity;
@@ -2059,8 +2064,30 @@ export function JunctionRoom({
           });
         }
       } else if (type === "music_sync" && payload) {
+        const holderIdent = payload.auxHolderIdentity;
+        const holderName = payload.auxHolderName;
+        const cleanHolderId = (holderIdent || "").toLowerCase().trim();
+        const cleanHolderName = (holderName || "").toLowerCase().trim();
+        const isHolderPresent =
+          !holderIdent && !holderName
+            ? false
+            : isLocalIdentity(holderIdent || "") ||
+              isLocalIdentity(holderName || "") ||
+              participants.some((p) => {
+                const pIdent = (p.identity || "").toLowerCase().trim();
+                const pId = (p.id || "").toLowerCase().trim();
+                const pName = (p.name || p.displayName || "").toLowerCase().trim();
+                return (
+                  (cleanHolderId && (pIdent === cleanHolderId || pId === cleanHolderId)) ||
+                  (cleanHolderName && (pName === cleanHolderName || pIdent === cleanHolderName))
+                );
+              });
+
         setMusicState({
           ...payload,
+          auxHolderIdentity: isHolderPresent ? payload.auxHolderIdentity : null,
+          auxHolderName: isHolderPresent ? payload.auxHolderName : null,
+          auxStartedAt: isHolderPresent ? payload.auxStartedAt : null,
           lastSyncTime: payload.lastSyncTime || Date.now(),
         });
       } else if (type === "music_sync_heartbeat" && payload) {

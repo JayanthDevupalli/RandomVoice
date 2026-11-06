@@ -111,7 +111,8 @@ export function MusicDeck({
 
   // If nobody holds the AUX or the person who held it left the room, AUX is free
   const isAuxFree = !musicState.auxHolderIdentity || !isHolderPresent;
-  const canControlPlayback = isAuxHolder || isAuxFree || Boolean(canModerateAux);
+  // STRICT RULE: Only the person who grabbed the AUX cord can control playback!
+  const canControlPlayback = isAuxHolder;
 
   // Persist volume in local storage
   const handleVolumeChange = (newVol: number) => {
@@ -373,9 +374,6 @@ export function MusicDeck({
 
   const handleTogglePlay = () => {
     if (!canControlPlayback) return;
-    if (isAuxFree) {
-      onClaimAux();
-    }
     const nextPlay = !musicState.isPlaying;
     const current = playerRef.current?.getCurrentTime() || currentTime;
     onTogglePlayback(nextPlay, current);
@@ -404,9 +402,12 @@ export function MusicDeck({
             <span className="text-sm shrink-0">🔌</span>
             <div className="text-xs truncate">
               {isAuxHolder ? (
-                <span className="text-indigo-400 font-semibold">You hold the AUX</span>
+                <span className="text-indigo-400 font-semibold flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  You hold the AUX (DJ)
+                </span>
               ) : isAuxFree ? (
-                <span className="text-emerald-400 font-medium">AUX: Free (Click to DJ)</span>
+                <span className="text-emerald-400 font-medium">AUX: Free (Grab AUX to DJ)</span>
               ) : (
                 <span className="text-slate-300 font-medium">
                   AUX: <span className="text-amber-300 font-semibold">{musicState.auxHolderName || "Room"}</span>
@@ -418,6 +419,35 @@ export function MusicDeck({
           </div>
 
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            {/* Grab / Take / Drop AUX Quick Button */}
+            {isAuxFree ? (
+              <button
+                onClick={onClaimAux}
+                className="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 text-xs font-semibold flex items-center gap-1 transition-all active:scale-95 cursor-pointer shadow-xs shadow-emerald-500/20"
+                title="Grab AUX Cord"
+              >
+                <Sparkles size={11} />
+                Grab AUX
+              </button>
+            ) : isAuxHolder ? (
+              <button
+                onClick={onReleaseAux}
+                className="px-2 py-0.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 text-xs font-semibold flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
+                title="Release AUX Cord"
+              >
+                Drop AUX
+              </button>
+            ) : canModerateAux ? (
+              <button
+                onClick={onClaimAux}
+                className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 text-xs font-semibold flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
+                title="Moderator Override: Take AUX cord"
+              >
+                <Sparkles size={11} />
+                Take AUX
+              </button>
+            ) : null}
+
             {/* Personal Volume Dropdown */}
             <div className="relative">
               <button
@@ -580,7 +610,7 @@ export function MusicDeck({
                 <div className="flex items-center gap-1.5 text-[10px] text-slate-400 mt-0.5 min-w-0">
                   <span className="shrink-0 text-slate-500">AUX:</span>
                   <span className="text-amber-300 font-medium truncate max-w-[75px] xs:max-w-[120px] sm:max-w-none shrink-0">
-                    {isAuxHolder ? "You" : isAuxFree ? "Free (Tap)" : musicState.auxHolderName || "Room"}
+                    {isAuxHolder ? "You (DJ)" : isAuxFree ? "Free" : musicState.auxHolderName || "Room"}
                   </span>
                   {!track.isLive && duration > 0 && (
                     <>
@@ -596,7 +626,22 @@ export function MusicDeck({
 
             {/* Right Controls */}
             <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
-              {/* Play/Pause */}
+              {/* Grab AUX Quick Action (when AUX is free) */}
+              {isAuxFree && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onClaimAux();
+                  }}
+                  className="px-2 py-0.5 rounded-full bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 text-[10px] font-bold flex items-center gap-1 transition-all active:scale-95 cursor-pointer shrink-0 shadow-xs shadow-emerald-500/20"
+                  title="Grab the AUX cord to control music"
+                >
+                  <Sparkles size={10} />
+                  <span>Grab AUX</span>
+                </button>
+              )}
+
+              {/* Play/Pause (only AUX holder can play/pause) */}
               {canControlPlayback && (
                 <button
                   onClick={handleTogglePlay}
