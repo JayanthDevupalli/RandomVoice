@@ -113,9 +113,23 @@ export function ActiveJunctionProvider({ children }: { children: React.ReactNode
     const handleUnload = () => {
       try {
         sessionStorage.removeItem("yapclub_active_junction_id");
+        const junctionId = activeJunctionIdRef.current;
         // ONLY release the cross-tab session lock if THIS tab is the active owner!
-        if (isCurrentTabActiveOwner(activeJunctionIdRef.current || undefined)) {
-          releaseJunctionSession(activeJunctionIdRef.current || undefined);
+        if (junctionId && isCurrentTabActiveOwner(junctionId)) {
+          const myTabId = getTabId();
+          const activeSession = getActiveTabSession();
+          const identity = activeSession?.identity;
+          if (identity) {
+            const payload = JSON.stringify({
+              action: "leave",
+              identity,
+              tabSessionId: myTabId,
+            });
+            if (typeof navigator !== "undefined" && navigator.sendBeacon) {
+              navigator.sendBeacon(`/api/junctions/${junctionId}`, new Blob([payload], { type: "text/plain" }));
+            }
+          }
+          releaseJunctionSession(junctionId);
         }
       } catch {}
     };

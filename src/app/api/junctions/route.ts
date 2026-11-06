@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getAllJunctions, createJunction } from "@/lib/junctions-store";
+import { getAllJunctions, createJunction, purgeUserFromAllJunctions } from "@/lib/junctions-store";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -35,6 +35,17 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
+
+    if (body.action === "purge_user_ghosts") {
+      const { identities } = body;
+      let purgedCount = 0;
+      if (Array.isArray(identities) && identities.length > 0) {
+        const result = await purgeUserFromAllJunctions(identities);
+        purgedCount = result.purged;
+      }
+      return NextResponse.json({ success: true, purged: purgedCount > 0, count: purgedCount });
+    }
+
     const { name, description, category, tags, creator, maxParticipants, isLocked } = body;
 
     if (!name || !category || !creator) {

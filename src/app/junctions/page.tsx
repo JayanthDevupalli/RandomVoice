@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { useGuestUser } from "@/hooks/useGuestUser";
 import { useUser } from "@/hooks/useUser";
+import { useActiveJunction } from "@/components/providers/ActiveJunctionContext";
 import { Navbar } from "@/components/layout/Navbar";
 import { JunctionCard } from "@/components/lobby/JunctionCard";
 import { CreateJunctionModal } from "@/components/lobby/CreateJunctionModal";
@@ -55,6 +56,7 @@ export default function JunctionsPage() {
     hasCompletedOnboarding,
     isLoaded,
   } = useGuestUser();
+  const { activeJunctionId } = useActiveJunction();
 
   const [junctions, setJunctions] = useState<Junction[]>([]);
   const [totalOnline, setTotalOnline] = useState<number>(0);
@@ -119,6 +121,37 @@ export default function JunctionsPage() {
     }
   }, []);
 
+  // Self-healing: if the user enters the lobby outside an active call, purge any orphaned ghost sessions
+  useEffect(() => {
+    if (!isLoaded) return;
+    if (activeJunctionId) return;
+
+    const myIdentities = [
+      user?.id,
+      user?.username,
+      guest?.id,
+      guest?.username,
+    ].filter(Boolean) as string[];
+
+    if (myIdentities.length === 0) return;
+
+    fetch("/api/junctions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "purge_user_ghosts",
+        identities: myIdentities,
+      }),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data?.purged) {
+          fetchJunctions();
+        }
+      })
+      .catch(() => {});
+  }, [isLoaded, activeJunctionId, user?.id, user?.username, guest?.id, guest?.username, fetchJunctions]);
+
   useEffect(() => {
     let abortController: AbortController | null = null;
     let timeoutId: NodeJS.Timeout;
@@ -129,7 +162,7 @@ export default function JunctionsPage() {
 
       await fetchJunctions(abortController.signal);
       setIsLoading(false);
-      timeoutId = setTimeout(poll, 45000);
+      timeoutId = setTimeout(poll, 20000);
     };
 
     poll();

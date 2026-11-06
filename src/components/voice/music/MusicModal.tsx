@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -42,6 +42,7 @@ interface MusicModalProps {
   participants: JunctionParticipant[];
   currentIdentity: string;
   currentName: string;
+  canModerateAux?: boolean;
   onClaimAux: () => void;
   onReleaseAux: () => void;
   onPassAux: (targetIdentity: string, targetName: string) => void;
@@ -56,6 +57,7 @@ export function MusicModal({
   participants,
   currentIdentity,
   currentName,
+  canModerateAux = false,
   onClaimAux,
   onReleaseAux,
   onPassAux,
@@ -71,9 +73,28 @@ export function MusicModal({
     Boolean(musicState.auxHolderIdentity) &&
     musicState.auxHolderIdentity?.toLowerCase().trim() === currentIdentity.toLowerCase().trim();
 
-  const isAuxFree = !musicState.auxHolderIdentity;
-  // When one person grabs AUX, only that person can change music.
-  const canControlMusic = isAuxFree || isAuxHolder;
+  // Verify if the AUX holder is currently present in this room
+  const isHolderInRoom = useMemo(() => {
+    if (!musicState.auxHolderIdentity && !musicState.auxHolderName) return false;
+    if (isAuxHolder) return true;
+    const cleanHolderId = (musicState.auxHolderIdentity || "").toLowerCase().trim();
+    const cleanHolderName = (musicState.auxHolderName || "").toLowerCase().trim();
+
+    return participants.some((p) => {
+      const pIdent = (p.identity || "").toLowerCase().trim();
+      const pId = (p.id || "").toLowerCase().trim();
+      const pName = (p.name || p.displayName || "").toLowerCase().trim();
+      return (
+        (cleanHolderId && (pIdent === cleanHolderId || pId === cleanHolderId)) ||
+        (cleanHolderName && (pName === cleanHolderName || pIdent === cleanHolderName))
+      );
+    });
+  }, [musicState.auxHolderIdentity, musicState.auxHolderName, isAuxHolder, participants]);
+
+  // If nobody holds the AUX or the person who claimed it is no longer in the room, the AUX is free!
+  const isAuxFree = !musicState.auxHolderIdentity || !isHolderInRoom;
+  // When AUX is free, or held by self, or user has moderator permissions, music can be controlled.
+  const canControlMusic = isAuxFree || isAuxHolder || Boolean(canModerateAux);
 
   // Filter other participants for passing the AUX
   const otherParticipants = participants.filter(
@@ -219,6 +240,15 @@ export function MusicModal({
                     Drop
                   </button>
                 </>
+              ) : canModerateAux ? (
+                <button
+                  onClick={onClaimAux}
+                  className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 text-[11px] font-semibold transition-all active:scale-95 flex items-center gap-1 cursor-pointer"
+                  title="Moderator Override: Take AUX cord"
+                >
+                  <Sparkles size={11} />
+                  Take AUX
+                </button>
               ) : (
                 <span className="px-2 py-0.5 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[10px] font-semibold flex items-center gap-1">
                   <Lock size={10} />
@@ -490,7 +520,7 @@ export function MusicModal({
                 </span>
               </div>
 
-              {isAuxHolder && (
+              {(isAuxHolder || isAuxFree || canModerateAux) && (
                 <button
                   onClick={() => {
                     onStopMusic();

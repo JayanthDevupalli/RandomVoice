@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   Play,
   Pause,
@@ -21,12 +21,15 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { MusicTrack, RoomMusicState } from "@/lib/music-types";
+import { JunctionParticipant } from "@/lib/types";
 import { extractYouTubeId } from "@/lib/curated-stations";
 
 interface MusicDeckProps {
   musicState: RoomMusicState;
+  participants?: JunctionParticipant[];
   currentIdentity: string;
   currentName: string;
+  canModerateAux?: boolean;
   isExpanded: boolean;
   onToggleExpand: () => void;
   onOpenMusicModal: () => void;
@@ -47,8 +50,10 @@ declare global {
 
 export function MusicDeck({
   musicState,
+  participants = [],
   currentIdentity,
   currentName,
+  canModerateAux = false,
   isExpanded,
   onToggleExpand,
   onOpenMusicModal,
@@ -86,7 +91,27 @@ export function MusicDeck({
     Boolean(musicState.auxHolderIdentity) &&
     musicState.auxHolderIdentity?.toLowerCase().trim() === currentIdentity.toLowerCase().trim();
 
-  const isAuxFree = !musicState.auxHolderIdentity;
+  // Verify if the recorded AUX holder is actually present in the room
+  const isHolderPresent = useMemo(() => {
+    if (!musicState.auxHolderIdentity && !musicState.auxHolderName) return false;
+    if (isAuxHolder) return true;
+    const cleanHolderId = (musicState.auxHolderIdentity || "").toLowerCase().trim();
+    const cleanHolderName = (musicState.auxHolderName || "").toLowerCase().trim();
+
+    return (participants || []).some((p) => {
+      const pIdent = (p.identity || "").toLowerCase().trim();
+      const pId = (p.id || "").toLowerCase().trim();
+      const pName = (p.name || p.displayName || "").toLowerCase().trim();
+      return (
+        (cleanHolderId && (pIdent === cleanHolderId || pId === cleanHolderId)) ||
+        (cleanHolderName && (pName === cleanHolderName || pIdent === cleanHolderName))
+      );
+    });
+  }, [musicState.auxHolderIdentity, musicState.auxHolderName, isAuxHolder, participants]);
+
+  // If nobody holds the AUX or the person who held it left the room, AUX is free
+  const isAuxFree = !musicState.auxHolderIdentity || !isHolderPresent;
+  const canControlPlayback = isAuxHolder || isAuxFree || Boolean(canModerateAux);
 
   // Persist volume in local storage
   const handleVolumeChange = (newVol: number) => {
@@ -338,7 +363,7 @@ export function MusicDeck({
   const handleSeekChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newSeek = Number(e.target.value);
     setCurrentTime(newSeek);
-    if (isAuxHolder) {
+    if (canControlPlayback) {
       if (playerRef.current?.seekTo) {
         playerRef.current.seekTo(newSeek, true);
       }
@@ -347,7 +372,10 @@ export function MusicDeck({
   };
 
   const handleTogglePlay = () => {
-    if (!isAuxHolder) return;
+    if (!canControlPlayback) return;
+    if (isAuxFree) {
+      onClaimAux();
+    }
     const nextPlay = !musicState.isPlaying;
     const current = playerRef.current?.getCurrentTime() || currentTime;
     onTogglePlayback(nextPlay, current);
@@ -377,6 +405,8 @@ export function MusicDeck({
             <div className="text-xs truncate">
               {isAuxHolder ? (
                 <span className="text-indigo-400 font-semibold">You hold the AUX</span>
+              ) : isAuxFree ? (
+                <span className="text-emerald-400 font-medium">AUX: Free (Click to DJ)</span>
               ) : (
                 <span className="text-slate-300 font-medium">
                   AUX: <span className="text-amber-300 font-semibold">{musicState.auxHolderName || "Room"}</span>
@@ -459,7 +489,7 @@ export function MusicDeck({
         {/* Expanded Theatre Controls */}
         <div className="px-3.5 sm:px-4 py-2.5 sm:py-3 bg-[#0E1017] border-t border-white/5 flex items-center justify-between gap-3 sm:gap-4">
           <div className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1">
-            {isAuxHolder ? (
+            {canControlPlayback ? (
               <button
                 onClick={handleTogglePlay}
                 className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-indigo-600 hover:bg-indigo-500 text-white flex items-center justify-center transition-all shadow-md shadow-indigo-600/30 active:scale-95 shrink-0"
@@ -550,7 +580,7 @@ export function MusicDeck({
                 <div className="flex items-center gap-1.5 text-[10px] text-slate-400 mt-0.5 min-w-0">
                   <span className="shrink-0 text-slate-500">AUX:</span>
                   <span className="text-amber-300 font-medium truncate max-w-[75px] xs:max-w-[120px] sm:max-w-none shrink-0">
-                    {isAuxHolder ? "You" : musicState.auxHolderName || "Room"}
+                    {isAuxHolder ? "You" : isAuxFree ? "Free (Tap)" : musicState.auxHolderName || "Room"}
                   </span>
                   {!track.isLive && duration > 0 && (
                     <>
@@ -566,8 +596,8 @@ export function MusicDeck({
 
             {/* Right Controls */}
             <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
-              {/* Play/Pause (only for AUX holder) */}
-              {isAuxHolder && (
+              {/* Play/Pause */}
+              {canControlPlayback && (
                 <button
                   onClick={handleTogglePlay}
                   className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-indigo-600 hover:bg-indigo-500 text-white flex items-center justify-center transition-all active:scale-95 shadow-md shadow-indigo-600/30 shrink-0 cursor-pointer"

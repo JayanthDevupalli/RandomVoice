@@ -405,7 +405,14 @@ async function syncCount(junctionId: string) {
 // ─── Touch Heartbeat to Keep Active Participants Fresh ─────────────────────────
 
 export async function touchParticipantHeartbeat(junctionId: string, identity: string) {
-  // No-op: ghost purging removed, immutable joined_at preserved
+  const clean = (identity || "").trim().toLowerCase();
+  const sessionKey = `${junctionId}:${clean}`;
+  const existing = activeParticipantTabs.get(sessionKey);
+  if (existing) {
+    existing.updatedAt = Date.now();
+  } else {
+    activeParticipantTabs.set(sessionKey, { tabSessionId: "", updatedAt: Date.now() });
+  }
 }
 
 // ─── Fast In-Memory Cache for Lobby ──────────────────────────────────────────
@@ -876,6 +883,50 @@ export async function removeParticipantFromJunction(
   }
 
   invalidateJunctionsCache();
+}
+
+export async function purgeUserFromAllJunctions(targetIdentities: string[]): Promise<{ purged: number }> {
+  const cleanTargets = Array.from(
+    new Set(
+      targetIdentities
+        .map((t) => (t || "").trim().toLowerCase())
+        .filter(Boolean)
+    )
+  );
+  if (cleanTargets.length === 0) return { purged: 0 };
+
+  try {
+    const { data: rows } = await supabase
+      .from("junction_participants")
+      .select("junction_id, id, identity");
+
+    const matched = (rows || []).filter((r) => {
+      const rIdent = (r.identity || "").toLowerCase().trim();
+      const rId = (r.id || "").toLowerCase().trim();
+      return cleanTargets.some((t) => rIdent === t || rId === t);
+    });
+
+    if (matched.length > 0) {
+      const idsToDelete = matched.map((m) => m.id);
+      const junctionIdsToSync = Array.from(new Set(matched.map((m) => m.junction_id)));
+
+      matched.forEach((m) => {
+        activeParticipantTabs.delete(`${m.junction_id}:${(m.identity || "").toLowerCase().trim()}`);
+      });
+
+      await supabase
+        .from("junction_participants")
+        .delete()
+        .in("id", idsToDelete);
+
+      await Promise.allSettled(junctionIdsToSync.map((jId) => syncCount(jId)));
+      invalidateJunctionsCache();
+      return { purged: matched.length };
+    }
+  } catch (err) {
+    console.warn("Failed to purge user ghosts:", err);
+  }
+  return { purged: 0 };
 }
 
 export async function moderateParticipant(

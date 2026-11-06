@@ -31,6 +31,8 @@ export async function GET(
 
     if (action === "leave" && identity) {
       await removeParticipantFromJunction(params.id, identity, { tabSessionId });
+    } else if (identity) {
+      touchParticipantHeartbeat(params.id, identity);
     }
 
     const junction = await getJunctionById(params.id);
