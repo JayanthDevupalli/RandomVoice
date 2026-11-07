@@ -580,12 +580,18 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
 
       const { data } = supabase.storage.from("avatars").getPublicUrl(filePath);
 
-      const { error: updateError } = await supabase
-        .from("profiles")
-        .update({ avatar: data.publicUrl })
-        .eq("id", profile.id);
+      if (isRegistered) {
+        const { error: updateError } = await supabase
+          .from("profiles")
+          .update({ avatar: data.publicUrl })
+          .eq("id", profile.id);
 
-      if (updateError) throw updateError;
+        if (updateError) throw updateError;
+      } else if (guest) {
+        updateGuest({
+          avatar: data.publicUrl,
+        });
+      }
 
       setProfile({ ...profile, avatar: data.publicUrl });
       setCropModalOpen(false);
@@ -594,9 +600,43 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
         URL.revokeObjectURL(tempImageSrc);
         setTempImageSrc(null);
       }
-    } catch (err) {
+
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("yapclub_profile_updated", {
+            detail: { avatar: data.publicUrl },
+          })
+        );
+      }
+      if (refreshUser) {
+        refreshUser();
+      }
+    } catch (err: any) {
       console.error("Upload failed", err);
-      alert("Failed to upload cropped image. Make sure the storage bucket exists.");
+      // Fallback for guest or if bucket access fails
+      if (guest) {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const base64data = reader.result as string;
+          updateGuest({ avatar: base64data });
+          setProfile({ ...profile, avatar: base64data });
+          setCropModalOpen(false);
+          if (tempImageSrc) {
+            URL.revokeObjectURL(tempImageSrc);
+            setTempImageSrc(null);
+          }
+          if (typeof window !== "undefined") {
+            window.dispatchEvent(
+              new CustomEvent("yapclub_profile_updated", {
+                detail: { avatar: base64data },
+              })
+            );
+          }
+        };
+        reader.readAsDataURL(croppedBlob);
+        return;
+      }
+      alert(err?.message || "Failed to upload image. Please check your connection and try again.");
     } finally {
       setIsUploading(false);
     }
@@ -789,9 +829,15 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
 
                   return (
                     <>
-                      <div className="relative mb-3">
-                        <div className="w-24 h-24 sm:w-28 sm:h-28 rounded-full overflow-visible border-4 border-[#12131A] shadow-2xl bg-indigo-900/40 flex items-center justify-center relative">
-                          {profile.avatar.includes("http") ? (
+                      <div className="relative mb-2 flex flex-col items-center">
+                        <div
+                          onClick={() => isOwner && fileInputRef.current?.click()}
+                          className={`w-24 h-24 sm:w-28 sm:h-28 rounded-full overflow-hidden border-4 border-[#12131A] shadow-2xl bg-indigo-900/40 flex items-center justify-center relative ${
+                            isOwner ? "cursor-pointer group" : ""
+                          }`}
+                          title={isOwner ? "Click to change profile picture" : undefined}
+                        >
+                          {profile.avatar && (profile.avatar.startsWith("http") || profile.avatar.startsWith("data:")) ? (
                             <img src={profile.avatar} alt={profile.username} className="w-full h-full object-cover rounded-full" />
                           ) : (
                             <UserAvatar
@@ -802,6 +848,13 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
                               badgeRole={profileRole !== "user" ? profileRole : undefined}
                             />
                           )}
+
+                          {isOwner && (
+                            <div className="absolute inset-0 bg-black/55 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center text-white text-[10px] font-bold gap-1 backdrop-blur-[2px]">
+                              <Camera size={20} className="text-white drop-shadow" />
+                              <span>Change Photo</span>
+                            </div>
+                          )}
                         </div>
 
                         {isOwner && (
@@ -809,10 +862,19 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
                             <button
                               onClick={() => fileInputRef.current?.click()}
                               disabled={isUploading}
-                              className="absolute bottom-0 right-0 w-8 h-8 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full flex items-center justify-center shadow-lg transition-transform active:scale-95 disabled:opacity-50 cursor-pointer border-2 border-[#12131A] z-10"
-                              title="Change Avatar"
+                              className="absolute bottom-6 right-0 w-8 h-8 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full flex items-center justify-center shadow-lg transition-transform active:scale-95 disabled:opacity-50 cursor-pointer border-2 border-[#12131A] z-10"
+                              title="Change Profile Picture"
                             >
                               {isUploading ? <Loader2 size={14} className="animate-spin" /> : <Camera size={14} />}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => fileInputRef.current?.click()}
+                              disabled={isUploading}
+                              className="mt-1.5 text-[11px] font-semibold text-indigo-400 hover:text-indigo-300 transition-colors flex items-center gap-1 cursor-pointer"
+                            >
+                              <Camera size={12} />
+                              <span>Change Profile Picture</span>
                             </button>
                             <input
                               type="file"

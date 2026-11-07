@@ -206,13 +206,14 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
 
     const handleLocalProfileUpdate = (e: any) => {
       const updatedDisplayName = e?.detail?.displayName;
-      if (updatedDisplayName) {
+      const updatedAvatar = e?.detail?.avatar;
+      if (updatedDisplayName || updatedAvatar) {
         setUser((prev) => {
           if (!prev) return prev;
           return {
             ...prev,
-            name: updatedDisplayName,
-            displayName: updatedDisplayName,
+            ...(updatedDisplayName ? { name: updatedDisplayName, displayName: updatedDisplayName } : {}),
+            ...(updatedAvatar ? { avatar: updatedAvatar } : {}),
           };
         });
       }
