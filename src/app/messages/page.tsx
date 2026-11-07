@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState, useRef, useCallback, Fragment } from "react";
+import React, { useEffect, useState, useRef, useCallback, useMemo, Fragment } from "react";
 import { useUser } from "@/hooks/useUser";
 import { Navbar } from "@/components/layout/Navbar";
 import { supabase } from "@/lib/supabase";
@@ -87,6 +87,19 @@ export default function MessagesPage() {
   const [targetRelationship, setTargetRelationship] = useState<RelationshipStatus | null>(null);
   const [isRelationshipLoading, setIsRelationshipLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [chatFilter, setChatFilter] = useState<"all" | "direct" | "groups" | "unread">("all");
+
+  const unreadConversationsCount = useMemo(() => {
+    return conversations.filter((c) => (unreadByConversation[c.id] || 0) > 0).length;
+  }, [conversations, unreadByConversation]);
+
+  const groupsCount = useMemo(() => {
+    return conversations.filter((c) => c.type === "group").length;
+  }, [conversations]);
+
+  const directCount = useMemo(() => {
+    return conversations.filter((c) => c.type !== "group").length;
+  }, [conversations]);
   const [isLoading, setIsLoading] = useState(true);
   const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -1484,21 +1497,32 @@ export default function MessagesPage() {
     );
   }
 
-  const filteredConversations = conversations.filter(conv => {
-    if (!searchQuery.trim()) return true;
-    const query = searchQuery.toLowerCase();
-    if (conv.type === "group") {
-      return (conv.name || "Group Chat").toLowerCase().includes(query);
-    }
-    const otherId = conv.other_user?.id;
-    const nickname = otherId ? nicknames[otherId] : null;
-    const shownName = getProfileDisplayName(conv.other_user, conv.other_user?.username || "");
-    return (
-      (nickname && nickname.toLowerCase().includes(query)) ||
-      (shownName && shownName.toLowerCase().includes(query)) ||
-      (conv.other_user?.username && conv.other_user.username.toLowerCase().includes(query))
-    );
-  });
+  const filteredConversations = useMemo(() => {
+    return conversations.filter((conv) => {
+      // 1. WhatsApp-style category filter (All / Direct / Groups / Unread)
+      if (chatFilter === "direct" && conv.type === "group") return false;
+      if (chatFilter === "groups" && conv.type !== "group") return false;
+      if (chatFilter === "unread") {
+        const unseenCount = unreadByConversation[conv.id] || 0;
+        if (unseenCount <= 0) return false;
+      }
+
+      // 2. Search query filter
+      if (!searchQuery.trim()) return true;
+      const query = searchQuery.toLowerCase();
+      if (conv.type === "group") {
+        return (conv.name || "Group Chat").toLowerCase().includes(query);
+      }
+      const otherId = conv.other_user?.id;
+      const nickname = otherId ? nicknames[otherId] : null;
+      const shownName = getProfileDisplayName(conv.other_user, conv.other_user?.username || "");
+      return (
+        (nickname && nickname.toLowerCase().includes(query)) ||
+        (shownName && shownName.toLowerCase().includes(query)) ||
+        (conv.other_user?.username && conv.other_user.username.toLowerCase().includes(query))
+      );
+    });
+  }, [conversations, chatFilter, searchQuery, nicknames, unreadByConversation]);
 
   return (
     <div className="h-screen h-[100dvh] flex flex-col bg-background overflow-hidden">
@@ -1554,6 +1578,84 @@ export default function MessagesPage() {
                 </button>
               )}
             </div>
+
+            {/* WhatsApp-Style Chat Filter Pills */}
+            <div className="flex items-center gap-1.5 mt-3 overflow-x-auto no-scrollbar scroll-smooth">
+              <button
+                type="button"
+                onClick={() => setChatFilter("all")}
+                className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${
+                  chatFilter === "all"
+                    ? "bg-indigo-600 text-white shadow-sm shadow-indigo-600/30 ring-1 ring-indigo-400/40"
+                    : "bg-white/5 hover:bg-white/10 text-slate-400 hover:text-slate-200 border border-white/5"
+                }`}
+              >
+                All
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setChatFilter("direct")}
+                className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${
+                  chatFilter === "direct"
+                    ? "bg-indigo-600 text-white shadow-sm shadow-indigo-600/30 ring-1 ring-indigo-400/40"
+                    : "bg-white/5 hover:bg-white/10 text-slate-400 hover:text-slate-200 border border-white/5"
+                }`}
+              >
+                <span>Direct</span>
+                {directCount > 0 && (
+                  <span
+                    className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
+                      chatFilter === "direct" ? "bg-white/20 text-white" : "bg-white/5 text-slate-400"
+                    }`}
+                  >
+                    {directCount}
+                  </span>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setChatFilter("groups")}
+                className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${
+                  chatFilter === "groups"
+                    ? "bg-indigo-600 text-white shadow-sm shadow-indigo-600/30 ring-1 ring-indigo-400/40"
+                    : "bg-white/5 hover:bg-white/10 text-slate-400 hover:text-slate-200 border border-white/5"
+                }`}
+              >
+                <span>Groups</span>
+                {groupsCount > 0 && (
+                  <span
+                    className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
+                      chatFilter === "groups" ? "bg-white/20 text-white" : "bg-white/5 text-slate-400"
+                    }`}
+                  >
+                    {groupsCount}
+                  </span>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setChatFilter("unread")}
+                className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${
+                  chatFilter === "unread"
+                    ? "bg-indigo-600 text-white shadow-sm shadow-indigo-600/30 ring-1 ring-indigo-400/40"
+                    : "bg-white/5 hover:bg-white/10 text-slate-400 hover:text-slate-200 border border-white/5"
+                }`}
+              >
+                <span>Unread</span>
+                {unreadConversationsCount > 0 && (
+                  <span
+                    className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
+                      chatFilter === "unread" ? "bg-white/20 text-white" : "bg-indigo-500/20 text-indigo-300"
+                    }`}
+                  >
+                    {unreadConversationsCount}
+                  </span>
+                )}
+              </button>
+            </div>
           </div>
 
           {/* Conversations List */}
@@ -1566,20 +1668,44 @@ export default function MessagesPage() {
             ) : filteredConversations.length === 0 ? (
               <div className="p-8 text-center flex flex-col items-center justify-center gap-3">
                 <div className="w-12 h-12 rounded-full bg-white/5 flex items-center justify-center text-slate-500">
-                  <MessageSquare size={22} />
+                  {chatFilter === "groups" ? <Users size={22} /> : <MessageSquare size={22} />}
                 </div>
                 <p className="text-sm font-medium text-slate-300">
-                  {searchQuery ? "No matches found" : "No conversations yet"}
+                  {searchQuery
+                    ? "No matches found"
+                    : chatFilter === "groups"
+                    ? "No group chats"
+                    : chatFilter === "direct"
+                    ? "No direct chats"
+                    : chatFilter === "unread"
+                    ? "No unread messages"
+                    : "No conversations yet"}
                 </p>
                 <p className="text-xs text-slate-500 max-w-[220px]">
-                  {searchQuery ? "Try a different search keyword." : "Connect with friends from rooms or start a group chat!"}
+                  {searchQuery
+                    ? "Try a different search keyword."
+                    : chatFilter === "groups"
+                    ? "Create a group to chat and connect with multiple friends!"
+                    : chatFilter === "direct"
+                    ? "Connect with friends from voice junctions to chat directly."
+                    : chatFilter === "unread"
+                    ? "You are all caught up on your messages."
+                    : "Connect with friends from rooms or start a group chat!"}
                 </p>
-                {!searchQuery && (
+                {chatFilter === "groups" && !searchQuery && (
                   <button
                     onClick={() => setIsGroupModalOpen(true)}
-                    className="mt-2 text-xs font-semibold text-indigo-400 hover:text-indigo-300 underline"
+                    className="mt-2 text-xs font-semibold text-indigo-400 hover:text-indigo-300 underline cursor-pointer"
                   >
                     Start a Group Chat
+                  </button>
+                )}
+                {chatFilter !== "all" && !searchQuery && (
+                  <button
+                    onClick={() => setChatFilter("all")}
+                    className="mt-1 text-xs font-semibold text-slate-400 hover:text-white transition-colors cursor-pointer"
+                  >
+                    Show all chats
                   </button>
                 )}
               </div>
