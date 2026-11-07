@@ -26,6 +26,18 @@ export interface ConnectionUser {
 }
 
 /**
+ * In-memory block lists cache & request deduplication to prevent redundant network calls
+ */
+let blockListsCache: {
+  userId: string;
+  timestamp: number;
+  data: { blockedByMeIds: string[]; blockedMeIds: string[] };
+} | null = null;
+
+let pendingBlockListsPromise: Promise<{ blockedByMeIds: string[]; blockedMeIds: string[] }> | null = null;
+const BLOCK_CACHE_TTL_MS = 60000; // 60 seconds TTL
+
+/**
  * Social Service — Request & Acceptance Social Graph for YAPCLUB / RandomVoice
  * Handles: Follow Request (Pending), Accept Request, Decline Request, Cancel Request,
  * Unfollow, Remove Follower, Block, Unblock, and Count Synchronization
@@ -433,6 +445,25 @@ export const socialService = {
       return { success: false, error: "Invalid user parameters" };
     }
 
+    // Invalidate local in-memory block cache immediately
+    blockListsCache = null;
+    pendingBlockListsPromise = null;
+
+    try {
+      const res = await fetch("/api/users/block", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: currentUserId, targetUserId, action: "block" }),
+      });
+
+      if (res.ok) {
+        this.broadcastSocialUpdate();
+        return { success: true };
+      }
+    } catch (apiErr) {
+      console.warn("API block fallback:", apiErr);
+    }
+
     try {
       // Step A: Sever mutual follow relations
       await Promise.all([
@@ -480,6 +511,25 @@ export const socialService = {
       return { success: false, error: "Invalid user parameters" };
     }
 
+    // Invalidate local in-memory block cache immediately
+    blockListsCache = null;
+    pendingBlockListsPromise = null;
+
+    try {
+      const res = await fetch("/api/users/block", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: currentUserId, targetUserId, action: "unblock" }),
+      });
+
+      if (res.ok) {
+        this.broadcastSocialUpdate();
+        return { success: true };
+      }
+    } catch (apiErr) {
+      console.warn("API unblock fallback:", apiErr);
+    }
+
     try {
       const { error } = await supabase
         .from("connections")
@@ -505,35 +555,75 @@ export const socialService = {
    * Get all block relations for a user:
    * - blockedByMeIds: users that current user has blocked
    * - blockedMeIds: users that have blocked current user
+   *
+   * High performance:
+   * 1. Reuses in-memory cached results for up to 60 seconds (0 network calls)
+   * 2. Automatically deduplicates parallel calls across simultaneous components
    */
   async getBlockLists(currentUserId: string): Promise<{ blockedByMeIds: string[]; blockedMeIds: string[] }> {
     if (!currentUserId) return { blockedByMeIds: [], blockedMeIds: [] };
 
-    try {
-      const [blockedByMeRes, blockedMeRes] = await Promise.all([
-        supabase
-          .from("connections")
-          .select("receiver_id")
-          .eq("requester_id", currentUserId)
-          .eq("status", "blocked"),
-        supabase
-          .from("connections")
-          .select("requester_id")
-          .eq("receiver_id", currentUserId)
-          .eq("status", "blocked"),
-      ]);
+    const now = Date.now();
 
-      const blockedByMeIds = (blockedByMeRes.data || []).map((d: any) => d.receiver_id);
-      const blockedMeIds = (blockedMeRes.data || []).map((d: any) => d.requester_id);
-
-      return {
-        blockedByMeIds,
-        blockedMeIds,
-      };
-    } catch (err) {
-      console.error("Error fetching block lists:", err);
-      return { blockedByMeIds: [], blockedMeIds: [] };
+    // 1. Check in-memory fresh cache
+    if (
+      blockListsCache &&
+      blockListsCache.userId === currentUserId &&
+      now - blockListsCache.timestamp < BLOCK_CACHE_TTL_MS
+    ) {
+      return blockListsCache.data;
     }
+
+    // 2. Request deduplication (if a call is already in progress for this user, share the promise)
+    if (pendingBlockListsPromise) {
+      return pendingBlockListsPromise;
+    }
+
+    pendingBlockListsPromise = (async () => {
+      try {
+        const res = await fetch(`/api/users/block?userId=${currentUserId}`);
+        if (res.ok) {
+          const data = await res.json();
+          const result = {
+            blockedByMeIds: data.blockedByMeIds || [],
+            blockedMeIds: data.blockedMeIds || [],
+          };
+          blockListsCache = { userId: currentUserId, timestamp: Date.now(), data: result };
+          return result;
+        }
+      } catch (apiErr) {
+        console.warn("API getBlockLists fallback:", apiErr);
+      }
+
+      try {
+        const [blockedByMeRes, blockedMeRes] = await Promise.all([
+          supabase
+            .from("connections")
+            .select("receiver_id")
+            .eq("requester_id", currentUserId)
+            .eq("status", "blocked"),
+          supabase
+            .from("connections")
+            .select("requester_id")
+            .eq("receiver_id", currentUserId)
+            .eq("status", "blocked"),
+        ]);
+
+        const result = {
+          blockedByMeIds: (blockedByMeRes.data || []).map((d: any) => d.receiver_id),
+          blockedMeIds: (blockedMeRes.data || []).map((d: any) => d.requester_id),
+        };
+        blockListsCache = { userId: currentUserId, timestamp: Date.now(), data: result };
+        return result;
+      } catch (err) {
+        console.error("Error fetching block lists:", err);
+        return { blockedByMeIds: [], blockedMeIds: [] };
+      } finally {
+        pendingBlockListsPromise = null;
+      }
+    })();
+
+    return pendingBlockListsPromise;
   },
 
   /**

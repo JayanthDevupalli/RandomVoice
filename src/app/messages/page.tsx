@@ -109,6 +109,33 @@ export default function MessagesPage() {
   const [isNicknameModalOpen, setIsNicknameModalOpen] = useState(false);
   const [nicknameInput, setNicknameInput] = useState("");
 
+  const filteredConversations = useMemo(() => {
+    return conversations.filter((conv) => {
+      // 1. WhatsApp-style category filter (All / Direct / Groups / Unread)
+      if (chatFilter === "direct" && conv.type === "group") return false;
+      if (chatFilter === "groups" && conv.type !== "group") return false;
+      if (chatFilter === "unread") {
+        const unseenCount = unreadByConversation[conv.id] || 0;
+        if (unseenCount <= 0) return false;
+      }
+
+      // 2. Search query filter
+      if (!searchQuery.trim()) return true;
+      const query = searchQuery.toLowerCase();
+      if (conv.type === "group") {
+        return (conv.name || "Group Chat").toLowerCase().includes(query);
+      }
+      const otherId = conv.other_user?.id;
+      const nickname = otherId ? nicknames[otherId] : null;
+      const shownName = getProfileDisplayName(conv.other_user, conv.other_user?.username || "");
+      return (
+        (nickname && nickname.toLowerCase().includes(query)) ||
+        (shownName && shownName.toLowerCase().includes(query)) ||
+        (conv.other_user?.username && conv.other_user.username.toLowerCase().includes(query))
+      );
+    });
+  }, [conversations, chatFilter, searchQuery, nicknames, unreadByConversation]);
+
   // --- Feature 3: Block (Bidirectional) ---
   const [blockedUsers, setBlockedUsers] = useState<string[]>([]); // Users current user has blocked
   const [blockedMeUsers, setBlockedMeUsers] = useState<string[]>([]); // Users who have blocked current user
@@ -158,6 +185,19 @@ export default function MessagesPage() {
   const [otherUserLastReadAt, setOtherUserLastReadAt] = useState<string | null>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const presenceChannelRef = useRef<any>(null);
+
+  // Latest message timestamp received from the other user (messages sent before this are guaranteed seen)
+  const otherUserLatestMsgTime = useMemo(() => {
+    if (!user?.id || !messages.length) return 0;
+    let maxTime = 0;
+    for (const m of messages) {
+      if (m.sender_id !== user.id) {
+        const t = new Date(m.created_at).getTime();
+        if (t > maxTime) maxTime = t;
+      }
+    }
+    return maxTime;
+  }, [messages, user?.id]);
 
   // --- Feature 7: Animated GIFs & Media Lightbox ---
   const [isGifPickerOpen, setIsGifPickerOpen] = useState(false);
@@ -446,6 +486,23 @@ export default function MessagesPage() {
         .eq("conversation_id", activeConversationId)
         .eq("user_id", user.id)
     ).catch(() => {});
+
+    // 3. Persist to profiles.social_links so peers can read the receipt reliably
+    Promise.resolve(
+      supabase
+        .from("profiles")
+        .select("social_links")
+        .eq("id", user.id)
+        .maybeSingle()
+    ).then(({ data }) => {
+      const links = data?.social_links || {};
+      const lastReadMap = links.last_read_map || {};
+      lastReadMap[activeConversationId] = safeReadTime;
+      return supabase
+        .from("profiles")
+        .update({ social_links: { ...links, last_read_map: lastReadMap } })
+        .eq("id", user.id);
+    }).catch(() => {});
   }, [activeConversationId, user?.id]);
 
   // Mark active conversation as read
@@ -723,14 +780,39 @@ export default function MessagesPage() {
     if (!user?.id || !targetUserId) return;
     const isCurrentlyBlocked = blockedUsers.includes(targetUserId);
 
+    // 1. Instant optimistic local state update
     if (isCurrentlyBlocked) {
       setBlockedUsers((prev) => prev.filter((id) => id !== targetUserId));
-      await socialService.unblockUser(user.id, targetUserId);
     } else {
       setBlockedUsers((prev) => [...prev, targetUserId]);
-      await socialService.blockUser(user.id, targetUserId);
     }
     setIsHeaderMenuOpen(false);
+
+    // 2. Realtime presence broadcast so other user's UI responds immediately
+    if (presenceChannelRef.current) {
+      try {
+        presenceChannelRef.current.send({
+          type: "broadcast",
+          event: "block_status_changed",
+          payload: {
+            blocker_id: user.id,
+            blocked_id: targetUserId,
+            is_blocked: !isCurrentlyBlocked,
+          },
+        });
+      } catch (err) {}
+    }
+
+    // 3. Persist via backend API
+    try {
+      if (isCurrentlyBlocked) {
+        await socialService.unblockUser(user.id, targetUserId);
+      } else {
+        await socialService.blockUser(user.id, targetUserId);
+      }
+    } catch (err) {
+      console.error("Failed to toggle block:", err);
+    }
   };
 
   // Delete chat
@@ -1122,8 +1204,26 @@ export default function MessagesPage() {
       return;
     }
 
-    // 1. Direct chat: Fetch persistent read receipt timestamp from DB so previously seen messages immediately render as "seen"
+    // 1. Direct chat: Fetch persistent read receipt timestamp so previously seen messages immediately render as "seen"
     if (!isGroup && otherUserId) {
+      // Fetch from profiles.social_links.last_read_map (publicly readable across RLS)
+      supabase
+        .from("profiles")
+        .select("social_links")
+        .eq("id", otherUserId)
+        .maybeSingle()
+        .then(({ data }) => {
+          const theirReadTime = (data?.social_links as any)?.last_read_map?.[activeConversationId];
+          if (theirReadTime) {
+            setOtherUserLastReadAt((prev) => {
+              if (!prev || new Date(theirReadTime).getTime() > new Date(prev).getTime()) {
+                return theirReadTime;
+              }
+              return prev;
+            });
+          }
+        });
+
       supabase
         .from("conversation_members")
         .select("last_read_at")
@@ -1247,6 +1347,18 @@ export default function MessagesPage() {
                 ? { ...c, last_message: undefined, unread_count: 0 }
                 : c
             )
+          );
+        }
+      })
+      .on("broadcast", { event: "block_status_changed" }, (payload: any) => {
+        const { blocker_id, blocked_id, is_blocked } = payload?.payload || {};
+        if (blocked_id === user.id) {
+          setBlockedMeUsers((prev) =>
+            is_blocked ? Array.from(new Set([...prev, blocker_id])) : prev.filter((id) => id !== blocker_id)
+          );
+        } else if (blocker_id === user.id) {
+          setBlockedUsers((prev) =>
+            is_blocked ? Array.from(new Set([...prev, blocked_id])) : prev.filter((id) => id !== blocked_id)
           );
         }
       })
@@ -1496,33 +1608,6 @@ export default function MessagesPage() {
       </div>
     );
   }
-
-  const filteredConversations = useMemo(() => {
-    return conversations.filter((conv) => {
-      // 1. WhatsApp-style category filter (All / Direct / Groups / Unread)
-      if (chatFilter === "direct" && conv.type === "group") return false;
-      if (chatFilter === "groups" && conv.type !== "group") return false;
-      if (chatFilter === "unread") {
-        const unseenCount = unreadByConversation[conv.id] || 0;
-        if (unseenCount <= 0) return false;
-      }
-
-      // 2. Search query filter
-      if (!searchQuery.trim()) return true;
-      const query = searchQuery.toLowerCase();
-      if (conv.type === "group") {
-        return (conv.name || "Group Chat").toLowerCase().includes(query);
-      }
-      const otherId = conv.other_user?.id;
-      const nickname = otherId ? nicknames[otherId] : null;
-      const shownName = getProfileDisplayName(conv.other_user, conv.other_user?.username || "");
-      return (
-        (nickname && nickname.toLowerCase().includes(query)) ||
-        (shownName && shownName.toLowerCase().includes(query)) ||
-        (conv.other_user?.username && conv.other_user.username.toLowerCase().includes(query))
-      );
-    });
-  }, [conversations, chatFilter, searchQuery, nicknames, unreadByConversation]);
 
   return (
     <div className="h-screen h-[100dvh] flex flex-col bg-background overflow-hidden">
@@ -2248,7 +2333,8 @@ export default function MessagesPage() {
                               const isGif = parsed.type === "gif" && !!parsed.gifUrl;
                               const msgTime = new Date(msg.created_at).getTime();
                               const otherReadTime = otherUserLastReadAt ? new Date(otherUserLastReadAt).getTime() : 0;
-                              const isMsgSeen = Boolean(otherUserLastReadAt && otherReadTime >= msgTime);
+                              const effectiveOtherReadTime = Math.max(otherReadTime, otherUserLatestMsgTime);
+                              const isMsgSeen = Boolean(effectiveOtherReadTime > 0 && effectiveOtherReadTime >= msgTime);
                               const isMsgDelivered = Boolean(isOtherUserOnline || isMsgSeen);
                               return (
                                 <div 
@@ -3206,7 +3292,8 @@ export default function MessagesPage() {
                 }));
             } else if (activeConversation?.other_user) {
               const otherReadTime = otherUserLastReadAt ? new Date(otherUserLastReadAt).getTime() : 0;
-              if (otherUserLastReadAt && otherReadTime >= msgTime) {
+              const effectiveOtherReadTime = Math.max(otherReadTime, otherUserLatestMsgTime);
+              if (effectiveOtherReadTime > 0 && effectiveOtherReadTime >= msgTime) {
                 return [
                   {
                     id: activeConversation.other_user.id,
@@ -3214,7 +3301,7 @@ export default function MessagesPage() {
                     name: activeConversation.other_user.name,
                     displayName: getProfileDisplayName(activeConversation.other_user, activeConversation.other_user.username),
                     avatar: activeConversation.other_user.avatar,
-                    readAt: otherUserLastReadAt,
+                    readAt: otherUserLastReadAt || new Date(effectiveOtherReadTime).toISOString(),
                   },
                 ];
               }
@@ -3240,7 +3327,8 @@ export default function MessagesPage() {
                 }));
             } else if (activeConversation?.other_user) {
               const otherReadTime = otherUserLastReadAt ? new Date(otherUserLastReadAt).getTime() : 0;
-              if (!otherUserLastReadAt || otherReadTime < msgTime) {
+              const effectiveOtherReadTime = Math.max(otherReadTime, otherUserLatestMsgTime);
+              if (effectiveOtherReadTime === 0 || effectiveOtherReadTime < msgTime) {
                 return [
                   {
                     id: activeConversation.other_user.id,
