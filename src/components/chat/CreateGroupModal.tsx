@@ -6,6 +6,7 @@ import { X, Users, Loader2, Check, Search } from "lucide-react";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import { createPortal } from "react-dom";
 import { socialService } from "@/lib/social-service";
+import { getProfileDisplayName } from "@/lib/chat-utils";
 
 interface CreateGroupModalProps {
   isOpen: boolean;
@@ -58,8 +59,8 @@ export function CreateGroupModal({ isOpen, onClose, currentUser, onGroupCreated 
           .select(`
             requester_id,
             receiver_id,
-            requester:profiles!connections_requester_id_fkey(id, username, avatar),
-            receiver:profiles!connections_receiver_id_fkey(id, username, avatar)
+            requester:profiles!connections_requester_id_fkey(id, username, avatar, social_links),
+            receiver:profiles!connections_receiver_id_fkey(id, username, avatar, social_links)
           `)
           .or(`requester_id.eq.${currentUser.id},receiver_id.eq.${currentUser.id}`)
           .eq("status", "accepted");
@@ -75,13 +76,16 @@ export function CreateGroupModal({ isOpen, onClose, currentUser, onGroupCreated 
 
             if (other && other.id && other.id !== currentUser.id && !blockedSet.has(other.id)) {
               if (!uniqueFriendsMap.has(other.id)) {
-                uniqueFriendsMap.set(other.id, other);
+                uniqueFriendsMap.set(other.id, {
+                  ...other,
+                  displayName: getProfileDisplayName(other, other.username),
+                });
               }
             }
           }
 
           const sortedFriends = Array.from(uniqueFriendsMap.values()).sort((a, b) =>
-            (a.username || "").localeCompare(b.username || "")
+            (a.displayName || a.username || "").localeCompare(b.displayName || b.username || "")
           );
 
           setFriends(sortedFriends);
@@ -140,7 +144,9 @@ export function CreateGroupModal({ isOpen, onClose, currentUser, onGroupCreated 
   };
 
   const filteredFriends = friends.filter(f =>
-    !searchQuery.trim() || (f.username || "").toLowerCase().includes(searchQuery.trim().toLowerCase())
+    !searchQuery.trim() || 
+    (f.username || "").toLowerCase().includes(searchQuery.trim().toLowerCase()) ||
+    (f.displayName && f.displayName.toLowerCase().includes(searchQuery.trim().toLowerCase()))
   );
 
   if (!mounted || !isOpen) return null;
@@ -226,15 +232,19 @@ export function CreateGroupModal({ isOpen, onClose, currentUser, onGroupCreated 
                       onClick={() => toggleSelect(friend.id)}
                       className={`w-full flex items-center justify-between p-3.5 transition-colors active:bg-white/10 ${isSelected ? 'bg-indigo-500/10' : 'hover:bg-white/5'}`}
                     >
-                      <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-3 min-w-0">
                         <div className="w-9 h-9 rounded-full overflow-hidden bg-slate-800 border border-white/10 shrink-0">
                           {friend.avatar?.includes("http") ? (
-                            <img src={friend.avatar} className="w-full h-full object-cover" />
+                            <img src={friend.avatar} alt={friend.displayName || friend.username} className="w-full h-full object-cover" />
                           ) : (
                             <UserAvatar avatar={friend.avatar} size="sm" className="!w-full !h-full" />
                           )}
                         </div>
-                        <span className="text-sm font-medium text-white">{friend.username}</span>
+                        <div className="flex flex-col min-w-0 text-left">
+                          <span className="text-sm font-medium text-white truncate">
+                            {friend.displayName || friend.username}
+                          </span>
+                        </div>
                       </div>
                       <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-colors shrink-0 ${isSelected ? 'bg-indigo-600 border-indigo-500 text-white' : 'border-slate-600'}`}>
                         {isSelected && <Check size={12} />}

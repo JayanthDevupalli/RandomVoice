@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef, useCallback } from "react";
+import React, { useEffect, useState, useRef, useCallback, Fragment } from "react";
 import { useUser } from "@/hooks/useUser";
 import { Navbar } from "@/components/layout/Navbar";
 import { supabase } from "@/lib/supabase";
@@ -17,6 +17,7 @@ import {
   MoreVertical,
   Edit3,
   Trash2,
+  Eraser,
   ShieldAlert,
   ShieldCheck,
   Check,
@@ -26,7 +27,9 @@ import {
   ArrowDown,
   PhoneCall,
   Lock,
-  UserPlus
+  UserPlus,
+  Info,
+  Smile
 } from "lucide-react";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import { useRouter } from "next/navigation";
@@ -41,21 +44,28 @@ import {
   serializeVoiceMessage,
   serializeGifMessage,
   getSenderColor,
-  ParsedMessage 
+  getProfileDisplayName,
+  isSameDay,
+  formatChatDateDivider,
+  ParsedMessage,
+  MessageReaction,
+  toggleReactionInContent
 } from "@/lib/chat-utils";
+import { QuickReactionPicker, ReactionBadges } from "@/components/chat/MessageReactions";
 import { socialService, RelationshipStatus } from "@/lib/social-service";
 import { RoomInviteCard } from "@/components/chat/RoomInviteCard";
 import { GifPicker } from "@/components/chat/GifPicker";
 import { MediaLightbox } from "@/components/chat/MediaLightbox";
 import { GroupInfoModal } from "@/components/chat/GroupInfoModal";
 import { AddGroupMemberModal } from "@/components/chat/AddGroupMemberModal";
+import { MessageInfoModal } from "@/components/chat/MessageInfoModal";
 
 function formatGroupSubtitle(
-  members: Array<{ id: string; username: string }>,
+  members: Array<{ id: string; username: string; name?: string; displayName?: string; social_links?: any }>,
   currentUserId?: string
 ): string {
   if (!members || members.length === 0) return "Group Conversation";
-  const names = members.map((m) => (m.id === currentUserId ? "You" : m.username));
+  const names = members.map((m) => (m.id === currentUserId ? "You" : getProfileDisplayName(m, m.username)));
   const sortedNames = [...names.filter((n) => n === "You"), ...names.filter((n) => n !== "You")];
   if (sortedNames.length <= 4) {
     return sortedNames.join(", ");
@@ -90,9 +100,11 @@ export default function MessagesPage() {
   const [blockedUsers, setBlockedUsers] = useState<string[]>([]); // Users current user has blocked
   const [blockedMeUsers, setBlockedMeUsers] = useState<string[]>([]); // Users who have blocked current user
 
-  // --- Feature 4: Delete Chat ---
+  // --- Feature 4: Delete & Clear Chat ---
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isClearChatModalOpen, setIsClearChatModalOpen] = useState(false);
+  const [isClearingChat, setIsClearingChat] = useState(false);
 
   // --- Dropdown Menu in Header ---
   const [isHeaderMenuOpen, setIsHeaderMenuOpen] = useState(false);
@@ -112,6 +124,7 @@ export default function MessagesPage() {
     id: string;
     text: string;
     replyTo?: any;
+    reactions?: MessageReaction[];
   } | null>(null);
 
   const [deletingMessageId, setDeletingMessageId] = useState<string | null>(null);
@@ -138,11 +151,22 @@ export default function MessagesPage() {
   const [expandedMediaUrl, setExpandedMediaUrl] = useState<string | null>(null);
   const [expandedMediaTitle, setExpandedMediaTitle] = useState<string>("GIF");
   const [activeActionMsgId, setActiveActionMsgId] = useState<string | null>(null);
+  const [activeReactionPickerMsgId, setActiveReactionPickerMsgId] = useState<string | null>(null);
 
   // --- Feature 8: Group Info & Management ---
   const [isGroupInfoOpen, setIsGroupInfoOpen] = useState(false);
   const [isAddGroupMemberOpen, setIsAddGroupMemberOpen] = useState(false);
-  const [activeGroupMembers, setActiveGroupMembers] = useState<Array<{ id: string; username: string; role: string; avatar?: string }>>([]);
+  const [activeGroupMembers, setActiveGroupMembers] = useState<Array<{ id: string; username: string; role: string; avatar?: string; name?: string; displayName?: string; social_links?: any }>>([]);
+  const [groupMembersReadMap, setGroupMembersReadMap] = useState<Record<string, string>>({});
+  const [messageInfoTarget, setMessageInfoTarget] = useState<{
+    message: {
+      id: string;
+      content: string;
+      created_at: string;
+      sender_id: string;
+    };
+    parsedMessage: ParsedMessage | null;
+  } | null>(null);
 
   // --- Scroll to Bottom & Container ---
   const chatContainerRef = useRef<HTMLDivElement>(null);
@@ -240,7 +264,7 @@ export default function MessagesPage() {
           const otherUserIds = (otherMembersData || []).map(m => m.user_id);
           const { data: profilesData } = await supabase
             .from("profiles")
-            .select("id, username, avatar")
+            .select("id, username, avatar, social_links")
             .in("id", otherUserIds);
 
           const profileMap = new Map((profilesData || []).map(p => [p.id, p]));
@@ -275,7 +299,8 @@ export default function MessagesPage() {
                 profiles (
                   id,
                   username,
-                  avatar
+                  avatar,
+                  social_links
                 )
               `)
               .in("conversation_id", conversationIds)
@@ -325,7 +350,8 @@ export default function MessagesPage() {
           sender_id,
           profiles (
             username,
-            avatar
+            avatar,
+            social_links
           )
         `)
         .eq("conversation_id", activeConversationId)
@@ -377,7 +403,7 @@ export default function MessagesPage() {
     if (!activeConversationId || !user?.id) return;
     const nowMs = Date.now();
     const latestMsgMs = latestTimestamp ? new Date(latestTimestamp).getTime() : 0;
-    const safeReadTime = new Date(Math.max(nowMs, latestMsgMs) + 15000).toISOString();
+    const safeReadTime = new Date(Math.max(nowMs, latestMsgMs)).toISOString();
 
     // 1. Broadcast to active chat participants over presence channel
     if (presenceChannelRef.current) {
@@ -450,6 +476,7 @@ export default function MessagesPage() {
   const loadActiveGroupMembers = useCallback(async () => {
     if (!activeConversationId || activeConversation?.type !== "group") {
       setActiveGroupMembers([]);
+      setGroupMembersReadMap({});
       return;
     }
     try {
@@ -458,54 +485,78 @@ export default function MessagesPage() {
         .select(`
           user_id,
           role,
+          last_read_at,
           profiles (
             id,
             username,
-            avatar
+            avatar,
+            social_links
           )
         `)
         .eq("conversation_id", activeConversationId);
+
+      const initialReadMap: Record<string, string> = {};
 
       if (error) {
         // Fallback flat query if join fails
         const { data: flatMembers } = await supabase
           .from("conversation_members")
-          .select("user_id, role")
+          .select("user_id, role, last_read_at")
           .eq("conversation_id", activeConversationId);
 
         if (flatMembers && flatMembers.length > 0) {
+          flatMembers.forEach((m: any) => {
+            if (m.user_id && m.last_read_at) {
+              initialReadMap[m.user_id] = m.last_read_at;
+            }
+          });
           const uids = flatMembers.map((m: any) => m.user_id);
           const { data: profs } = await supabase
             .from("profiles")
-            .select("id, username, avatar")
+            .select("id, username, avatar, social_links")
             .in("id", uids);
 
           const pMap = new Map((profs || []).map((p: any) => [p.id, p]));
           const formatted = flatMembers.map((m: any) => {
             const p = pMap.get(m.user_id);
+            const dName = getProfileDisplayName(p, p?.username || "Unknown");
             return {
               id: m.user_id,
+              name: dName,
+              displayName: dName,
               username: p?.username || "Unknown",
               role: m.role || "member",
               avatar: p?.avatar,
+              social_links: p?.social_links,
             };
           });
           setActiveGroupMembers(formatted);
+          setGroupMembersReadMap(initialReadMap);
           return;
         }
       }
 
       if (data) {
+        data.forEach((d: any) => {
+          if (d.user_id && d.last_read_at) {
+            initialReadMap[d.user_id] = d.last_read_at;
+          }
+        });
         const membersList = data.map((d: any) => {
           const profile = Array.isArray(d.profiles) ? d.profiles[0] : d.profiles;
+          const dName = getProfileDisplayName(profile, profile?.username || "Unknown");
           return {
             id: d.user_id,
+            name: dName,
+            displayName: dName,
             username: profile?.username || "Unknown",
             role: d.role || "member",
             avatar: profile?.avatar,
+            social_links: profile?.social_links,
           };
         });
         setActiveGroupMembers(membersList);
+        setGroupMembersReadMap(initialReadMap);
       }
     } catch (err) {
       console.error("Failed to load active group members:", err);
@@ -517,6 +568,7 @@ export default function MessagesPage() {
       loadActiveGroupMembers();
     } else {
       setActiveGroupMembers([]);
+      setGroupMembersReadMap({});
     }
   }, [activeConversationId, activeConversation?.type, loadActiveGroupMembers]);
 
@@ -695,6 +747,57 @@ export default function MessagesPage() {
     }
   };
 
+  // Clear chat (empties all messages in active conversation without removing the chat)
+  const handleClearChat = async () => {
+    if (!activeConversationId || !user?.id) return;
+    setIsClearingChat(true);
+    try {
+      // 1. Optimistic clear
+      setMessages([]);
+      setReplyingTo(null);
+      setEditingMessage(null);
+
+      // 2. Clear last message in conversation sidebar
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === activeConversationId
+            ? { ...c, last_message: undefined, unread_count: 0 }
+            : c
+        )
+      );
+
+      // 3. Delete messages from database via API
+      const { data: { session } } = await supabase.auth.getSession();
+      await fetch(`/api/messages?conversationId=${activeConversationId}&userId=${user.id}`, {
+        method: "DELETE",
+        headers: {
+          ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+        },
+      });
+
+      // Direct fallback
+      await supabase.from("messages").delete().eq("conversation_id", activeConversationId);
+
+      // 4. Broadcast to peers in conversation
+      if (presenceChannelRef.current) {
+        try {
+          presenceChannelRef.current.send({
+            type: "broadcast",
+            event: "chat_cleared",
+            payload: { conversation_id: activeConversationId },
+          });
+        } catch (e) {}
+      }
+
+      setIsClearChatModalOpen(false);
+      setIsHeaderMenuOpen(false);
+    } catch (err) {
+      console.error("Error clearing chat:", err);
+    } finally {
+      setIsClearingChat(false);
+    }
+  };
+
   // Cleanup microphone stream & timer on page unmount
   useEffect(() => {
     return () => {
@@ -837,6 +940,7 @@ export default function MessagesPage() {
       id: msgId,
       text: parsed.text || "",
       replyTo: parsed.replyTo,
+      reactions: parsed.reactions,
     });
     setInputMessage(parsed.text || "");
     setReplyingTo(null);
@@ -855,7 +959,8 @@ export default function MessagesPage() {
     const newContent = serializeTextMessage(
       inputMessage.trim(),
       editingMessage.replyTo,
-      true
+      true,
+      editingMessage.reactions
     );
 
     setMessages((prev) =>
@@ -910,6 +1015,70 @@ export default function MessagesPage() {
     }
   };
 
+  // --- Message Reactions: Instant Optimistic + Presence Broadcast + DB Persistence ---
+  const handleToggleReaction = useCallback(
+    async (messageId: string, emoji: string) => {
+      if (!user?.id) return;
+      const targetMsg = messages.find((m) => m.id === messageId);
+      if (!targetMsg) return;
+
+      const dName = getProfileDisplayName(user, user.username || "You");
+
+      // 1. Optimistic state update
+      const { newContent } = toggleReactionInContent(targetMsg.content, {
+        emoji,
+        userId: user.id,
+        username: user.username,
+        displayName: dName,
+      });
+
+      setMessages((prev) =>
+        prev.map((m) => (m.id === messageId ? { ...m, content: newContent } : m))
+      );
+
+      // 2. Broadcast over active presence channel for instant 0ms UI update across participants
+      if (presenceChannelRef.current) {
+        try {
+          presenceChannelRef.current.send({
+            type: "broadcast",
+            event: "message_reaction",
+            payload: {
+              messageId,
+              emoji,
+              userId: user.id,
+              username: user.username,
+              displayName: dName,
+            },
+          });
+        } catch {}
+      }
+
+      // 3. Persist to DB via API
+      try {
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
+        await fetch("/api/messages/reactions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+          },
+          body: JSON.stringify({
+            messageId,
+            emoji,
+            userId: user.id,
+            username: user.username,
+            displayName: dName,
+          }),
+        });
+      } catch (err) {
+        console.error("Failed to save reaction:", err);
+      }
+    },
+    [messages, user]
+  );
+
   const scrollToMessage = (msgId?: string) => {
     if (!msgId) return;
     const elem = document.getElementById(`msg-${msgId}`);
@@ -922,7 +1091,7 @@ export default function MessagesPage() {
     }
   };
 
-  // Realtime Presence, Typing & Read Receipts indicator for active chat
+  // Realtime Presence, Typing & Read Receipts indicator for active chat (Direct & Group)
   useEffect(() => {
     if (!activeConversationId || !user?.id) {
       setIsOtherUserConvOnline(false);
@@ -931,33 +1100,36 @@ export default function MessagesPage() {
       return;
     }
 
+    const isGroup = activeConversation?.type === "group";
     const otherUserId = activeConversation?.other_user?.id;
-    if (!otherUserId || activeConversation?.type === "group") {
+    if (!isGroup && !otherUserId) {
       setIsOtherUserConvOnline(false);
       setIsOtherUserTyping(false);
       setOtherUserLastReadAt(null);
       return;
     }
 
-    // 1. Fetch persistent read receipt timestamp from DB so previously seen messages immediately render as "seen"
-    supabase
-      .from("conversation_members")
-      .select("last_read_at")
-      .eq("conversation_id", activeConversationId)
-      .eq("user_id", otherUserId)
-      .maybeSingle()
-      .then(({ data, error }) => {
-        if (!error && data?.last_read_at) {
-          setOtherUserLastReadAt((prev) => {
-            if (!prev || new Date(data.last_read_at).getTime() > new Date(prev).getTime()) {
-              return data.last_read_at;
-            }
-            return prev;
-          });
-        }
-      });
+    // 1. Direct chat: Fetch persistent read receipt timestamp from DB so previously seen messages immediately render as "seen"
+    if (!isGroup && otherUserId) {
+      supabase
+        .from("conversation_members")
+        .select("last_read_at")
+        .eq("conversation_id", activeConversationId)
+        .eq("user_id", otherUserId)
+        .maybeSingle()
+        .then(({ data, error }) => {
+          if (!error && data?.last_read_at) {
+            setOtherUserLastReadAt((prev) => {
+              if (!prev || new Date(data.last_read_at).getTime() > new Date(prev).getTime()) {
+                return data.last_read_at;
+              }
+              return prev;
+            });
+          }
+        });
+    }
 
-    // 2. Realtime presence & broadcast channel
+    // 2. Realtime presence & broadcast channel (Active for direct and group conversations)
     const presenceChannel = supabase.channel(`conv_presence_${activeConversationId}`, {
       config: { presence: { key: user.id } },
     });
@@ -965,30 +1137,46 @@ export default function MessagesPage() {
     presenceChannel
       .on("presence", { event: "sync" }, () => {
         const state = presenceChannel.presenceState();
-        let isOnline = false;
-        let latestReadTime: string | null = null;
-        for (const key of Object.keys(state)) {
-          const presences = state[key] as any[];
-          const otherPresence = presences.find((p: any) => p.user_id === otherUserId);
-          if (otherPresence) {
-            isOnline = true;
-            if (otherPresence.last_read_at) {
-              latestReadTime = otherPresence.last_read_at;
+        if (isGroup) {
+          for (const key of Object.keys(state)) {
+            const presences = state[key] as any[];
+            for (const p of presences) {
+              if (p?.user_id && p?.last_read_at && p.user_id !== user.id) {
+                setGroupMembersReadMap((prev) => {
+                  if (!prev[p.user_id] || new Date(p.last_read_at).getTime() > new Date(prev[p.user_id]).getTime()) {
+                    return { ...prev, [p.user_id]: p.last_read_at };
+                  }
+                  return prev;
+                });
+              }
             }
           }
-        }
-        setIsOtherUserConvOnline(isOnline);
-        if (latestReadTime) {
-          setOtherUserLastReadAt((prev) => {
-            if (!prev || new Date(latestReadTime!).getTime() > new Date(prev).getTime()) {
-              return latestReadTime;
+        } else {
+          let isOnline = false;
+          let latestReadTime: string | null = null;
+          for (const key of Object.keys(state)) {
+            const presences = state[key] as any[];
+            const otherPresence = presences.find((p: any) => p.user_id === otherUserId);
+            if (otherPresence) {
+              isOnline = true;
+              if (otherPresence.last_read_at) {
+                latestReadTime = otherPresence.last_read_at;
+              }
             }
-            return prev;
-          });
+          }
+          setIsOtherUserConvOnline(isOnline);
+          if (latestReadTime) {
+            setOtherUserLastReadAt((prev) => {
+              if (!prev || new Date(latestReadTime!).getTime() > new Date(prev).getTime()) {
+                return latestReadTime;
+              }
+              return prev;
+            });
+          }
         }
       })
       .on("broadcast", { event: "typing" }, (payload: any) => {
-        if (payload.payload?.user_id === otherUserId) {
+        if (!isGroup && payload.payload?.user_id === otherUserId) {
           setIsOtherUserTyping(true);
           if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
           typingTimeoutRef.current = setTimeout(() => {
@@ -997,8 +1185,18 @@ export default function MessagesPage() {
         }
       })
       .on("broadcast", { event: "read_receipt" }, (payload: any) => {
-        if (payload.payload?.user_id === otherUserId && payload.payload?.read_at) {
-          const incomingReadAt = payload.payload.read_at;
+        const payloadUserId = payload.payload?.user_id;
+        const incomingReadAt = payload.payload?.read_at;
+        if (!payloadUserId || !incomingReadAt || payloadUserId === user.id) return;
+
+        if (isGroup) {
+          setGroupMembersReadMap((prev) => {
+            if (!prev[payloadUserId] || new Date(incomingReadAt).getTime() > new Date(prev[payloadUserId]).getTime()) {
+              return { ...prev, [payloadUserId]: incomingReadAt };
+            }
+            return prev;
+          });
+        } else if (payloadUserId === otherUserId) {
           setOtherUserLastReadAt((prev) => {
             if (!prev || new Date(incomingReadAt).getTime() > new Date(prev).getTime()) {
               return incomingReadAt;
@@ -1007,9 +1205,41 @@ export default function MessagesPage() {
           });
         }
       })
+      .on("broadcast", { event: "message_reaction" }, (payload: any) => {
+        const { messageId, emoji, userId: rUserId, username: rUsername, displayName: rDisplayName } =
+          payload.payload || {};
+        if (!messageId || !emoji || !rUserId || rUserId === user.id) return;
+
+        setMessages((prev) =>
+          prev.map((m) => {
+            if (m.id !== messageId) return m;
+            const { newContent } = toggleReactionInContent(m.content, {
+              emoji,
+              userId: rUserId,
+              username: rUsername,
+              displayName: rDisplayName,
+            });
+            return { ...m, content: newContent };
+          })
+        );
+      })
+      .on("broadcast", { event: "chat_cleared" }, (payload: any) => {
+        if (payload?.payload?.conversation_id === activeConversationId) {
+          setMessages([]);
+          setReplyingTo(null);
+          setEditingMessage(null);
+          setConversations((prev) =>
+            prev.map((c) =>
+              c.id === activeConversationId
+                ? { ...c, last_message: undefined, unread_count: 0 }
+                : c
+            )
+          );
+        }
+      })
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
-          const nowIso = new Date(Date.now() + 15000).toISOString();
+          const nowIso = new Date().toISOString();
           await presenceChannel.track({ user_id: user.id, online_at: Date.now(), last_read_at: nowIso });
         }
       });
@@ -1029,7 +1259,16 @@ export default function MessagesPage() {
         },
         (payload) => {
           const updated = payload.new as any;
-          if (updated?.user_id === otherUserId && updated?.last_read_at) {
+          if (!updated?.user_id || !updated?.last_read_at || updated.user_id === user.id) return;
+
+          if (isGroup) {
+            setGroupMembersReadMap((prev) => {
+              if (!prev[updated.user_id] || new Date(updated.last_read_at).getTime() > new Date(prev[updated.user_id]).getTime()) {
+                return { ...prev, [updated.user_id]: updated.last_read_at };
+              }
+              return prev;
+            });
+          } else if (updated.user_id === otherUserId) {
             setOtherUserLastReadAt((prev) => {
               if (!prev || new Date(updated.last_read_at).getTime() > new Date(prev).getTime()) {
                 return updated.last_read_at;
@@ -1111,17 +1350,56 @@ export default function MessagesPage() {
     setInputMessage("");
     setReplyingTo(null);
 
-    await supabase.from("messages").insert({
+    // Optimistic message append for instant responsiveness
+    const tempId = `temp-txt-${Date.now()}`;
+    const nowIso = new Date().toISOString();
+    const optimisticMsg = {
+      id: tempId,
       conversation_id: activeConversationId,
       sender_id: user.id,
-      content: content
-    });
+      content: content,
+      created_at: nowIso,
+      profiles: {
+        username: user.username,
+        avatar: user.avatar,
+        social_links: { display_name: user.name || user.displayName },
+      },
+    };
+    setMessages((prev) => [...prev, optimisticMsg]);
 
-    await supabase.from("conversations").update({
-      last_message_at: new Date().toISOString()
-    }).eq("id", activeConversationId);
+    try {
+      const { data, error } = await supabase
+        .from("messages")
+        .insert({
+          conversation_id: activeConversationId,
+          sender_id: user.id,
+          content: content,
+        })
+        .select(`
+          id,
+          content,
+          created_at,
+          sender_id,
+          profiles (
+            username,
+            avatar,
+            social_links
+          )
+        `)
+        .single();
 
-    markAsRead(activeConversationId);
+      if (!error && data) {
+        const profile = Array.isArray(data.profiles) ? data.profiles[0] : data.profiles;
+        setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...data, profiles: profile } : m)));
+        await supabase
+          .from("conversations")
+          .update({ last_message_at: nowIso })
+          .eq("id", activeConversationId);
+        markAsRead(activeConversationId);
+      }
+    } catch (err) {
+      console.error("Error sending message:", err);
+    }
   };
 
   const handleSendGif = async (gifUrl: string, gifTitle: string) => {
@@ -1158,6 +1436,7 @@ export default function MessagesPage() {
       profiles: {
         username: user.username,
         avatar: user.avatar,
+        social_links: { display_name: user.name || user.displayName },
       },
     };
     setMessages((prev) => [...prev, optimisticMsg]);
@@ -1177,7 +1456,8 @@ export default function MessagesPage() {
           sender_id,
           profiles (
             username,
-            avatar
+            avatar,
+            social_links
           )
         `)
         .single();
@@ -1206,8 +1486,18 @@ export default function MessagesPage() {
 
   const filteredConversations = conversations.filter(conv => {
     if (!searchQuery.trim()) return true;
-    const name = conv.type === "group" ? (conv.name || "Group Chat") : (conv.other_user?.username || "Unknown");
-    return name.toLowerCase().includes(searchQuery.toLowerCase());
+    const query = searchQuery.toLowerCase();
+    if (conv.type === "group") {
+      return (conv.name || "Group Chat").toLowerCase().includes(query);
+    }
+    const otherId = conv.other_user?.id;
+    const nickname = otherId ? nicknames[otherId] : null;
+    const shownName = getProfileDisplayName(conv.other_user, conv.other_user?.username || "");
+    return (
+      (nickname && nickname.toLowerCase().includes(query)) ||
+      (shownName && shownName.toLowerCase().includes(query)) ||
+      (conv.other_user?.username && conv.other_user.username.toLowerCase().includes(query))
+    );
   });
 
   return (
@@ -1299,9 +1589,10 @@ export default function MessagesPage() {
                 const isGroup = conv.type === "group";
                 const otherUserId = conv.other_user?.id;
                 const customNickname = otherUserId ? nicknames[otherUserId] : null;
+                const shownName = getProfileDisplayName(conv.other_user, conv.other_user?.username || "Unknown");
                 const title = isGroup 
                   ? (conv.name || "Group Chat") 
-                  : (customNickname || conv.other_user?.username || "Unknown");
+                  : (customNickname || shownName || "Unknown");
                 const avatarUrl = isGroup ? null : conv.other_user?.avatar;
                 const isBlocked = otherUserId ? blockedUsers.includes(otherUserId) : false;
                 const isBlockedByOther = otherUserId ? blockedMeUsers.includes(otherUserId) : false;
@@ -1335,7 +1626,7 @@ export default function MessagesPage() {
                       <div className="flex items-center justify-between gap-1 mb-1">
                         <div className="flex items-center gap-1.5 min-w-0">
                           <h4 className="text-sm font-semibold text-white truncate">
-                            {isBlockedByOther ? `${conv.other_user?.username || "User"} (Unavailable)` : title}
+                            {isBlockedByOther ? `${shownName || "User"} (Unavailable)` : title}
                           </h4>
                           {isBlocked && (
                             <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/30 shrink-0">
@@ -1358,9 +1649,11 @@ export default function MessagesPage() {
                           <span>
                             {isGroup 
                               ? "Group Conversation" 
-                              : customNickname 
-                                ? `@${conv.other_user?.username || 'user'}` 
-                                : "Direct Message"}
+                              : isBlocked
+                                ? "Blocked"
+                                : isUserOnline
+                                  ? "Online"
+                                  : "Offline"}
                           </span>
                         </p>
                         {unreadByConversation[conv.id] > 0 && activeConversationId !== conv.id && (
@@ -1407,11 +1700,12 @@ export default function MessagesPage() {
                 const customNickname = otherUserId ? nicknames[otherUserId] : null;
                 const isBlocked = otherUserId ? blockedUsers.includes(otherUserId) : false;
                 const isBlockedByOther = otherUserId ? blockedMeUsers.includes(otherUserId) : false;
+                const shownName = getProfileDisplayName(activeConversation?.other_user, activeConversation?.other_user?.username || "Chat");
                 const headerTitle = isGroup 
                   ? (activeConversation.name || "Group Chat") 
                   : isBlockedByOther
-                    ? `${activeConversation?.other_user?.username || "User"} (Unavailable)`
-                    : (customNickname || activeConversation?.other_user?.username || "Chat");
+                    ? `${shownName || "User"} (Unavailable)`
+                    : (customNickname || shownName || "Chat");
 
                 return (
                   <div className="relative z-30 h-14 sm:h-16 border-b border-white/5 flex items-center justify-between px-2.5 sm:px-6 shrink-0 bg-[#090A0F]/95 backdrop-blur-xl shadow-sm pt-[env(safe-area-inset-top,0px)]">
@@ -1437,7 +1731,7 @@ export default function MessagesPage() {
                               <Users size={18} />
                             </div>
                           ) : activeConversation?.other_user?.avatar?.includes("http") ? (
-                            <img src={activeConversation.other_user.avatar} className="w-full h-full object-cover" />
+                            <img src={activeConversation.other_user.avatar} alt={headerTitle} className="w-full h-full object-cover" />
                           ) : (
                             <UserAvatar avatar={activeConversation?.other_user?.avatar} color="#6366F1" size="sm" className="!w-full !h-full" />
                           )}
@@ -1447,11 +1741,6 @@ export default function MessagesPage() {
                             <h3 className="text-sm sm:text-base font-bold text-white truncate group-hover/hdr:text-indigo-300 transition-colors">
                               {headerTitle}
                             </h3>
-                            {customNickname && !isGroup && (
-                              <span className="text-[11px] text-slate-400 truncate hidden xs:inline">
-                                @{activeConversation?.other_user?.username}
-                              </span>
-                            )}
                           </div>
 
                           {/* Status Subtitle: Online / Offline / Typing / Blocked / Unavailable */}
@@ -1523,7 +1812,7 @@ export default function MessagesPage() {
                               alert("This account is unavailable.");
                               return;
                             }
-                            const peerUsername = customNickname || activeConversation?.other_user?.username || "Unknown";
+                            const peerUsername = customNickname || shownName || activeConversation?.other_user?.username || "Unknown";
                             const peerAvatar = activeConversation?.other_user?.avatar;
                             startCall(activeConversationId, {
                               id: otherUserId,
@@ -1627,6 +1916,17 @@ export default function MessagesPage() {
 
                           <button
                             onClick={() => {
+                              setIsClearChatModalOpen(true);
+                              setIsHeaderMenuOpen(false);
+                            }}
+                            className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/5 transition-colors text-left"
+                          >
+                            <Eraser size={15} className="text-amber-400" />
+                            <span>Clear Chat</span>
+                          </button>
+
+                          <button
+                            onClick={() => {
                               setIsDeleteModalOpen(true);
                               setIsHeaderMenuOpen(false);
                             }}
@@ -1648,7 +1948,7 @@ export default function MessagesPage() {
                 <div 
                   ref={chatContainerRef}
                   onScroll={handleChatScroll}
-                  className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6 flex flex-col gap-3.5"
+                  className="flex-1 min-h-0 overflow-y-auto px-2.5 py-3 sm:px-6 sm:py-5 flex flex-col gap-1 sm:gap-2"
                 >
                   {messages.length === 0 ? (
                     <div className="my-auto text-center py-10">
@@ -1656,50 +1956,81 @@ export default function MessagesPage() {
                       <p className="text-xs text-slate-600 mt-1">Send a message to break the ice! 💬</p>
                     </div>
                   ) : (
-                    messages.map(msg => {
+                    messages.map((msg, index) => {
                       const isMe = msg.sender_id === user.id;
-                      const senderName = msg.profiles?.username || "Someone";
+                      const senderDisplayName = isMe 
+                        ? "You" 
+                        : getProfileDisplayName(msg.profiles, msg.profiles?.username || "Someone");
+                      const senderUsername = msg.profiles?.username;
                       const senderAvatar = msg.profiles?.avatar;
                       const parsed = parseMessageContent(msg.content);
 
+                      const prevMsg = index > 0 ? messages[index - 1] : null;
+                      const isNewDay = !prevMsg || !isSameDay(prevMsg.created_at, msg.created_at);
+                      const dateLabel = isNewDay ? formatChatDateDivider(msg.created_at) : null;
+                      const isSameSenderAsPrev = !isNewDay && prevMsg && prevMsg.sender_id === msg.sender_id;
+                      const isFirstInCluster = !isSameSenderAsPrev;
+
                       if (parsed.text && parsed.text.startsWith("📞")) {
                         return (
-                          <div key={msg.id} id={`msg-${msg.id}`} className="w-full flex justify-center my-2">
-                            <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-indigo-950/40 border border-indigo-500/20 text-indigo-300 text-xs font-medium shadow-sm backdrop-blur-md">
-                              <PhoneCall size={14} className="text-indigo-400 shrink-0" />
-                              <span>{parsed.text.replace("📞", "").trim()}</span>
-                              <span className="text-[10px] text-slate-500 ml-1 font-mono">
-                                {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                              </span>
+                          <Fragment key={msg.id}>
+                            {isNewDay && dateLabel && (
+                              <div className="w-full flex justify-center my-2.5 select-none pointer-events-none sticky top-1 z-20">
+                                <div className="px-3.5 py-1 rounded-full bg-[#141622]/95 backdrop-blur-md border border-white/10 text-[11px] font-semibold text-slate-300 shadow-md flex items-center gap-1.5 tracking-wide">
+                                  <span>{dateLabel}</span>
+                                </div>
+                              </div>
+                            )}
+                            <div id={`msg-${msg.id}`} className="w-full flex justify-center my-2">
+                              <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-indigo-950/40 border border-indigo-500/20 text-indigo-300 text-xs font-medium shadow-sm backdrop-blur-md">
+                                <PhoneCall size={14} className="text-indigo-400 shrink-0" />
+                                <span>{parsed.text.replace("📞", "").trim()}</span>
+                                <span className="text-[10px] text-slate-500 ml-1 font-mono">
+                                  {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                </span>
+                              </div>
                             </div>
-                          </div>
+                          </Fragment>
                         );
                       }
 
                       return (
-                        <div 
-                          key={msg.id} 
-                          id={`msg-${msg.id}`}
-                          className={`group relative flex items-end gap-2 transition-all duration-300 rounded-2xl p-1 ${isMe ? 'justify-end' : 'justify-start'}`}
-                        >
-                          {/* Avatar in group for incoming messages */}
-                          {!isMe && activeConversation?.type === "group" && (
-                            <div className="w-7 h-7 rounded-full bg-slate-800 overflow-hidden shrink-0 border border-white/10 mb-1">
-                              {senderAvatar?.includes("http") ? (
-                                <img src={senderAvatar} alt={senderName} className="w-full h-full object-cover" />
-                              ) : (
-                                <UserAvatar avatar={senderAvatar} size="sm" className="!w-full !h-full" />
-                              )}
+                        <Fragment key={msg.id}>
+                          {isNewDay && dateLabel && (
+                            <div className="w-full flex justify-center my-2 select-none pointer-events-none shrink-0">
+                              <div className="px-3 py-0.5 rounded-full bg-[#141622]/90 border border-white/10 text-[10px] font-semibold text-slate-300 shadow-md flex items-center gap-1.5 tracking-wide">
+                                <span>{dateLabel}</span>
+                              </div>
                             </div>
                           )}
+                          <div 
+                            id={`msg-${msg.id}`}
+                            className={`group relative flex items-start gap-1.5 sm:gap-2 transition-all duration-300 rounded-2xl p-0.5 ${
+                              isMe ? 'justify-end' : 'justify-start'
+                            } ${isFirstInCluster ? 'mt-2.5 sm:mt-3' : 'mt-0.5 sm:mt-1'}`}
+                          >
+                          {/* Avatar in group for incoming messages: shown on first message of cluster, spacer on consecutive */}
+                          {!isMe && activeConversation?.type === "group" && (
+                            isFirstInCluster ? (
+                              <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-slate-800 overflow-hidden shrink-0 border border-white/10 mt-0.5 shadow-sm">
+                                {senderAvatar?.includes("http") ? (
+                                  <img src={senderAvatar} alt={senderDisplayName} className="w-full h-full object-cover" />
+                                ) : (
+                                  <UserAvatar avatar={senderAvatar} size="sm" className="!w-full !h-full" />
+                                )}
+                              </div>
+                            ) : (
+                              <div className="w-7 h-7 sm:w-8 sm:h-8 shrink-0 pointer-events-none" />
+                            )
+                          )}
 
-                          {/* Hover/Tap Actions for own messages (Reply, Edit, Delete) */}
+                          {/* Floating Action Menu for own messages (floats above bubble, does NOT squish bubble) */}
                           {isMe && (
-                            <div className={`${
+                            <div className={`absolute -top-9 right-2 z-30 transition-all duration-150 ${
                               activeActionMsgId === msg.id
                                 ? "opacity-100 scale-100 pointer-events-auto"
                                 : "opacity-0 scale-95 pointer-events-none sm:group-hover:opacity-100 sm:group-hover:scale-100 sm:group-hover:pointer-events-auto"
-                            } transition-all duration-150 flex items-center gap-0.5 bg-[#12131A]/95 border border-white/10 rounded-xl px-1.5 py-0.5 shadow-xl mb-1 backdrop-blur-md z-10`}>
+                            } flex items-center gap-0.5 bg-[#12131A]/95 border border-white/15 rounded-xl px-1.5 py-1 shadow-2xl backdrop-blur-xl`}>
                               <button
                                 type="button"
                                 onClick={(e) => {
@@ -1707,7 +2038,7 @@ export default function MessagesPage() {
                                   setActiveActionMsgId(null);
                                   setReplyingTo({
                                     id: msg.id,
-                                    sender: senderName,
+                                    sender: senderDisplayName,
                                     text: parsed.type === "voice" ? "Voice Note" : parsed.type === "gif" ? "GIF" : parsed.type === "room_invite" ? "Voice Hangout Invite" : parsed.text || "",
                                     isVoice: parsed.type === "voice",
                                     isGif: parsed.type === "gif",
@@ -1750,37 +2081,74 @@ export default function MessagesPage() {
                               >
                                 <Trash2 size={13} />
                               </button>
+
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setActiveActionMsgId(null);
+                                  setMessageInfoTarget({
+                                    message: msg,
+                                    parsedMessage: parsed,
+                                  });
+                                }}
+                                className="p-1 rounded-lg text-slate-400 hover:text-sky-400 hover:bg-white/10 transition-colors"
+                                title="Message info (Seen by)"
+                                aria-label="Message info"
+                              >
+                                <Info size={13} />
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setActiveReactionPickerMsgId((prev) => (prev === msg.id ? null : msg.id));
+                                }}
+                                className={`p-1 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-white/10 transition-colors ${
+                                  activeReactionPickerMsgId === msg.id ? "text-amber-400 bg-white/10" : ""
+                                }`}
+                                title="React"
+                                aria-label="React"
+                              >
+                                <Smile size={13} />
+                              </button>
                             </div>
                           )}
 
-                          <div className={`max-w-[85%] sm:max-w-[70%] min-w-0 flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
-                            {/* Sender name in group with WhatsApp-style vibrant color */}
-                            {!isMe && activeConversation?.type === "group" && (
-                              <span className={`text-[11px] font-bold mb-1 px-1 truncate max-w-full ${getSenderColor(senderName)}`}>
-                                {senderName}
-                              </span>
-                            )}
-
+                          <div className={`max-w-[85%] sm:max-w-[70%] min-w-[64px] flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
                             {/* Message Bubble Container */}
                             {(() => {
                               const isGif = parsed.type === "gif" && !!parsed.gifUrl;
-                              const isMsgSeen = Boolean(
-                                otherUserLastReadAt &&
-                                (new Date(msg.created_at).getTime() <= new Date(otherUserLastReadAt).getTime() + 2000)
-                              );
+                              const msgTime = new Date(msg.created_at).getTime();
+                              const otherReadTime = otherUserLastReadAt ? new Date(otherUserLastReadAt).getTime() : 0;
+                              const isMsgSeen = Boolean(otherUserLastReadAt && otherReadTime >= msgTime);
+                              const isMsgDelivered = Boolean(isOtherUserOnline || isMsgSeen);
                               return (
                                 <div 
                                   onClick={() => setActiveActionMsgId(prev => prev === msg.id ? null : msg.id)}
-                                  className={`rounded-2xl shadow-md break-words min-w-0 overflow-hidden cursor-pointer transition-all ${
+                                  className={`w-fit rounded-2xl shadow-md break-words min-w-[64px] max-w-full overflow-hidden cursor-pointer transition-all ${
                                     isGif 
                                       ? isMe
                                         ? 'p-1 bg-gradient-to-r from-indigo-600 to-indigo-500 text-white rounded-tr-xs'
-                                        : 'p-1 bg-white/10 text-slate-100 border border-white/10 rounded-tl-xs backdrop-blur-sm'
+                                        : 'p-1 bg-[#1e202c] text-slate-100 border border-white/5 rounded-tl-xs backdrop-blur-sm'
                                       : isMe 
-                                        ? 'px-4 py-2.5 text-sm leading-relaxed bg-gradient-to-r from-indigo-600 to-indigo-500 text-white rounded-tr-xs' 
-                                        : 'px-4 py-2.5 text-sm leading-relaxed bg-white/10 text-slate-100 border border-white/5 rounded-tl-xs backdrop-blur-sm'
+                                        ? `px-3 py-1.5 sm:px-3.5 sm:py-2 text-sm leading-relaxed bg-gradient-to-r from-indigo-600 to-indigo-500 text-white ${
+                                            isFirstInCluster ? 'rounded-tr-xs' : ''
+                                          }` 
+                                        : `px-3 py-1.5 sm:px-3.5 sm:py-2 text-sm leading-relaxed bg-[#1e202c] text-slate-100 border border-white/5 ${
+                                            isFirstInCluster ? 'rounded-tl-xs' : ''
+                                          } backdrop-blur-sm`
                                   }`}
                                 >
+                                  {/* WhatsApp-Style Group Chat Sender Name INSIDE the bubble (first in cluster only, NO @username) */}
+                                  {!isMe && activeConversation?.type === "group" && isFirstInCluster && (
+                                    <div className="mb-0.5 select-none pointer-events-none">
+                                      <span className={`text-[11px] font-bold tracking-tight truncate block ${getSenderColor(senderDisplayName)}`}>
+                                        {senderDisplayName}
+                                      </span>
+                                    </div>
+                                  )}
                                   {/* Quoted Reply reference if this message was in reply to another */}
                                   {parsed.replyTo && (
                                     <div
@@ -1829,28 +2197,154 @@ export default function MessagesPage() {
                                       <div className="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded-md bg-black/70 backdrop-blur-md text-[9px] font-black text-white/90 border border-white/10 pointer-events-none tracking-wider">
                                         GIF
                                       </div>
-                                      <div className="absolute bottom-1.5 right-1.5 px-2 py-0.5 rounded-md bg-black/70 backdrop-blur-md text-[9px] font-medium text-white/90 border border-white/10 flex items-center gap-1 select-none pointer-events-none">
+                                      <div className="absolute bottom-1.5 right-1.5 px-2 py-0.5 rounded-md bg-black/75 backdrop-blur-md text-[9px] font-medium text-white/90 border border-white/10 flex items-center gap-1 select-none pointer-events-none">
                                         <span>{new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                                         {isMe && activeConversation?.type !== "group" && (
                                           <span className="inline-flex items-center gap-0.5 ml-0.5">
-                                            <span className="text-sky-300 font-semibold">•</span>
                                             {isMsgSeen ? (
-                                              <span className="text-sky-300 font-semibold opacity-95">seen</span>
-                                            ) : isOtherUserOnline ? (
-                                              <span className="text-indigo-200/80 font-medium opacity-85">delivered</span>
+                                              <span className="text-sky-400 font-bold flex items-center" title="Seen">
+                                                <CheckCheck size={12} className="stroke-[2.5]" />
+                                              </span>
+                                            ) : isMsgDelivered ? (
+                                              <span className="text-indigo-200/80 flex items-center" title="Delivered">
+                                                <CheckCheck size={12} className="stroke-[1.8]" />
+                                              </span>
                                             ) : (
-                                              <span className="text-indigo-200/60 font-medium opacity-70">sent</span>
+                                              <span className="text-indigo-200/60 flex items-center" title="Sent">
+                                                <Check size={11} className="stroke-[2]" />
+                                              </span>
                                             )}
                                           </span>
                                         )}
+                                        {isMe && activeConversation?.type === "group" && (() => {
+                                          const otherMembers = activeGroupMembers.filter((m) => m.id !== user.id);
+                                          const totalRecipients = otherMembers.length;
+                                          if (totalRecipients === 0) return null;
+                                          const readCount = otherMembers.filter((m) => {
+                                            const r = groupMembersReadMap[m.id];
+                                            return r && new Date(r).getTime() >= msgTime;
+                                          }).length;
+                                          const isAllSeen = readCount === totalRecipients;
+
+                                          return (
+                                            <span
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                setMessageInfoTarget({ message: msg, parsedMessage: parsed });
+                                              }}
+                                              className={`inline-flex items-center gap-1 ml-1 px-1.5 py-0.5 rounded cursor-pointer pointer-events-auto hover:opacity-90 transition-all font-semibold ${
+                                                isAllSeen
+                                                  ? "text-sky-400"
+                                                  : readCount > 0
+                                                  ? "text-sky-300"
+                                                  : "text-slate-300"
+                                              }`}
+                                              title="Click to view message info"
+                                            >
+                                              {isAllSeen ? (
+                                                <>
+                                                  <CheckCheck size={11} className="stroke-[2.5] text-sky-400" />
+                                                  <span>All</span>
+                                                </>
+                                              ) : readCount > 0 ? (
+                                                <>
+                                                  <CheckCheck size={11} className="stroke-[2] text-sky-400" />
+                                                  <span>{readCount}/{totalRecipients}</span>
+                                                </>
+                                              ) : (
+                                                <>
+                                                  <Check size={10} className="stroke-[2]" />
+                                                </>
+                                              )}
+                                            </span>
+                                          );
+                                        })()}
                                       </div>
                                     </div>
                                   ) : (
-                                    <p className="whitespace-pre-wrap select-text">{parsed.text}</p>
+                                    <div className="flex flex-wrap items-end justify-between gap-x-2.5 gap-y-0.5">
+                                      <p className="whitespace-pre-wrap select-text text-[13.5px] leading-relaxed break-words min-w-0">
+                                        {parsed.text}
+                                      </p>
+                                      <div 
+                                        className={`text-[9.5px] flex items-center gap-1 select-none shrink-0 ml-auto pb-0.5 ${
+                                          isMe ? 'text-indigo-200/80' : 'text-slate-400'
+                                        }`}
+                                      >
+                                        {parsed.isEdited && <span className="italic opacity-80">(edited)</span>}
+                                        <span>{new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+
+                                        {/* WhatsApp-Style Sent / Delivered / Seen read receipts */}
+                                        {isMe && activeConversation?.type !== "group" && (
+                                          <span className="ml-0.5 inline-flex items-center gap-0.5">
+                                            {isMsgSeen ? (
+                                              <span className="text-sky-300 font-bold flex items-center gap-0.5" title="Seen">
+                                                <CheckCheck size={12} className="stroke-[2.5] text-sky-400" />
+                                              </span>
+                                            ) : isMsgDelivered ? (
+                                              <span className="text-indigo-200/80 flex items-center gap-0.5" title="Delivered">
+                                                <CheckCheck size={12} className="stroke-[1.8]" />
+                                              </span>
+                                            ) : (
+                                              <span className="text-indigo-200/60 flex items-center gap-0.5" title="Sent">
+                                                <Check size={11} className="stroke-[2]" />
+                                              </span>
+                                            )}
+                                          </span>
+                                        )}
+
+                                        {/* WhatsApp-Style Group Seen by Badge */}
+                                        {isMe && activeConversation?.type === "group" && (() => {
+                                          const otherMembers = activeGroupMembers.filter((m) => m.id !== user.id);
+                                          const totalRecipients = otherMembers.length;
+                                          if (totalRecipients === 0) return null;
+                                          const readCount = otherMembers.filter((m) => {
+                                            const r = groupMembersReadMap[m.id];
+                                            return r && new Date(r).getTime() >= msgTime;
+                                          }).length;
+                                          const isAllSeen = readCount === totalRecipients;
+
+                                          return (
+                                            <button
+                                              type="button"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                setMessageInfoTarget({ message: msg, parsedMessage: parsed });
+                                              }}
+                                              className={`ml-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-semibold transition-all hover:scale-105 cursor-pointer select-none ${
+                                                isAllSeen
+                                                  ? "bg-sky-500/20 text-sky-300 border border-sky-500/30 hover:bg-sky-500/30"
+                                                  : readCount > 0
+                                                  ? "bg-indigo-900/60 text-indigo-200 border border-indigo-400/30 hover:bg-indigo-900/80"
+                                                  : "bg-white/10 text-white/70 border border-white/10 hover:bg-white/15"
+                                              }`}
+                                              title="Click to view who read this message"
+                                            >
+                                              {isAllSeen ? (
+                                                <>
+                                                  <CheckCheck size={11} className="stroke-[2.5] text-sky-400" />
+                                                  <span>Seen by all</span>
+                                                </>
+                                              ) : readCount > 0 ? (
+                                                <>
+                                                  <CheckCheck size={11} className="stroke-[2] text-sky-400" />
+                                                  <span>Seen by {readCount}/{totalRecipients}</span>
+                                                </>
+                                              ) : (
+                                                <>
+                                                  <Check size={10} className="stroke-[2] text-white/60" />
+                                                  <span>Delivered</span>
+                                                </>
+                                              )}
+                                            </button>
+                                          );
+                                        })()}
+                                      </div>
+                                    </div>
                                   )}
 
-                                  {/* Timestamp, (edited) and Read Receipts for non-GIF messages */}
-                                  {!isGif && (
+                                  {/* Timestamp, (edited) and Read Receipts for Voice & Invite messages */}
+                                  {(parsed.type === "voice" || parsed.type === "room_invite") && (
                                     <div 
                                       className={`text-[9px] mt-1 flex items-center gap-1 select-none ${
                                         isMe ? 'text-indigo-200/80 justify-end' : 'text-slate-400 justify-end'
@@ -1859,33 +2353,109 @@ export default function MessagesPage() {
                                       {parsed.isEdited && <span className="italic opacity-80">(edited)</span>}
                                       <span>{new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
 
-                                      {/* Read Receipt status text labels for 1-on-1 chats */}
+                                      {/* WhatsApp-Style Sent / Delivered / Seen read receipts */}
                                       {isMe && activeConversation?.type !== "group" && (
-                                        <span className="ml-1 inline-flex items-center gap-1 font-medium tracking-wide">
-                                          <span className="opacity-40">•</span>
+                                        <span className="ml-1 inline-flex items-center gap-0.5">
                                           {isMsgSeen ? (
-                                            <span className="text-sky-300 font-semibold opacity-95">seen</span>
-                                          ) : isOtherUserOnline ? (
-                                            <span className="text-indigo-200/80 font-medium opacity-85">delivered</span>
+                                            <span className="text-sky-300 font-bold flex items-center gap-0.5" title="Seen">
+                                              <CheckCheck size={13} className="stroke-[2.5] text-sky-400" />
+                                            </span>
+                                          ) : isMsgDelivered ? (
+                                            <span className="text-indigo-200/80 flex items-center gap-0.5" title="Delivered">
+                                              <CheckCheck size={13} className="stroke-[1.8]" />
+                                            </span>
                                           ) : (
-                                            <span className="text-indigo-200/60 font-medium opacity-70">sent</span>
+                                            <span className="text-indigo-200/60 flex items-center gap-0.5" title="Sent">
+                                              <Check size={12} className="stroke-[2]" />
+                                            </span>
                                           )}
                                         </span>
                                       )}
+
+                                      {/* WhatsApp-Style Group Seen by Badge */}
+                                      {isMe && activeConversation?.type === "group" && (() => {
+                                        const otherMembers = activeGroupMembers.filter((m) => m.id !== user.id);
+                                        const totalRecipients = otherMembers.length;
+                                        if (totalRecipients === 0) return null;
+                                        const readCount = otherMembers.filter((m) => {
+                                          const r = groupMembersReadMap[m.id];
+                                          return r && new Date(r).getTime() >= msgTime;
+                                        }).length;
+                                        const isAllSeen = readCount === totalRecipients;
+
+                                        return (
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              setMessageInfoTarget({ message: msg, parsedMessage: parsed });
+                                            }}
+                                            className={`ml-1.5 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-semibold transition-all hover:scale-105 cursor-pointer select-none ${
+                                              isAllSeen
+                                                ? "bg-sky-500/20 text-sky-300 border border-sky-500/30 hover:bg-sky-500/30"
+                                                : readCount > 0
+                                                ? "bg-indigo-900/60 text-indigo-200 border border-indigo-400/30 hover:bg-indigo-900/80"
+                                                : "bg-white/10 text-white/70 border border-white/10 hover:bg-white/15"
+                                            }`}
+                                            title="Click to view who read this message"
+                                          >
+                                            {isAllSeen ? (
+                                              <>
+                                                <CheckCheck size={11} className="stroke-[2.5] text-sky-400" />
+                                                <span>Seen by all</span>
+                                              </>
+                                            ) : readCount > 0 ? (
+                                              <>
+                                                <CheckCheck size={11} className="stroke-[2] text-sky-400" />
+                                                <span>Seen by {readCount}/{totalRecipients}</span>
+                                              </>
+                                            ) : (
+                                              <>
+                                                <Check size={10} className="stroke-[2] text-white/60" />
+                                                <span>Delivered</span>
+                                              </>
+                                            )}
+                                          </button>
+                                        );
+                                      })()}
                                     </div>
                                   )}
                                 </div>
                               );
                             })()}
+
+                            {/* Reaction Badges below the message bubble */}
+                            <ReactionBadges
+                              reactions={parsed.reactions}
+                              currentUserId={user?.id}
+                              onToggleReaction={(emoji) => handleToggleReaction(msg.id, emoji)}
+                              onOpenPicker={() => setActiveReactionPickerMsgId(msg.id)}
+                              isMe={isMe}
+                            />
                           </div>
 
-                          {/* Hover/Tap Actions for incoming messages placed on the RIGHT side of the bubble */}
+                          {/* Quick Reaction Floating Picker */}
+                          {activeReactionPickerMsgId === msg.id && (
+                            <div className={`absolute -top-10 ${isMe ? 'right-2' : 'left-2'} z-30`}>
+                              <QuickReactionPicker
+                                onSelect={(emoji) => {
+                                  handleToggleReaction(msg.id, emoji);
+                                  setActiveReactionPickerMsgId(null);
+                                  setActiveActionMsgId(null);
+                                }}
+                                onClose={() => setActiveReactionPickerMsgId(null)}
+                                isMe={isMe}
+                              />
+                            </div>
+                          )}
+
+                          {/* Floating Action Menu for incoming messages (floats above bubble, does NOT squish bubble) */}
                           {!isMe && (
-                            <div className={`${
+                            <div className={`absolute -top-9 ${activeConversation?.type === "group" ? "left-9 sm:left-10" : "left-2"} z-30 transition-all duration-150 ${
                               activeActionMsgId === msg.id
                                 ? "opacity-100 scale-100 pointer-events-auto"
                                 : "opacity-0 scale-95 pointer-events-none sm:group-hover:opacity-100 sm:group-hover:scale-100 sm:group-hover:pointer-events-auto"
-                            } transition-all duration-150 flex items-center gap-0.5 bg-[#12131A]/95 border border-white/10 rounded-xl px-1.5 py-0.5 shadow-xl mb-1 backdrop-blur-md z-10 shrink-0`}>
+                            } flex items-center gap-0.5 bg-[#12131A]/95 border border-white/15 rounded-xl px-1.5 py-1 shadow-2xl backdrop-blur-xl shrink-0`}>
                               <button
                                 type="button"
                                 onClick={(e) => {
@@ -1893,7 +2463,7 @@ export default function MessagesPage() {
                                   setActiveActionMsgId(null);
                                   setReplyingTo({
                                     id: msg.id,
-                                    sender: senderName,
+                                    sender: senderDisplayName,
                                     text: parsed.type === "voice" ? "Voice Note" : parsed.type === "gif" ? "GIF" : parsed.type === "room_invite" ? "Voice Hangout Invite" : parsed.text || "",
                                     isVoice: parsed.type === "voice",
                                     isGif: parsed.type === "gif",
@@ -1906,11 +2476,46 @@ export default function MessagesPage() {
                               >
                                 <Reply size={13} />
                               </button>
+
+                              {activeConversation?.type === "group" && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setActiveActionMsgId(null);
+                                    setMessageInfoTarget({
+                                      message: msg,
+                                      parsedMessage: parsed,
+                                    });
+                                  }}
+                                  className="p-1.5 rounded-lg text-slate-400 hover:text-sky-400 hover:bg-white/10 active:scale-95 transition-all cursor-pointer"
+                                  title="Message info (Seen by)"
+                                  aria-label="Message info"
+                                >
+                                  <Info size={13} />
+                                </button>
+                              )}
+
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setActiveReactionPickerMsgId((prev) => (prev === msg.id ? null : msg.id));
+                                }}
+                                className={`p-1.5 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-white/10 active:scale-95 transition-all cursor-pointer ${
+                                  activeReactionPickerMsgId === msg.id ? "text-amber-400 bg-white/10" : ""
+                                }`}
+                                title="React"
+                                aria-label="React"
+                              >
+                                <Smile size={13} />
+                              </button>
                             </div>
                           )}
                         </div>
-                      );
-                    })
+                      </Fragment>
+                    );
+                  })
                   )}
 
                   {/* Bouncing Typing Bubble */}
@@ -1918,7 +2523,7 @@ export default function MessagesPage() {
                     <div className="flex items-center gap-2 justify-start py-1">
                       <div className="w-7 h-7 rounded-full bg-slate-800 overflow-hidden shrink-0 border border-white/10 flex items-center justify-center">
                         {activeConversation?.other_user?.avatar?.includes("http") ? (
-                          <img src={activeConversation.other_user.avatar} className="w-full h-full object-cover" />
+                          <img src={activeConversation.other_user.avatar} alt={getProfileDisplayName(activeConversation?.other_user)} className="w-full h-full object-cover" />
                         ) : (
                           <UserAvatar avatar={activeConversation?.other_user?.avatar} size="sm" className="!w-full !h-full" />
                         )}
@@ -2108,7 +2713,7 @@ export default function MessagesPage() {
                         <div className="flex items-center gap-2 min-w-0">
                           <Reply size={14} className="text-indigo-400 shrink-0" />
                           <div className="min-w-0">
-                            <span className="font-semibold text-indigo-300">Replying to @{replyingTo.sender}: </span>
+                            <span className="font-semibold text-indigo-300">Replying to {replyingTo.sender}: </span>
                             <span className="text-slate-300 truncate inline-block max-w-[180px] sm:max-w-md align-bottom">
                               {replyingTo.isVoice ? "🎵 Voice Note" : replyingTo.isGif ? "🖼️ GIF" : replyingTo.text}
                             </span>
@@ -2291,6 +2896,40 @@ export default function MessagesPage() {
         </div>
       )}
 
+      {/* Clear Chat Confirmation Modal */}
+      {isClearChatModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-[#12131A] border border-white/10 rounded-2xl p-5 max-w-sm w-full shadow-2xl">
+            <div className="w-10 h-10 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center mb-3">
+              <Eraser size={20} />
+            </div>
+            <h3 className="text-base font-bold text-white mb-1">Clear this chat?</h3>
+            <p className="text-xs text-slate-400 mb-5 leading-relaxed">
+              Are you sure you want to clear all messages in this chat? All messages will be permanently deleted for everyone in this chat. This action cannot be undone.
+            </p>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                disabled={isClearingChat}
+                onClick={() => setIsClearChatModalOpen(false)}
+                className="px-3.5 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white hover:bg-white/5 transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isClearingChat}
+                onClick={handleClearChat}
+                className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold shadow-md active:scale-95 transition-all flex items-center gap-2 cursor-pointer disabled:opacity-50"
+              >
+                {isClearingChat && <Loader2 size={14} className="animate-spin" />}
+                <span>{isClearingChat ? "Clearing..." : "Clear Chat"}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Delete Chat Confirmation Modal */}
       {isDeleteModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in duration-200">
@@ -2411,6 +3050,85 @@ export default function MessagesPage() {
           existingMemberIds={activeGroupMembers.map((m) => m.id)}
           currentUser={user}
           onMembersAdded={loadActiveGroupMembers}
+        />
+      )}
+
+      {/* WhatsApp-Style Message Info ("Seen by") Modal */}
+      {messageInfoTarget && (
+        <MessageInfoModal
+          isOpen={!!messageInfoTarget}
+          onClose={() => setMessageInfoTarget(null)}
+          message={messageInfoTarget.message}
+          parsedMessage={messageInfoTarget.parsedMessage}
+          readMembers={(() => {
+            if (!messageInfoTarget) return [];
+            const msgTime = new Date(messageInfoTarget.message.created_at).getTime();
+            if (activeConversation?.type === "group") {
+              const otherMembers = activeGroupMembers.filter((m) => m.id !== user?.id);
+              return otherMembers
+                .filter((m) => {
+                  const readIso = groupMembersReadMap[m.id];
+                  return readIso && new Date(readIso).getTime() >= msgTime;
+                })
+                .map((m) => ({
+                  id: m.id,
+                  username: m.username,
+                  name: m.name,
+                  displayName: m.displayName || m.name || m.username,
+                  avatar: m.avatar,
+                  readAt: groupMembersReadMap[m.id],
+                }));
+            } else if (activeConversation?.other_user) {
+              const otherReadTime = otherUserLastReadAt ? new Date(otherUserLastReadAt).getTime() : 0;
+              if (otherUserLastReadAt && otherReadTime >= msgTime) {
+                return [
+                  {
+                    id: activeConversation.other_user.id,
+                    username: activeConversation.other_user.username,
+                    name: activeConversation.other_user.name,
+                    displayName: getProfileDisplayName(activeConversation.other_user, activeConversation.other_user.username),
+                    avatar: activeConversation.other_user.avatar,
+                    readAt: otherUserLastReadAt,
+                  },
+                ];
+              }
+            }
+            return [];
+          })()}
+          unreadMembers={(() => {
+            if (!messageInfoTarget) return [];
+            const msgTime = new Date(messageInfoTarget.message.created_at).getTime();
+            if (activeConversation?.type === "group") {
+              const otherMembers = activeGroupMembers.filter((m) => m.id !== user?.id);
+              return otherMembers
+                .filter((m) => {
+                  const readIso = groupMembersReadMap[m.id];
+                  return !readIso || new Date(readIso).getTime() < msgTime;
+                })
+                .map((m) => ({
+                  id: m.id,
+                  username: m.username,
+                  name: m.name,
+                  displayName: m.displayName || m.name || m.username,
+                  avatar: m.avatar,
+                }));
+            } else if (activeConversation?.other_user) {
+              const otherReadTime = otherUserLastReadAt ? new Date(otherUserLastReadAt).getTime() : 0;
+              if (!otherUserLastReadAt || otherReadTime < msgTime) {
+                return [
+                  {
+                    id: activeConversation.other_user.id,
+                    username: activeConversation.other_user.username,
+                    name: activeConversation.other_user.name,
+                    displayName: getProfileDisplayName(activeConversation.other_user, activeConversation.other_user.username),
+                    avatar: activeConversation.other_user.avatar,
+                  },
+                ];
+              }
+            }
+            return [];
+          })()}
+          onlineUserIds={onlineUserIds}
         />
       )}
 

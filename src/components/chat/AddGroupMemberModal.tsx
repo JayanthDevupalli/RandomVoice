@@ -6,6 +6,7 @@ import { X, UserPlus, Loader2, Check, Search } from "lucide-react";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import { createPortal } from "react-dom";
 import { socialService } from "@/lib/social-service";
+import { getProfileDisplayName } from "@/lib/chat-utils";
 
 interface AddGroupMemberModalProps {
   isOpen: boolean;
@@ -61,8 +62,8 @@ export function AddGroupMemberModal({
           .select(`
             requester_id,
             receiver_id,
-            requester:profiles!connections_requester_id_fkey(id, username, avatar),
-            receiver:profiles!connections_receiver_id_fkey(id, username, avatar)
+            requester:profiles!connections_requester_id_fkey(id, username, avatar, social_links),
+            receiver:profiles!connections_receiver_id_fkey(id, username, avatar, social_links)
           `)
           .or(`requester_id.eq.${currentUser.id},receiver_id.eq.${currentUser.id}`)
           .eq("status", "accepted");
@@ -82,13 +83,16 @@ export function AddGroupMemberModal({
               !blockedSet.has(other.id)
             ) {
               if (!uniqueMap.has(other.id)) {
-                uniqueMap.set(other.id, other);
+                uniqueMap.set(other.id, {
+                  ...other,
+                  displayName: getProfileDisplayName(other, other.username),
+                });
               }
             }
           }
 
           const sorted = Array.from(uniqueMap.values()).sort((a, b) =>
-            (a.username || "").localeCompare(b.username || "")
+            (a.displayName || a.username || "").localeCompare(b.displayName || b.username || "")
           );
           setCandidates(sorted);
         }
@@ -137,7 +141,8 @@ export function AddGroupMemberModal({
 
   const filteredCandidates = candidates.filter((c) =>
     !searchQuery.trim() ||
-    (c.username || "").toLowerCase().includes(searchQuery.trim().toLowerCase())
+    (c.username || "").toLowerCase().includes(searchQuery.trim().toLowerCase()) ||
+    (c.displayName && c.displayName.toLowerCase().includes(searchQuery.trim().toLowerCase()))
   );
 
   if (!mounted || !isOpen) return null;
@@ -210,12 +215,16 @@ export function AddGroupMemberModal({
                   <div className="flex items-center gap-3 min-w-0">
                     <div className="w-9 h-9 rounded-full overflow-hidden bg-slate-800 border border-white/10 shrink-0">
                       {candidate.avatar?.includes("http") ? (
-                        <img src={candidate.avatar} className="w-full h-full object-cover" />
+                        <img src={candidate.avatar} alt={candidate.displayName || candidate.username} className="w-full h-full object-cover" />
                       ) : (
                         <UserAvatar avatar={candidate.avatar} size="sm" className="!w-full !h-full" />
                       )}
                     </div>
-                    <span className="text-sm font-medium text-white truncate">{candidate.username}</span>
+                    <div className="flex flex-col min-w-0 text-left">
+                      <span className="text-sm font-medium text-white truncate">
+                        {candidate.displayName || candidate.username}
+                      </span>
+                    </div>
                   </div>
                   <div
                     className={`w-5 h-5 rounded-full border flex items-center justify-center transition-colors shrink-0 ${

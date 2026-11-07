@@ -156,9 +156,8 @@ export function useUnreadMessages() {
         ? new Date(latestMessageTimestamp).getTime()
         : 0;
 
-      // Add a 15000ms safety buffer to ensure server clock drift or client time
-      // does not cause viewed messages to be marked as unread
-      const safeReadTimestamp = new Date(Math.max(nowMs, latestMsgMs) + 15000).toISOString();
+      // Use accurate timestamp matching current time or latest message seen
+      const safeReadTimestamp = new Date(Math.max(nowMs, latestMsgMs)).toISOString();
       currentMap[conversationId] = safeReadTimestamp;
       lastReadMapRef.current = { ...lastReadMapRef.current, ...currentMap };
       saveLastReadMap(currentMap);

@@ -5,10 +5,8 @@ import { useRouter } from "next/navigation";
 import { GuestUser, Junction, JunctionParticipant, RoomChatMessage, UserRole } from "@/lib/types";
 import { useAudioVisualizer } from "@/hooks/useAudioVisualizer";
 import { useUser } from "@/hooks/useUser";
-import { useUnreadMessages } from "@/hooks/useUnreadMessages";
 import { UserAvatar, AVATAR_ICON_MAP } from "@/components/ui/UserAvatar";
 import { ProfilePreviewModal } from "@/components/profile/ProfilePreviewModal";
-import { InRoomMessenger } from "./InRoomMessenger";
 import { InviteFriendsModal } from "./InviteFriendsModal";
 import confetti from "canvas-confetti";
 import { getCardThemeStyle } from "@/lib/card-themes";
@@ -60,7 +58,7 @@ import {
   Unlock,
   Loader2,
   Check,
-  Compass,
+  ArrowLeftRight,
   LogIn,
   RotateCw,
   Search,
@@ -513,7 +511,6 @@ export function JunctionRoom({
   });
   const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
   const { user, isRegistered, refreshUser } = useUser();
-  const { unreadCount } = useUnreadMessages();
 
   const myId = (isRegistered && user?.id) || guest?.id || "guest_" + Date.now();
   const myIdentity = (isRegistered && user?.username) ? user.username : myId;
@@ -584,7 +581,6 @@ export function JunctionRoom({
     router.prefetch("/junctions");
   }, [router]);
 
-  const [isDirectMessengerOpen, setIsDirectMessengerOpen] = useState(false);
   const [isLeaveModalOpen, setIsLeaveModalOpen] = useState(false);
 
   // ─── Music & Media Mode State (The AUX Cord & Shared Jukebox) ───
@@ -710,14 +706,6 @@ export function JunctionRoom({
   }, [participantVolumes]);
 
   const [activeSpeakers, setActiveSpeakers] = useState<string[]>([]);
-
-  useEffect(() => {
-    const handleOpenInRoomDm = () => {
-      setIsDirectMessengerOpen(true);
-    };
-    window.addEventListener("yapclub_open_inroom_dm", handleOpenInRoomDm);
-    return () => window.removeEventListener("yapclub_open_inroom_dm", handleOpenInRoomDm);
-  }, []);
 
   // Instant platform suspension guard
   useEffect(() => {
@@ -4820,8 +4808,8 @@ export function JunctionRoom({
                       : "text-slate-400 hover:text-white hover:bg-white/5"
                       }`}
                   >
-                    <Compass size={13} />
-                    <span><span className="hidden xs:inline">Other </span>Junctions</span>
+                    <ArrowLeftRight size={13} />
+                    <span><span className="hidden xs:inline">Switch </span>Junctions</span>
                     {otherJunctions.some((j) => j.currentCount > 0) && (
                       <span className="flex items-center gap-0.5 px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px] font-bold">
                         <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
@@ -5570,32 +5558,13 @@ export function JunctionRoom({
                   ? "bg-indigo-600 text-white shadow-[0_4px_16px_rgba(99,102,241,0.5)] ring-2 ring-indigo-400/40"
                   : "bg-white/10 hover:bg-white/20 text-slate-200 hover:text-white border border-white/10 backdrop-blur-md"
                   }`}
-                title="Explore Other Junctions"
+                title="Switch Junction"
               >
-                <Compass size={18} />
+                <ArrowLeftRight size={18} />
                 {otherJunctions.some((j) => j.currentCount > 0) && (
                   <span className="absolute top-0.5 right-0.5 w-2.5 h-2.5 bg-emerald-400 rounded-full ring-2 ring-[#0E0F17] animate-pulse shadow-[0_0_8px_rgba(52,211,153,0.8)]" />
                 )}
               </button>
-
-              {/* Inside Direct Messages Toggle Button (Only visible to logged-in users) */}
-              {isRegistered && user && (
-                <button
-                  onClick={() => setIsDirectMessengerOpen(!isDirectMessengerOpen)}
-                  className={`w-10 h-10 sm:w-11 sm:h-11 rounded-full flex items-center justify-center transition-all duration-200 hover:scale-105 active:scale-90 cursor-pointer relative ${isDirectMessengerOpen
-                    ? "bg-indigo-600 text-white shadow-[0_4px_16px_rgba(99,102,241,0.5)] ring-2 ring-indigo-400/40"
-                    : "bg-white/10 hover:bg-white/20 text-slate-200 hover:text-white border border-white/10 backdrop-blur-md"
-                    }`}
-                  title="Direct Messages"
-                >
-                  <MessageCircle size={18} />
-                  {unreadCount > 0 && (
-                    <span className="absolute -top-1 -right-1 px-1 min-w-[17px] h-4 rounded-full bg-rose-500 text-white text-[9px] font-extrabold flex items-center justify-center border-2 border-[#0E0F17] shadow-md animate-pulse">
-                      {unreadCount > 99 ? "99+" : unreadCount}
-                    </span>
-                  )}
-                </button>
-              )}
 
               <div className="h-6 w-px bg-gradient-to-b from-transparent via-white/25 to-transparent mx-0.5" />
 
@@ -5931,23 +5900,6 @@ export function JunctionRoom({
             );
           })()}
 
-          {/* Floating Instagram-Style Direct Messenger for Logged-In Users */}
-          <InRoomMessenger
-            isOpen={isDirectMessengerOpen}
-            onClose={() => setIsDirectMessengerOpen(false)}
-            currentJunction={
-              junction
-                ? {
-                    id: junctionId,
-                    name: junction.name,
-                    description: junction.description,
-                    participantCount: participants.length,
-                    maxParticipants: junction.maxParticipants || 10,
-                  }
-                : undefined
-            }
-          />
-
           {/* Participant Report Modal with Required Reason */}
           {reportingTarget && (
             <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-fadeIn">
@@ -6083,7 +6035,7 @@ export function JunctionRoom({
             <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/85 backdrop-blur-md animate-in fade-in duration-200 select-none">
               <div className="p-6 rounded-3xl bg-[#12131A] border border-white/10 shadow-2xl flex flex-col items-center text-center max-w-xs mx-4">
                 <div className="w-13 h-13 rounded-2xl bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center text-indigo-400 mb-4 shadow-inner">
-                  <Compass size={24} className="animate-spin" />
+                  <ArrowLeftRight size={24} className="animate-pulse" />
                 </div>
                 <h3 className="text-base font-bold text-white mb-1">
                   Switching Junction

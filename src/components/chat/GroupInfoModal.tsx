@@ -21,12 +21,14 @@ import {
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import { createPortal } from "react-dom";
 import { AddGroupMemberModal } from "./AddGroupMemberModal";
+import { getProfileDisplayName } from "@/lib/chat-utils";
 
 export interface GroupMemberItem {
   userId: string;
   role: "admin" | "member";
   joinedAt: string;
   username: string;
+  displayName?: string;
   avatar?: string;
   bio?: string;
 }
@@ -66,7 +68,7 @@ export function GroupInfoModal({
   const [activeMenuUserId, setActiveMenuUserId] = useState<string | null>(null);
   const [isLeaving, setIsLeaving] = useState(false);
   const [confirmingLeave, setConfirmingLeave] = useState(false);
-  const [memberToRemove, setMemberToRemove] = useState<{ userId: string; username: string } | null>(null);
+  const [memberToRemove, setMemberToRemove] = useState<{ userId: string; username: string; displayName?: string } | null>(null);
   const [isRemovingMember, setIsRemovingMember] = useState(false);
   const [mounted, setMounted] = useState(false);
 
@@ -88,7 +90,7 @@ export function GroupInfoModal({
           user_id,
           role,
           joined_at,
-          profiles:profiles!conversation_members_user_id_fkey(id, username, avatar, bio)
+          profiles:profiles!conversation_members_user_id_fkey(id, username, avatar, bio, social_links)
         `)
         .eq("conversation_id", conversationId)
         .order("joined_at", { ascending: true });
@@ -96,11 +98,13 @@ export function GroupInfoModal({
       if (data) {
         const parsed: GroupMemberItem[] = data.map((d: any) => {
           const p = Array.isArray(d.profiles) ? d.profiles[0] : d.profiles;
+          const dName = getProfileDisplayName(p, p?.username || "Unknown");
           return {
             userId: d.user_id,
             role: d.role === "admin" ? "admin" : "member",
             joinedAt: d.joined_at,
             username: p?.username || "Unknown",
+            displayName: dName,
             avatar: p?.avatar,
             bio: p?.bio,
           };
@@ -112,7 +116,9 @@ export function GroupInfoModal({
           if (b.role === "admin" && a.role !== "admin") return 1;
           if (a.userId === currentUser?.id) return -1;
           if (b.userId === currentUser?.id) return 1;
-          return a.username.localeCompare(b.username);
+          const nameA = a.displayName || a.username;
+          const nameB = b.displayName || b.username;
+          return nameA.localeCompare(nameB);
         });
 
         setMembers(parsed);
@@ -290,7 +296,8 @@ export function GroupInfoModal({
 
   const filteredMembers = members.filter((m) =>
     !searchMember.trim() ||
-    m.username.toLowerCase().includes(searchMember.trim().toLowerCase())
+    m.username.toLowerCase().includes(searchMember.trim().toLowerCase()) ||
+    (m.displayName && m.displayName.toLowerCase().includes(searchMember.trim().toLowerCase()))
   );
 
   if (!mounted || !isOpen) return null;
@@ -456,12 +463,12 @@ export function GroupInfoModal({
                         </div>
 
                         <div className="min-w-0">
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex items-center gap-1.5 min-w-0">
                             <span className="text-sm font-semibold text-white truncate">
-                              {member.username}
+                              {member.displayName || member.username}
                             </span>
                             {isMe && (
-                              <span className="text-[10px] text-slate-400 font-normal">(You)</span>
+                              <span className="text-[10px] text-indigo-400 font-medium shrink-0">(You)</span>
                             )}
                           </div>
                           <p className="text-[11px] text-slate-500 truncate">
@@ -539,7 +546,11 @@ export function GroupInfoModal({
                                       <button
                                         onClick={() => {
                                           setActiveMenuUserId(null);
-                                          setMemberToRemove({ userId: member.userId, username: member.username });
+                                          setMemberToRemove({ 
+                                            userId: member.userId, 
+                                            username: member.username,
+                                            displayName: member.displayName || member.username 
+                                          });
                                         }}
                                         className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors text-left whitespace-nowrap cursor-pointer"
                                       >
@@ -617,7 +628,7 @@ export function GroupInfoModal({
               <span>Remove Member</span>
             </div>
             <p className="text-xs text-slate-300">
-              Are you sure you want to remove <span className="font-semibold text-white">@{memberToRemove.username}</span> from this group?
+              Are you sure you want to remove <span className="font-semibold text-white">{memberToRemove.displayName || memberToRemove.username}</span> from this group?
             </p>
             <div className="flex items-center gap-2 pt-2">
               <button

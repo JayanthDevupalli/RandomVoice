@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, Fragment } from "react";
 import { supabase } from "@/lib/supabase";
 import { useUser } from "@/hooks/useUser";
 import { useUnreadMessages } from "@/hooks/useUnreadMessages";
@@ -17,6 +17,7 @@ import {
   Lock,
   UserPlus,
   Check,
+  CheckCheck,
   Radio,
   Loader2,
   AlertTriangle,
@@ -29,7 +30,12 @@ import {
   serializeTextMessage,
   serializeRoomInvite,
   getSenderColor,
+  getProfileDisplayName,
+  isSameDay,
+  formatChatDateDivider,
+  toggleReactionInContent,
 } from "@/lib/chat-utils";
+import { ReactionBadges } from "@/components/chat/MessageReactions";
 import { socialService, RelationshipStatus } from "@/lib/social-service";
 
 interface DirectMessage {
@@ -41,6 +47,9 @@ interface DirectMessage {
   profiles?: {
     username: string;
     avatar: string;
+    name?: string;
+    displayName?: string;
+    social_links?: any;
   } | null;
 }
 
@@ -52,7 +61,10 @@ interface ConversationSummary {
   other_user?: {
     id: string;
     username: string;
+    name?: string;
+    displayName?: string;
     avatar: string;
+    social_links?: any;
   };
 }
 
@@ -80,11 +92,13 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
   const [activePartnerStub, setActivePartnerStub] = useState<{
     id: string;
     username: string;
+    name?: string;
+    displayName?: string;
     avatar: string;
   } | null>(null);
 
   const [groupMembersMap, setGroupMembersMap] = useState<
-    Record<string, { username: string; avatar: string }>
+    Record<string, { username: string; avatar: string; name?: string; displayName?: string; lastReadAt?: string }>
   >({});
 
   const [messages, setMessages] = useState<DirectMessage[]>([]);
@@ -93,6 +107,7 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
   const [isLoading, setIsLoading] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [nicknames, setNicknames] = useState<Record<string, string>>({});
+  const [partnerLastReadAt, setPartnerLastReadAt] = useState<string | null>(null);
 
   // Social relationship & block state
   const [targetRelationship, setTargetRelationship] = useState<RelationshipStatus | null>(null);
@@ -236,7 +251,8 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
               profiles (
                 id,
                 username,
-                avatar
+                avatar,
+                social_links
               )
             `)
             .in("conversation_id", conversationIds)
@@ -263,7 +279,10 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
                   otherUser = {
                     id: prof.id,
                     username: prof.username,
+                    name: getProfileDisplayName(prof, prof.username),
+                    displayName: getProfileDisplayName(prof, prof.username),
                     avatar: prof.avatar || "user",
+                    social_links: prof.social_links,
                   };
                 }
               }
@@ -319,23 +338,29 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
           .from("conversation_members")
           .select(`
             user_id,
+            last_read_at,
             profiles (
               id,
               username,
-              avatar
+              avatar,
+              social_links
             )
           `)
           .eq("conversation_id", activeConversationId);
 
         if (data) {
-          const map: Record<string, { username: string; avatar: string }> = {};
+          const map: Record<string, { username: string; avatar: string; name?: string; displayName?: string; lastReadAt?: string }> = {};
           for (const item of data) {
             const raw = (item as any).profiles;
             const prof = Array.isArray(raw) ? raw[0] : raw;
             if (prof && item.user_id) {
+              const dName = getProfileDisplayName(prof, prof.username || "User");
               map[item.user_id] = {
                 username: prof.username || "User",
+                name: dName,
+                displayName: dName,
                 avatar: prof.avatar || "user",
+                lastReadAt: (item as any).last_read_at || undefined,
               };
             }
           }
@@ -396,7 +421,8 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
           profiles (
             id,
             username,
-            avatar
+            avatar,
+            social_links
           )
         `)
         .eq("conversation_id", activeConversationId)
@@ -407,9 +433,12 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
             const rawProf = (data as any).profiles;
             const prof = Array.isArray(rawProf) ? rawProf[0] : rawProf;
             if (prof) {
+              const dName = getProfileDisplayName(prof, prof.username);
               setActivePartnerStub({
                 id: prof.id,
                 username: prof.username,
+                name: dName,
+                displayName: dName,
                 avatar: prof.avatar || "user",
               });
             }
@@ -417,6 +446,25 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
         });
     }
   }, [activeConversationId, activePartner, user?.id]);
+
+  // Fetch partner's last read timestamp for 1-on-1 chats to display live seen ticks
+  useEffect(() => {
+    if (!activeConversationId || isGroupChat || !partnerId) {
+      setPartnerLastReadAt(null);
+      return;
+    }
+    supabase
+      .from("conversation_members")
+      .select("last_read_at")
+      .eq("conversation_id", activeConversationId)
+      .eq("user_id", partnerId)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (data?.last_read_at) {
+          setPartnerLastReadAt(data.last_read_at);
+        }
+      });
+  }, [activeConversationId, isGroupChat, partnerId]);
 
   // Fetch messages for active conversation & sync read status
   useEffect(() => {
@@ -633,6 +681,50 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
     }
   };
 
+  const handleToggleReaction = useCallback(
+    async (messageId: string, emoji: string) => {
+      if (!user?.id) return;
+      const targetMsg = messages.find((m) => m.id === messageId);
+      if (!targetMsg) return;
+
+      const dName = getProfileDisplayName(user, user.username || "You");
+
+      const { newContent } = toggleReactionInContent(targetMsg.content, {
+        emoji,
+        userId: user.id,
+        username: user.username,
+        displayName: dName,
+      });
+
+      setMessages((prev) =>
+        prev.map((m) => (m.id === messageId ? { ...m, content: newContent } : m))
+      );
+
+      try {
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
+        await fetch("/api/messages/reactions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+          },
+          body: JSON.stringify({
+            messageId,
+            emoji,
+            userId: user.id,
+            username: user.username,
+            displayName: dName,
+          }),
+        });
+      } catch (e) {
+        console.error("Failed to save reaction in room messenger:", e);
+      }
+    },
+    [messages, user]
+  );
+
   // Quick Room Invite sending
   const handleSendRoomInvite = async () => {
     if (!currentJunction || !activeConversationId || !user?.id || isSending) return;
@@ -717,20 +809,22 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
     return null;
   }
 
+  const activePartnerShownName = activePartner ? getProfileDisplayName(activePartner, activePartner.username) : "Direct Message";
   const activePartnerName = isGroupChat
     ? activeConversation?.name || "Group Chat"
     : activePartner
-    ? nicknames[activePartner.id] || activePartner.username
+    ? nicknames[activePartner.id] || activePartnerShownName
     : "Direct Message";
 
   const isBlocked = partnerId ? blockedUsers.includes(partnerId) : false;
   const isBlockedByOther = partnerId ? blockedMeUsers.includes(partnerId) : false;
 
   const filteredConversations = conversations.filter((c) => {
+    const dName = c.other_user ? getProfileDisplayName(c.other_user, c.other_user.username) : "";
     const name = c.other_user
-      ? nicknames[c.other_user.id] || c.other_user.username
+      ? nicknames[c.other_user.id] || dName || c.other_user.username
       : c.name || "";
-    return name.toLowerCase().includes(searchQuery.toLowerCase());
+    return name.toLowerCase().includes(searchQuery.toLowerCase()) || (c.other_user?.username || "").toLowerCase().includes(searchQuery.toLowerCase());
   });
 
   return (
@@ -896,10 +990,11 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
                 ) : (
                   filteredConversations.map((c) => {
                     const isGroup = c.type === "group";
+                    const dName = c.other_user ? getProfileDisplayName(c.other_user, c.other_user.username) : "Chat";
                     const name = isGroup
                       ? c.name || "Group Chat"
                       : c.other_user
-                      ? nicknames[c.other_user.id] || c.other_user.username
+                      ? nicknames[c.other_user.id] || dName || c.other_user.username
                       : c.name || "Chat";
                     const unread = unreadByConversation[c.id] || 0;
 
@@ -970,79 +1065,179 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
                     <p className="text-[10px] text-slate-400 mt-0.5">Send a message to {activePartnerName}</p>
                   </div>
                 ) : (
-                  messages.map((m) => {
+                  messages.map((m, index) => {
                     const isMe = m.sender_id === user.id;
                     const parsed = parseMessageContent(m.content);
 
                     // Resolve sender identity for group chat
                     const memberProfile = groupMembersMap[m.sender_id] || (m as any).profiles;
+                    const memberDisplayName = getProfileDisplayName(memberProfile, memberProfile?.username || "Member");
                     const senderName = isMe
                       ? "You"
-                      : nicknames[m.sender_id] || memberProfile?.username || "Member";
+                      : nicknames[m.sender_id] || memberDisplayName || "Member";
+
+                    const prevMsg = index > 0 ? messages[index - 1] : null;
+                    const isNewDay = !prevMsg || !isSameDay(prevMsg.created_at, m.created_at);
+                    const dateLabel = isNewDay ? formatChatDateDivider(m.created_at) : null;
+                    const isSameSenderAsPrev = !isNewDay && prevMsg && prevMsg.sender_id === m.sender_id;
+                    const isFirstInCluster = !isSameSenderAsPrev;
 
                     return (
-                      <div
-                        key={m.id}
-                        className={`flex flex-col min-w-0 max-w-full ${isMe ? "items-end" : "items-start"}`}
-                      >
-                        {/* Sender name for group chats */}
-                        {!isMe && isGroupChat && (
-                          <span
-                            className={`text-[11px] font-bold px-1 mb-1 truncate select-none ${getSenderColor(
-                              senderName
-                            )}`}
-                          >
-                            {senderName}
-                          </span>
-                        )}
-
-                        {/* Snug Message Bubble */}
-                        <div
-                          className={`w-fit max-w-[85%] sm:max-w-[78%] px-3.5 py-2.5 rounded-2xl text-[13px] leading-relaxed break-words shadow-sm min-w-0 ${
-                            isMe
-                              ? "bg-gradient-to-r from-indigo-600 to-indigo-500 text-white rounded-br-xs shadow-indigo-950/30"
-                              : "bg-[#181926] text-slate-100 rounded-bl-xs border border-white/[0.08]"
-                          }`}
-                        >
-                          {parsed.replyTo && (
-                            <div className="mb-1.5 px-2.5 py-1.5 rounded-xl bg-black/30 text-[10px] border-l-2 border-indigo-400 w-full min-w-0 overflow-hidden">
-                              <div className="flex items-center gap-1 font-semibold text-indigo-300 min-w-0 mb-0.5">
-                                <span className="truncate">@{parsed.replyTo.sender}</span>
-                              </div>
-                              <p className="line-clamp-2 break-words w-full overflow-hidden text-ellipsis opacity-80">
-                                {parsed.replyTo.isVoice ? "🎵 Voice Note" : parsed.replyTo.text}
-                              </p>
+                      <Fragment key={m.id}>
+                        {isNewDay && dateLabel && (
+                          <div className="w-full flex justify-center my-2 select-none pointer-events-none sticky top-1 z-20">
+                            <div className="px-3 py-0.5 rounded-full bg-[#151622]/95 backdrop-blur-md border border-white/10 text-[10px] font-semibold text-slate-300 shadow-md tracking-wide">
+                              <span>{dateLabel}</span>
                             </div>
+                          </div>
+                        )}
+                        <div
+                          className={`flex items-start gap-2 max-w-full ${isMe ? "justify-end" : "justify-start"} ${isFirstInCluster ? "mt-2.5" : "mt-1"}`}
+                        >
+                          {/* Avatar in group for incoming messages: avatar on first message in cluster, spacer on consecutive */}
+                          {!isMe && isGroupChat && (
+                            isFirstInCluster ? (
+                              <div className="w-6 h-6 rounded-full bg-slate-800 overflow-hidden shrink-0 border border-white/10 mt-0.5 shadow-sm">
+                                {memberProfile?.avatar?.includes("http") ? (
+                                  <img src={memberProfile.avatar} alt={senderName} className="w-full h-full object-cover" />
+                                ) : (
+                                  <UserAvatar avatar={memberProfile?.avatar} size="sm" className="!w-full !h-full" />
+                                )}
+                              </div>
+                            ) : (
+                              <div className="w-6 h-6 shrink-0 pointer-events-none" />
+                            )
                           )}
+
+                          {/* Snug Message Bubble */}
+                          <div
+                            className={`w-fit min-w-[64px] max-w-[85%] sm:max-w-[78%] px-3 py-1.5 sm:px-3.5 sm:py-2 rounded-2xl text-[13px] leading-relaxed break-words shadow-sm ${
+                              isMe
+                                ? `bg-gradient-to-r from-indigo-600 to-indigo-500 text-white ${isFirstInCluster ? "rounded-br-xs" : ""} shadow-indigo-950/30`
+                                : `bg-[#181926] text-slate-100 ${isFirstInCluster ? "rounded-bl-xs" : ""} border border-white/[0.08]`
+                            }`}
+                          >
+                            {/* WhatsApp-Style Sender Name inside the bubble on first message in cluster */}
+                            {!isMe && isGroupChat && isFirstInCluster && (
+                              <div className="mb-0.5 select-none pointer-events-none">
+                                <span className={`text-[11px] font-bold tracking-tight truncate block ${getSenderColor(senderName)}`}>
+                                  {senderName}
+                                </span>
+                              </div>
+                            )}
+
+                            {parsed.replyTo && (
+                              <div className="mb-1.5 px-2.5 py-1.5 rounded-xl bg-black/30 text-[10px] border-l-2 border-indigo-400 w-full min-w-0 overflow-hidden">
+                                <div className="flex items-center gap-1 font-semibold text-indigo-300 min-w-0 mb-0.5">
+                                  <span className="truncate">{parsed.replyTo.sender}</span>
+                                </div>
+                                <p className="line-clamp-2 break-words w-full overflow-hidden text-ellipsis opacity-80">
+                                  {parsed.replyTo.isVoice ? "🎵 Voice Note" : parsed.replyTo.text}
+                                </p>
+                              </div>
+                            )}
 
                           {parsed.type === "room_invite" && parsed.roomInvite ? (
                             <RoomInviteCard invite={parsed.roomInvite} isMe={isMe} />
                           ) : parsed.type === "voice" ? (
                             <VoiceNotePlayer audioUrl={parsed.audioUrl || ""} duration={parsed.duration} isMe={isMe} />
                           ) : (
-                            <p className="whitespace-pre-wrap select-text break-words w-full overflow-hidden text-[13px] leading-relaxed">
-                              {parsed.text}
-                            </p>
+                            <div className="flex flex-wrap items-end justify-between gap-x-2 gap-y-0.5">
+                              <p className="whitespace-pre-wrap select-text break-words min-w-0 text-[13px] leading-relaxed">
+                                {parsed.text}
+                              </p>
+                              <div
+                                className={`flex items-center gap-1 select-none shrink-0 ml-auto pb-0.5 text-[9px] font-mono ${
+                                  isMe ? "text-indigo-200/70" : "text-slate-400/80"
+                                }`}
+                              >
+                                {parsed.isEdited && <span className="italic opacity-80">(edited)</span>}
+                                <span>
+                                  {new Date(m.created_at).toLocaleTimeString([], {
+                                    hour: "2-digit",
+                                    minute: "2-digit",
+                                  })}
+                                </span>
+
+                                {/* Sent / Seen ticks for 1-on-1 chats */}
+                                {isMe && !isGroupChat && (
+                                  <span 
+                                    className="inline-flex items-center gap-0.5 ml-0.5"
+                                    title={partnerLastReadAt && new Date(partnerLastReadAt).getTime() >= new Date(m.created_at).getTime() ? "Seen" : "Delivered"}
+                                  >
+                                    {partnerLastReadAt && new Date(partnerLastReadAt).getTime() >= new Date(m.created_at).getTime() ? (
+                                      <CheckCheck size={11} className="stroke-[2.5] text-sky-400" />
+                                    ) : (
+                                      <CheckCheck size={11} className="stroke-[1.8] text-indigo-200/70" />
+                                    )}
+                                  </span>
+                                )}
+
+                                {/* Group chat seen status */}
+                                {isMe && isGroupChat && (() => {
+                                  const otherMembers = Object.entries(groupMembersMap).filter(([uid]) => uid !== user?.id);
+                                  const total = otherMembers.length;
+                                  if (total === 0) return null;
+                                  const msgTime = new Date(m.created_at).getTime();
+                                  const readCount = otherMembers.filter(([, member]) => member.lastReadAt && new Date(member.lastReadAt).getTime() >= msgTime).length;
+                                  const isAll = readCount === total;
+
+                                  return (
+                                    <span
+                                      className={`inline-flex items-center gap-0.5 ml-1 text-[9px] font-semibold ${
+                                        isAll ? "text-sky-400" : readCount > 0 ? "text-sky-300" : "text-indigo-200/60"
+                                      }`}
+                                      title={isAll ? "Seen by all" : readCount > 0 ? `Seen by ${readCount}/${total}` : "Delivered"}
+                                    >
+                                      {isAll ? (
+                                        <>
+                                          <CheckCheck size={11} className="stroke-[2.5]" />
+                                          <span>all</span>
+                                        </>
+                                      ) : readCount > 0 ? (
+                                        <>
+                                          <CheckCheck size={11} className="stroke-[2]" />
+                                          <span>{readCount}</span>
+                                        </>
+                                      ) : (
+                                        <Check size={10} className="stroke-[2]" />
+                                      )}
+                                    </span>
+                                  );
+                                })()}
+                              </div>
+                            </div>
                           )}
 
-                          {/* Bubble timestamp aligned inside bottom-right */}
-                          <div
-                            className={`flex items-center justify-end gap-1 mt-1 text-[9px] font-mono select-none ${
-                              isMe ? "text-indigo-200/70" : "text-slate-400/80"
-                            }`}
-                          >
-                            {parsed.isEdited && <span className="italic opacity-80">(edited)</span>}
-                            <span>
-                              {new Date(m.created_at).toLocaleTimeString([], {
-                                hour: "2-digit",
-                                minute: "2-digit",
-                              })}
-                            </span>
-                          </div>
+                          {/* Bubble timestamp for Voice & Invites */}
+                          {(parsed.type === "voice" || parsed.type === "room_invite") && (
+                            <div
+                              className={`flex items-center justify-end gap-1 mt-1 text-[9px] font-mono select-none ${
+                                isMe ? "text-indigo-200/70" : "text-slate-400/80"
+                              }`}
+                            >
+                              {parsed.isEdited && <span className="italic opacity-80">(edited)</span>}
+                              <span>
+                                {new Date(m.created_at).toLocaleTimeString([], {
+                                  hour: "2-digit",
+                                  minute: "2-digit",
+                                })}
+                              </span>
+                            </div>
+                          )}
+
+                          {/* Reaction Badges */}
+                          <ReactionBadges
+                            reactions={parsed.reactions}
+                            currentUserId={user?.id}
+                            onToggleReaction={(emoji) => handleToggleReaction(m.id, emoji)}
+                            isMe={isMe}
+                          />
                         </div>
                       </div>
-                    );
-                  })
+                    </Fragment>
+                  );
+                })
                 )}
                 <div ref={messagesEndRef} />
               </div>

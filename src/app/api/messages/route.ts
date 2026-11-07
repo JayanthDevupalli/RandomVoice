@@ -52,20 +52,35 @@ export async function PATCH(request: NextRequest) {
   }
 }
 
-// Delete message (DELETE)
+// Delete message or clear conversation messages (DELETE)
 export async function DELETE(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const id = searchParams.get("id");
     const userId = searchParams.get("userId");
+    const conversationId = searchParams.get("conversationId");
 
-    if (!id || !userId) {
-      return NextResponse.json({ error: "Missing id or userId" }, { status: 400 });
+    if (!userId || (!id && !conversationId)) {
+      return NextResponse.json({ error: "Missing required parameters" }, { status: 400 });
     }
 
     const isAuthorized = await verifyCaller(request, userId);
     if (!isAuthorized) {
-      return NextResponse.json({ error: "Forbidden: Cannot delete another user's message" }, { status: 403 });
+      return NextResponse.json({ error: "Forbidden: Unauthorized" }, { status: 403 });
+    }
+
+    if (conversationId) {
+      const { error } = await supabaseAdmin
+        .from("messages")
+        .delete()
+        .eq("conversation_id", conversationId);
+
+      if (error) {
+        console.error("Error clearing conversation messages via admin:", error);
+        return NextResponse.json({ error: error.message }, { status: 500 });
+      }
+
+      return NextResponse.json({ success: true, message: "Chat cleared successfully" });
     }
 
     const { error } = await supabaseAdmin

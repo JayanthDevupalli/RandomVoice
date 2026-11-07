@@ -18,6 +18,11 @@ const ActiveJunctionOverlay = dynamic(
   { ssr: false }
 );
 
+const GlobalMessageBubbleOverlay = dynamic(
+  () => import("@/components/chat/GlobalMessageBubbleOverlay").then((mod) => mod.GlobalMessageBubbleOverlay),
+  { ssr: false }
+);
+
 const rawSiteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://yapclub.vercel.app";
 const siteUrl = rawSiteUrl.replace(/\/+$/, "");
 
@@ -155,6 +160,7 @@ export default function RootLayout({
                 {children}
                 <DMVoiceCallOverlay />
                 <ActiveJunctionOverlay />
+                <GlobalMessageBubbleOverlay />
               </ActiveJunctionProvider>
             </DMVoiceCallProvider>
           </GlobalPresenceProvider>

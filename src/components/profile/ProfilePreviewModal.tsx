@@ -290,26 +290,7 @@ export function ProfilePreviewModal({ isOpen, onClose, participant }: ProfilePre
     try {
       const convId = await socialService.ensureDirectConversation(currentUser.id, profile.id);
       onClose();
-
-      // Dispatch in-room messenger trigger
-      window.dispatchEvent(
-        new CustomEvent("yapclub_open_inroom_dm", {
-          detail: {
-            conversationId: convId,
-            partnerId: profile.id,
-            partnerProfile: {
-              id: profile.id,
-              username: profile.username,
-              avatar: profile.avatar || "user",
-            },
-          },
-        })
-      );
-
-      // If not in a junction room, navigate to messages page directly
-      if (typeof window !== "undefined" && !window.location.pathname.startsWith("/junction")) {
-        router.push(convId ? `/messages?id=${convId}` : "/messages");
-      }
+      router.push(convId ? `/messages?conversation=${convId}` : "/messages");
     } catch (e) {
       console.error(e);
     } finally {

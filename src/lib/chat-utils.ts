@@ -7,6 +7,21 @@ export interface RoomInviteData {
   inviterName?: string;
 }
 
+export interface MessageReaction {
+  emoji: string;
+  userId: string;
+  username?: string;
+  displayName?: string;
+  createdAt?: string;
+}
+
+export interface GroupedReaction {
+  emoji: string;
+  count: number;
+  users: Array<{ userId: string; username?: string; displayName?: string }>;
+  hasReacted: boolean;
+}
+
 export interface ParsedMessage {
   type: "text" | "voice" | "room_invite" | "gif";
   text?: string;
@@ -24,6 +39,7 @@ export interface ParsedMessage {
     gifUrl?: string;
   } | null;
   isEdited?: boolean;
+  reactions?: MessageReaction[];
 }
 
 export function parseMessageContent(raw: string): ParsedMessage {
@@ -50,6 +66,7 @@ export function parseMessageContent(raw: string): ParsedMessage {
   if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
     try {
       const parsed = JSON.parse(trimmed);
+      const reactions = Array.isArray(parsed.reactions) ? parsed.reactions : undefined;
 
       if (parsed.type === "gif") {
         return {
@@ -58,6 +75,7 @@ export function parseMessageContent(raw: string): ParsedMessage {
           gifTitle: parsed.gifTitle || parsed.title || "GIF",
           text: parsed.text,
           replyTo: parsed.replyTo || null,
+          reactions,
         };
       }
 
@@ -75,6 +93,7 @@ export function parseMessageContent(raw: string): ParsedMessage {
           roomInvite: invite,
           text: parsed.text || `🎙️ Joined "${invite.junctionName}"! Tap to join the hangout.`,
           replyTo: parsed.replyTo || null,
+          reactions,
         };
       }
 
@@ -85,6 +104,7 @@ export function parseMessageContent(raw: string): ParsedMessage {
           duration: parsed.duration || 0,
           replyTo: parsed.replyTo || null,
           isEdited: !!parsed.isEdited,
+          reactions,
         };
       }
 
@@ -94,6 +114,7 @@ export function parseMessageContent(raw: string): ParsedMessage {
           text: parsed.text || "",
           replyTo: parsed.replyTo || null,
           isEdited: !!parsed.isEdited,
+          reactions,
         };
       }
     } catch (e) {
@@ -107,9 +128,10 @@ export function parseMessageContent(raw: string): ParsedMessage {
 export function serializeTextMessage(
   text: string,
   replyTo?: ParsedMessage["replyTo"],
-  isEdited: boolean = false
+  isEdited: boolean = false,
+  reactions?: MessageReaction[]
 ): string {
-  if (!replyTo && !isEdited) {
+  if (!replyTo && !isEdited && (!reactions || reactions.length === 0)) {
     return text;
   }
   return JSON.stringify({
@@ -117,7 +139,84 @@ export function serializeTextMessage(
     text,
     replyTo: replyTo || null,
     isEdited,
+    reactions: reactions && reactions.length > 0 ? reactions : undefined,
   });
+}
+
+export function groupReactions(
+  reactions?: MessageReaction[],
+  currentUserId?: string
+): GroupedReaction[] {
+  if (!reactions || reactions.length === 0) return [];
+  const map = new Map<string, GroupedReaction>();
+
+  for (const r of reactions) {
+    if (!r?.emoji) continue;
+    let group = map.get(r.emoji);
+    if (!group) {
+      group = {
+        emoji: r.emoji,
+        count: 0,
+        users: [],
+        hasReacted: false,
+      };
+      map.set(r.emoji, group);
+    }
+    group.count += 1;
+    group.users.push({ userId: r.userId, username: r.username, displayName: r.displayName });
+    if (currentUserId && r.userId === currentUserId) {
+      group.hasReacted = true;
+    }
+  }
+
+  return Array.from(map.values());
+}
+
+export function toggleReactionInContent(
+  rawContent: string,
+  reaction: { emoji: string; userId: string; username?: string; displayName?: string }
+): { newContent: string; reactions: MessageReaction[] } {
+  const parsed = parseMessageContent(rawContent);
+  const currentReactions: MessageReaction[] = Array.isArray(parsed.reactions)
+    ? [...parsed.reactions]
+    : [];
+
+  const existingExactIdx = currentReactions.findIndex(
+    (r) => r.userId === reaction.userId && r.emoji === reaction.emoji
+  );
+
+  let updatedReactions: MessageReaction[];
+
+  if (existingExactIdx >= 0) {
+    // Exact reaction clicked again -> toggle off (remove)
+    updatedReactions = currentReactions.filter((_, idx) => idx !== existingExactIdx);
+  } else {
+    // If user previously reacted with another emoji, update it (WhatsApp style)
+    const userOtherIdx = currentReactions.findIndex((r) => r.userId === reaction.userId);
+    const newEntry: MessageReaction = {
+      emoji: reaction.emoji,
+      userId: reaction.userId,
+      username: reaction.username,
+      displayName: reaction.displayName,
+      createdAt: new Date().toISOString(),
+    };
+
+    if (userOtherIdx >= 0) {
+      updatedReactions = currentReactions.map((r, idx) => (idx === userOtherIdx ? newEntry : r));
+    } else {
+      updatedReactions = [...currentReactions, newEntry];
+    }
+  }
+
+  const updatedPayload: Record<string, any> = {
+    ...parsed,
+    reactions: updatedReactions,
+  };
+
+  return {
+    newContent: JSON.stringify(updatedPayload),
+    reactions: updatedReactions,
+  };
 }
 
 export function serializeVoiceMessage(
@@ -181,5 +280,81 @@ export function getSenderColor(nameOrId?: string): string {
   const index = Math.abs(hash) % SENDER_COLORS.length;
   return SENDER_COLORS[index];
 }
+
+/**
+ * Resolves the friendly Shown Name (Display Name) for any user profile,
+ * falling back gracefully to username or a custom default fallback.
+ */
+export function getProfileDisplayName(
+  profile?: {
+    display_name?: string;
+    displayName?: string;
+    name?: string;
+    username?: string;
+    social_links?: any;
+  } | null,
+  fallback: string = "User"
+): string {
+  if (!profile) return fallback;
+  return (
+    profile.display_name ||
+    profile.displayName ||
+    profile.social_links?.display_name ||
+    profile.name ||
+    profile.username ||
+    fallback
+  );
+}
+
+/**
+ * Checks if two dates fall on the same calendar day.
+ */
+export function isSameDay(d1?: string | number | Date, d2?: string | number | Date): boolean {
+  if (!d1 || !d2) return false;
+  const date1 = new Date(d1);
+  const date2 = new Date(d2);
+  if (isNaN(date1.getTime()) || isNaN(date2.getTime())) return false;
+  return (
+    date1.getFullYear() === date2.getFullYear() &&
+    date1.getMonth() === date2.getMonth() &&
+    date1.getDate() === date2.getDate()
+  );
+}
+
+/**
+ * Formats a message timestamp into a clean WhatsApp-style date divider:
+ * - "Today"
+ * - "Yesterday"
+ * - Weekday name (e.g. "Wednesday") for the last 6 days
+ * - "November 5" for earlier dates in current year
+ * - "November 5, 2025" for previous years
+ */
+export function formatChatDateDivider(dateInput?: string | number | Date): string {
+  if (!dateInput) return "";
+  const date = new Date(dateInput);
+  if (isNaN(date.getTime())) return "";
+
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const targetDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+
+  const diffTime = today.getTime() - targetDate.getTime();
+  const diffDays = Math.round(diffTime / (1000 * 60 * 60 * 24));
+
+  if (diffDays === 0) {
+    return "Today";
+  }
+  if (diffDays === 1) {
+    return "Yesterday";
+  }
+  if (diffDays > 1 && diffDays < 7) {
+    return date.toLocaleDateString([], { weekday: "long" });
+  }
+  if (date.getFullYear() === now.getFullYear()) {
+    return date.toLocaleDateString([], { month: "long", day: "numeric" });
+  }
+  return date.toLocaleDateString([], { year: "numeric", month: "long", day: "numeric" });
+}
+
 
 
