@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import { GuestUser, Junction, JunctionParticipant, RoomChatMessage, UserRole } from "@/lib/types";
+import { GuestUser, Junction, JunctionParticipant, RoomChatMessage, UserRole, WaitingGuest } from "@/lib/types";
 import { useAudioVisualizer } from "@/hooks/useAudioVisualizer";
 import { useUser } from "@/hooks/useUser";
 import { UserAvatar, AVATAR_ICON_MAP } from "@/components/ui/UserAvatar";
@@ -75,6 +75,7 @@ import {
   UserMinus,
   Disc3,
   Headphones,
+  Clock,
 } from "lucide-react";
 import { MusicDeck } from "./music/MusicDeck";
 import { MusicModal } from "./music/MusicModal";
@@ -252,7 +253,7 @@ function LiveKitDataSync({
       if (rp.metadata) {
         try {
           meta = JSON.parse(rp.metadata);
-        } catch {}
+        } catch { }
       }
       return {
         id: meta.id || rp.sid || rp.identity,
@@ -312,7 +313,7 @@ function LiveKitDataSync({
             identity: remotePeer.identity,
             participantId: remotePeer.identity,
           }),
-        }).catch(() => {});
+        }).catch(() => { });
       }
       onParticipantSync?.();
       if (room && room.state === ConnectionState.Connected) {
@@ -513,8 +514,8 @@ export function JunctionRoom({
   const { user, isRegistered, refreshUser } = useUser();
 
   const myId = (isRegistered && user?.id) || guest?.id || "guest_" + Date.now();
-  const myIdentity = (isRegistered && user?.username) ? user.username : myId;
-  const myDisplayName = (isRegistered && (user?.displayName || user?.name)) || guest?.displayName || guest?.name || "Guest";
+  const myIdentity = (isRegistered && user?.username) ? user.username : (user?.username || guest?.name || myId);
+  const myDisplayName = (isRegistered && (user?.displayName || user?.name)) || user?.displayName || user?.name || guest?.displayName || guest?.name || "Guest";
 
   const [localRoleOverride, setLocalRoleOverride] = useState<UserRole | null>(null);
   const localRoleOverrideRef = useRef<UserRole | null>(null);
@@ -523,15 +524,27 @@ export function JunctionRoom({
   const isLocalIdentity = useCallback((target?: string | null) => {
     if (!target) return false;
     const clean = target.trim().toLowerCase();
-    const myIdClean = (myIdentity || "").trim().toLowerCase();
-    const myUniqueIdClean = (myId || "").trim().toLowerCase();
-    return Boolean((myIdClean && clean === myIdClean) || (myUniqueIdClean && clean === myUniqueIdClean));
-  }, [myIdentity, myId]);
+    const candidates = [
+      myIdentity,
+      myId,
+      myDisplayName,
+      user?.username,
+      user?.displayName,
+      user?.name,
+      user?.id,
+      guest?.name,
+      guest?.displayName,
+      guest?.id,
+    ].filter(Boolean).map((s) => (s as string).trim().toLowerCase());
+    return candidates.includes(clean);
+  }, [myIdentity, myId, myDisplayName, user, guest]);
 
   const isLocalParticipant = useCallback((p?: { id?: string; identity?: string; name?: string; username?: string; displayName?: string } | null) => {
     if (!p) return false;
     if (p.id && myId && p.id.toLowerCase().trim() === myId.toLowerCase().trim()) return true;
     if (p.identity && isLocalIdentity(p.identity)) return true;
+    if (p.username && isLocalIdentity(p.username)) return true;
+    if (p.name && isLocalIdentity(p.name)) return true;
     return false;
   }, [isLocalIdentity, myId]);
 
@@ -655,7 +668,7 @@ export function JunctionRoom({
     if (e.currentTarget.hasPointerCapture(e.pointerId)) {
       try {
         e.currentTarget.releasePointerCapture(e.pointerId);
-      } catch {}
+      } catch { }
     }
     if (isDraggingPill) {
       setIsDraggingPill(false);
@@ -768,6 +781,16 @@ export function JunctionRoom({
   const [isClaimingMod, setIsClaimingMod] = useState<boolean>(false);
   const [modNoticeToast, setModNoticeToast] = useState<string | null>(null);
 
+  // Auto-dismiss modNoticeToast after 3.5 seconds
+  useEffect(() => {
+    if (modNoticeToast) {
+      const timer = setTimeout(() => {
+        setModNoticeToast(null);
+      }, 3500);
+      return () => clearTimeout(timer);
+    }
+  }, [modNoticeToast]);
+
   // Chat & Reactions state
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [rightPanelTab, setRightPanelTab] = useState<"chat" | "junctions">("chat");
@@ -848,6 +871,104 @@ export function JunctionRoom({
     }
   }, [isMinimized]);
 
+  // Waiting Room state for locked rooms
+  const [isWaitingRoom, setIsWaitingRoom] = useState(false);
+  const [waitingStatus, setWaitingStatus] = useState<"waiting" | "admitted" | "denied">("waiting");
+  const [joinAttempt, setJoinAttempt] = useState(0);
+  const retryJoin = useCallback(() => {
+    isJoiningRef.current = false;
+    joinedJunctionIdRef.current = null;
+    setIsWaitingRoom(false);
+    setWaitingStatus("admitted");
+    setJoinAttempt((c) => c + 1);
+  }, []);
+
+  // Host knock management queue
+  const [waitingKnocks, setWaitingKnocks] = useState<WaitingGuest[]>([]);
+
+  // Room Expiration Countdown (1s tick)
+  const [timeLeftMs, setTimeLeftMs] = useState<number | null>(null);
+  const hasWarnedExpirationRef = useRef(false);
+
+  useEffect(() => {
+    if (!junction?.expiresAt) {
+      setTimeLeftMs(null);
+      return;
+    }
+    const updateTime = () => {
+      const now = Date.now();
+      const diff = junction.expiresAt! - now;
+      if (diff <= 0) {
+        setTimeLeftMs(0);
+        setKickedNotice("This room's scheduled duration has ended. Returning to lobby...");
+        return;
+      }
+      setTimeLeftMs(diff);
+      // 5-minute warning
+      if (diff <= 5 * 60 * 1000 && diff > 4 * 60 * 1000 && !hasWarnedExpirationRef.current) {
+        hasWarnedExpirationRef.current = true;
+        setModNoticeToast("⏳ This room will automatically close in 5 minutes.");
+      }
+    };
+    updateTime();
+    const interval = setInterval(updateTime, 1000);
+    return () => clearInterval(interval);
+  }, [junction?.expiresAt]);
+
+  // Formatted duration string for countdown pill
+  const formattedDurationRemaining = useMemo(() => {
+    if (!junction) return "";
+    if (timeLeftMs !== null) {
+      if (timeLeftMs <= 0) return "Ending...";
+      const hours = Math.floor(timeLeftMs / 3600000);
+      const mins = Math.floor((timeLeftMs % 3600000) / 60000);
+      return hours > 0 ? `${hours}h ${mins}m left` : `${mins}m left`;
+    }
+    if (junction.expiresAt) {
+      const diff = Math.max(1, Math.floor((junction.expiresAt - Date.now()) / 60000));
+      const hours = Math.floor(diff / 60);
+      const mins = diff % 60;
+      return hours > 0 ? `${hours}h ${mins}m left` : `${mins}m left`;
+    }
+    if (junction.durationType === "permanent") return "Permanent ♾️";
+    return `${junction.durationType || "1h"} left`;
+  }, [timeLeftMs, junction]);
+
+  const handleAdmitKnock = async (targetIdentity: string) => {
+    setWaitingKnocks((prev) => prev.filter((g) => g.identity !== targetIdentity));
+    try {
+      await fetch(`/api/junctions/${junctionId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "admit",
+          hostIdentity: myIdentity,
+          targetIdentity,
+        }),
+      });
+      setModNoticeToast("Admitted user into room.");
+    } catch (e) {
+      console.warn("Failed to admit waiting guest:", e);
+    }
+  };
+
+  const handleDenyKnock = async (targetIdentity: string) => {
+    setWaitingKnocks((prev) => prev.filter((g) => g.identity !== targetIdentity));
+    try {
+      await fetch(`/api/junctions/${junctionId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "deny",
+          hostIdentity: myIdentity,
+          targetIdentity,
+        }),
+      });
+    } catch (e) {
+      console.warn("Failed to deny waiting guest:", e);
+    }
+  };
+
   const toggleShowInRoomPopups = useCallback(() => {
     setShowInRoomPopups((prev) => {
       const next = !prev;
@@ -919,19 +1040,19 @@ export function JunctionRoom({
         const local = liveKitRoomRef.current.localParticipant;
         if (local) {
           try {
-            local.setMicrophoneEnabled(false).catch(() => {});
-          } catch {}
+            local.setMicrophoneEnabled(false).catch(() => { });
+          } catch { }
           local.audioTrackPublications?.forEach((pub: any) => {
             try {
               pub.track?.stop();
               pub.audioTrack?.stop();
-              local.unpublishTrack(pub.track).catch(() => {});
-            } catch {}
+              local.unpublishTrack(pub.track).catch(() => { });
+            } catch { }
           });
         }
         liveKitRoomRef.current.disconnect();
       }
-    } catch {}
+    } catch { }
 
     if (mediaStream) {
       mediaStream.getTracks().forEach((t) => t.stop());
@@ -964,7 +1085,7 @@ export function JunctionRoom({
         headers: { "Content-Type": "application/json" },
         body: leavePayload,
         keepalive: true,
-      }).catch(() => {});
+      }).catch(() => { });
     }
 
     // 4. Instantly switch active junction session & route without waiting
@@ -1146,14 +1267,42 @@ export function JunctionRoom({
     (typeof junction?.id === "string" && junction.id.startsWith("junc_"))
   );
 
-  const isHost = Boolean(
+  const isRoomCreator = Boolean(
     isPrivateRoom &&
+    !isWaitingRoom &&
     junction?.creatorId &&
     (isLocalIdentity(junction.creatorId) ||
-     (myIdentity && junction.creatorId.toLowerCase() === myIdentity.toLowerCase()) ||
-     (user?.username && junction.creatorId.toLowerCase() === user.username.toLowerCase()) ||
-     (guest?.name && junction.creatorId.toLowerCase() === guest.name.toLowerCase()))
+      (myIdentity && junction.creatorId.toLowerCase() === myIdentity.toLowerCase()) ||
+      (user?.username && junction.creatorId.toLowerCase() === user.username.toLowerCase()) ||
+      (guest?.name && junction.creatorId.toLowerCase() === guest.name.toLowerCase()))
   );
+
+  const isHost = Boolean(
+    isPrivateRoom && !isWaitingRoom && isRoomCreator
+  );
+
+  // Only Super Admin can delete public Junctions.
+  // In private rooms, can delete by room creator or Super Admin.
+  const canDeleteRoom = isPrivateRoom ? (isSuperAdmin || isRoomCreator) : isSuperAdmin;
+
+  // Active waiting knocks filtered strictly for the host inside the room:
+  // - Never active for someone who is waiting outside in the waiting room
+  // - Never includes knocks from the local user themselves
+  const activeKnocksForHost = useMemo(() => {
+    if (!isHost || isWaitingRoom) return [];
+    return waitingKnocks.filter((guestKnock) => {
+      const cleanIdent = (guestKnock.identity || "").trim().toLowerCase();
+      const cleanName = (guestKnock.name || "").trim().toLowerCase();
+      const cleanId = (guestKnock.id || "").trim().toLowerCase();
+      return (
+        !isLocalIdentity(cleanIdent) &&
+        !isLocalIdentity(cleanName) &&
+        !isLocalIdentity(cleanId) &&
+        cleanIdent !== (myIdentity || "").trim().toLowerCase() &&
+        cleanName !== (myDisplayName || "").trim().toLowerCase()
+      );
+    });
+  }, [isHost, isWaitingRoom, waitingKnocks, isLocalIdentity, myIdentity, myDisplayName]);
 
   const isCurrentModerator = isPrivateRoom && isHost;
   const canModerateAux = isCurrentModerator || isStaff;
@@ -1599,6 +1748,11 @@ export function JunctionRoom({
           if (JSON.stringify(prev) === JSON.stringify(pollData.junction)) return prev;
           return pollData.junction;
         });
+        if (!isWaitingRoom && isHost && Array.isArray(pollData.waitingGuests)) {
+          setWaitingKnocks(pollData.waitingGuests);
+        } else if (isWaitingRoom || !isHost) {
+          setWaitingKnocks([]);
+        }
         setParticipants((prev) => {
           const serverParticipants: JunctionParticipant[] = pollData.junction.participants || [];
           const localInServer = serverParticipants.some((sp) => isLocalParticipant(sp));
@@ -1664,8 +1818,8 @@ export function JunctionRoom({
                       connectionQuality: "excellent",
                     },
                   }),
-                }).catch(() => {});
-              }).catch(() => {});
+                }).catch(() => { });
+              }).catch(() => { });
             }
           }
 
@@ -1918,8 +2072,8 @@ export function JunctionRoom({
               action === "ban"
                 ? "You have been banned by YapClub moderation staff."
                 : (isPrivateRoom
-                    ? "You were kicked from this private room by the host."
-                    : "You were removed from this junction by platform staff.")
+                  ? "You were kicked from this private room by the host."
+                  : "You were removed from this junction by platform staff.")
             );
           }
         }
@@ -1978,7 +2132,47 @@ export function JunctionRoom({
       } else if (type === "room_lock_updated" && payload) {
         const locked = Boolean(payload.isLocked);
         setJunction((prev) => (prev ? { ...prev, isLocked: locked } : prev));
+        if (!locked && isWaitingRoom) {
+          retryJoin();
+        }
         pollJunction();
+      } else if (type === "waiting_room_knock" && payload?.guest) {
+        if (!isWaitingRoom && (isHost || isCurrentModerator)) {
+          const incomingGuest: WaitingGuest = payload.guest;
+          const cleanIncomingIdent = (incomingGuest.identity || "").toLowerCase().trim();
+          const cleanIncomingName = (incomingGuest.name || "").toLowerCase().trim();
+          if (
+            isLocalIdentity(cleanIncomingIdent) ||
+            isLocalIdentity(cleanIncomingName) ||
+            cleanIncomingIdent === (myIdentity || "").toLowerCase().trim() ||
+            cleanIncomingName === (myDisplayName || "").toLowerCase().trim()
+          ) {
+            return;
+          }
+          setWaitingKnocks((prev) => {
+            if (prev.some((g) => g.identity?.toLowerCase() === incomingGuest.identity?.toLowerCase())) {
+              return prev;
+            }
+            return [...prev, incomingGuest];
+          });
+          setModNoticeToast(`🔔 @${incomingGuest.name || incomingGuest.identity} is waiting to join.`);
+        }
+      } else if (type === "waiting_room_admitted" && payload?.targetIdentity) {
+        const target = (payload.targetIdentity || "").toLowerCase().trim();
+        const myTargets = [myIdentity, myId, user?.username, guest?.username].filter(Boolean).map((s) => s!.toLowerCase().trim());
+        if (myTargets.includes(target)) {
+          retryJoin();
+        } else {
+          setWaitingKnocks((prev) => prev.filter((g) => (g.identity || "").toLowerCase() !== target && (g.id || "").toLowerCase() !== target));
+        }
+      } else if (type === "waiting_room_denied" && payload?.targetIdentity) {
+        const target = (payload.targetIdentity || "").toLowerCase().trim();
+        const myTargets = [myIdentity, myId, user?.username, guest?.username].filter(Boolean).map((s) => s!.toLowerCase().trim());
+        if (myTargets.includes(target)) {
+          setWaitingStatus("denied");
+        } else {
+          setWaitingKnocks((prev) => prev.filter((g) => (g.identity || "").toLowerCase() !== target && (g.id || "").toLowerCase() !== target));
+        }
       } else if (type === "room_participant_joined" && payload?.participant) {
         const newP: JunctionParticipant = payload.participant;
         const cleanTarget = (newP.identity || "").toLowerCase().trim();
@@ -2060,16 +2254,16 @@ export function JunctionRoom({
           !holderIdent && !holderName
             ? false
             : isLocalIdentity(holderIdent || "") ||
-              isLocalIdentity(holderName || "") ||
-              participants.some((p) => {
-                const pIdent = (p.identity || "").toLowerCase().trim();
-                const pId = (p.id || "").toLowerCase().trim();
-                const pName = (p.name || p.displayName || "").toLowerCase().trim();
-                return (
-                  (cleanHolderId && (pIdent === cleanHolderId || pId === cleanHolderId)) ||
-                  (cleanHolderName && (pName === cleanHolderName || pIdent === cleanHolderName))
-                );
-              });
+            isLocalIdentity(holderName || "") ||
+            participants.some((p) => {
+              const pIdent = (p.identity || "").toLowerCase().trim();
+              const pId = (p.id || "").toLowerCase().trim();
+              const pName = (p.name || p.displayName || "").toLowerCase().trim();
+              return (
+                (cleanHolderId && (pIdent === cleanHolderId || pId === cleanHolderId)) ||
+                (cleanHolderName && (pName === cleanHolderName || pIdent === cleanHolderName))
+              );
+            });
 
         setMusicState({
           ...payload,
@@ -2411,10 +2605,33 @@ export function JunctionRoom({
         const [joinData, lkData] = await Promise.all([joinRes.json(), lkRes.json()]);
 
         if (!joinRes.ok || !joinData.junction) {
+          if (joinData.isLocked) {
+            setIsWaitingRoom(true);
+            setWaitingStatus("waiting");
+            setIsConnectingOverlayOpen(false);
+            isJoiningRef.current = false;
+            fetch(`/api/junctions/${junctionId}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                action: "knock",
+                guest: {
+                  id: myId,
+                  identity: joinIdentity,
+                  name: joinDisplayName,
+                  username: (isRegistered && user?.username) || guest?.username || joinIdentity,
+                  avatar: participantAvatar,
+                  color: participantColor,
+                },
+              }),
+            }).catch(() => { });
+            return false;
+          }
           const errMsg = joinData.error || "Unable to join this junction.";
           setError(errMsg);
           setKickedNotice(errMsg);
           setIsConnectingOverlayOpen(false);
+          isJoiningRef.current = false;
           return false;
         }
 
@@ -2550,7 +2767,7 @@ export function JunctionRoom({
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [junctionId, myIdentity, myId]);
+  }, [junctionId, myIdentity, myId, joinAttempt]);
 
   // Clean disconnect on tab close, window reload, or pagehide
   useEffect(() => {
@@ -2578,7 +2795,7 @@ export function JunctionRoom({
         if (liveKitRoomRef.current) {
           try {
             liveKitRoomRef.current.disconnect();
-          } catch {}
+          } catch { }
         }
 
         // Release AUX cord if this departing tab held it
@@ -2628,7 +2845,7 @@ export function JunctionRoom({
       window.removeEventListener("pagehide", handleUnload);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, [junctionId, myIdentity, myId]);
+  }, [junctionId, myIdentity, myId, joinAttempt]);
 
   // Listen to cross-tab session takeover events
   useEffect(() => {
@@ -2644,11 +2861,11 @@ export function JunctionRoom({
                 try {
                   pub.track?.stop();
                   pub.audioTrack?.stop();
-                } catch {}
+                } catch { }
               });
             }
             liveKitRoomRef.current.disconnect();
-          } catch {}
+          } catch { }
         }
 
         if (mediaStream) {
@@ -3029,9 +3246,9 @@ export function JunctionRoom({
     }
   };
 
-  // Admin & Super Admin Action: Terminate / Delete Junction Room
+  // Action: Terminate / Delete Junction Room (Super Admin for all rooms, Room Creator for private rooms)
   const handleForceDeleteRoom = async () => {
-    if (!isAdmin) return;
+    if (!canDeleteRoom) return;
 
     const confirmed = window.confirm(
       `Terminate and delete "${junction?.name || "this room"}" immediately?\nAll participants will be disconnected.`
@@ -3044,7 +3261,8 @@ export function JunctionRoom({
 
       // 2. Call delete API with callerRole and auth headers
       const authHeaders = await getAuthHeaders();
-      await fetch(`/api/junctions/${junctionId}?callerRole=${myPlatformRole}&moderatorIdentity=${encodeURIComponent(myIdentity)}`, {
+      const creatorParam = user?.username || user?.displayName || user?.name || guest?.name || myIdentity;
+      await fetch(`/api/junctions/${junctionId}?callerRole=${myPlatformRole}&moderatorIdentity=${encodeURIComponent(myIdentity)}&creatorId=${encodeURIComponent(creatorParam)}`, {
         method: "DELETE",
         headers: authHeaders,
       });
@@ -3151,10 +3369,13 @@ export function JunctionRoom({
   };
 
   const handleEndJunction = async () => {
-    if (!isLocalIdentity(junction?.creatorId)) return;
+    if (!canDeleteRoom) return;
 
-    await fetch(`/api/junctions/${junctionId}?creatorId=${encodeURIComponent(myIdentity)}`, {
+    const authHeaders = await getAuthHeaders();
+    const creatorParam = user?.username || user?.displayName || user?.name || guest?.name || myIdentity;
+    await fetch(`/api/junctions/${junctionId}?creatorId=${encodeURIComponent(creatorParam)}&callerRole=${encodeURIComponent(myPlatformRole)}`, {
       method: "DELETE",
+      headers: authHeaders,
     });
 
     broadcastRoomUpdate({ type: "room_ended" });
@@ -3438,7 +3659,7 @@ export function JunctionRoom({
       if (liveKitRoomRef.current) {
         try {
           await liveKitRoomRef.current.disconnect();
-        } catch {}
+        } catch { }
       }
 
       // 6. Update cached lobby state in sessionStorage so leaving user disappears from lobby immediately
@@ -3799,8 +4020,8 @@ export function JunctionRoom({
 
             {/* Icon */}
             <div className={`w-14 h-14 rounded-2xl flex items-center justify-center border mb-4 transition-all duration-300 ${connectionStep === "connected"
-                ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-400 shadow-[0_0_25px_rgba(16,185,129,0.3)]"
-                : "bg-indigo-600/15 border-indigo-500/30 text-indigo-400 shadow-[0_0_20px_rgba(99,102,241,0.25)]"
+              ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-400 shadow-[0_0_25px_rgba(16,185,129,0.3)]"
+              : "bg-indigo-600/15 border-indigo-500/30 text-indigo-400 shadow-[0_0_20px_rgba(99,102,241,0.25)]"
               }`}>
               {connectionStep === "connected" ? (
                 <Check size={28} className="text-emerald-400 animate-in zoom-in-75 duration-200" strokeWidth={3} />
@@ -3822,8 +4043,8 @@ export function JunctionRoom({
             <div className="w-full bg-white/10 rounded-full h-2 p-0.5 overflow-hidden mb-3.5">
               <div
                 className={`h-full rounded-full transition-all duration-300 ease-out ${connectionStep === "connected"
-                    ? "bg-gradient-to-r from-emerald-500 to-teal-400 shadow-[0_0_12px_rgba(16,185,129,0.6)]"
-                    : "bg-gradient-to-r from-indigo-500 to-purple-500 shadow-[0_0_12px_rgba(99,102,241,0.5)]"
+                  ? "bg-gradient-to-r from-emerald-500 to-teal-400 shadow-[0_0_12px_rgba(16,185,129,0.6)]"
+                  : "bg-gradient-to-r from-indigo-500 to-purple-500 shadow-[0_0_12px_rgba(99,102,241,0.5)]"
                   }`}
                 style={{ width: `${connectionProgress}%` }}
               />
@@ -3851,8 +4072,8 @@ export function JunctionRoom({
           <div className="relative max-w-xs w-full bg-[#12131D]/90 border border-white/10 rounded-3xl p-6 sm:p-7 shadow-2xl text-center flex flex-col items-center">
 
             <div className={`w-14 h-14 rounded-2xl flex items-center justify-center border mb-4 transition-all duration-300 ${exitStep === "ended"
-                ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-400 shadow-[0_0_25px_rgba(16,185,129,0.25)] animate-in zoom-in-75 duration-200"
-                : "bg-rose-500/15 border border-rose-500/30 text-rose-400 shadow-[0_0_25px_rgba(244,63,94,0.25)]"
+              ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-400 shadow-[0_0_25px_rgba(16,185,129,0.25)] animate-in zoom-in-75 duration-200"
+              : "bg-rose-500/15 border border-rose-500/30 text-rose-400 shadow-[0_0_25px_rgba(244,63,94,0.25)]"
               }`}>
               {exitStep === "ended" ? (
                 <Check size={28} className="text-emerald-400" strokeWidth={3} />
@@ -3872,8 +4093,8 @@ export function JunctionRoom({
             </p>
 
             <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-[11px] font-mono ${exitStep === "ended"
-                ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
-                : "bg-white/5 border-white/10 text-slate-300"
+              ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
+              : "bg-white/5 border-white/10 text-slate-300"
               }`}>
               <span className={`w-1.5 h-1.5 rounded-full ${exitStep === "ended" ? "bg-emerald-400" : "bg-rose-400 animate-ping"
                 }`} />
@@ -3898,15 +4119,13 @@ export function JunctionRoom({
               ? { left: `${minimizedPillPos.x}px`, top: `${minimizedPillPos.y}px`, transform: "none" }
               : { bottom: "24px", left: "50%", transform: "translateX(-50%)" }
           }
-          className={`fixed z-[120] pointer-events-auto touch-none select-none transition-transform duration-100 animate-in fade-in zoom-in-95 duration-200 ${
-            isDraggingPill ? "cursor-grabbing scale-[1.04]" : "cursor-grab hover:scale-[1.01]"
-          }`}
+          className={`fixed z-[120] pointer-events-auto touch-none select-none transition-transform duration-100 animate-in fade-in zoom-in-95 duration-200 ${isDraggingPill ? "cursor-grabbing scale-[1.04]" : "cursor-grab hover:scale-[1.01]"
+            }`}
           title="Drag to reposition, tap to expand"
         >
           <div
-            className={`flex items-center gap-2 sm:gap-2.5 py-1.5 pl-2 pr-2.5 rounded-full bg-[#0B0C15]/95 hover:bg-[#101220]/95 backdrop-blur-2xl border border-white/15 hover:border-indigo-500/40 shadow-[0_12px_40px_rgba(0,0,0,0.85)] transition-shadow duration-200 ${
-              isDraggingPill ? "shadow-[0_16px_50px_rgba(99,102,241,0.35)] ring-2 ring-indigo-500/60" : ""
-            }`}
+            className={`flex items-center gap-2 sm:gap-2.5 py-1.5 pl-2 pr-2.5 rounded-full bg-[#0B0C15]/95 hover:bg-[#101220]/95 backdrop-blur-2xl border border-white/15 hover:border-indigo-500/40 shadow-[0_12px_40px_rgba(0,0,0,0.85)] transition-shadow duration-200 ${isDraggingPill ? "shadow-[0_16px_50px_rgba(99,102,241,0.35)] ring-2 ring-indigo-500/60" : ""
+              }`}
           >
             {/* Drag Grip Handle */}
             <div className="pl-0.5 text-slate-500 hover:text-slate-300 transition-colors shrink-0">
@@ -3916,11 +4135,10 @@ export function JunctionRoom({
             {/* Speaker Avatar + Live Ripple */}
             <div className="relative shrink-0">
               <div
-                className={`w-9 h-9 rounded-full flex items-center justify-center overflow-hidden transition-all duration-300 ${
-                  isSomeoneSpeaking
+                className={`w-9 h-9 rounded-full flex items-center justify-center overflow-hidden transition-all duration-300 ${isSomeoneSpeaking
                     ? "ring-2 ring-emerald-400 shadow-[0_0_15px_rgba(52,211,153,0.6)] animate-pulse"
                     : "ring-1 ring-white/15"
-                }`}
+                  }`}
                 style={{ backgroundColor: speakingParticipant?.color || "#6366F1" }}
               >
                 <UserAvatar
@@ -3984,11 +4202,10 @@ export function JunctionRoom({
                   e.stopPropagation();
                   handleToggleMic();
                 }}
-                className={`w-8 h-8 rounded-full flex items-center justify-center transition-all active:scale-90 cursor-pointer ${
-                  isMuted || isMutedByMod
+                className={`w-8 h-8 rounded-full flex items-center justify-center transition-all active:scale-90 cursor-pointer ${isMuted || isMutedByMod
                     ? "bg-rose-500/25 text-rose-300 border border-rose-500/40 hover:bg-rose-500/35 ring-1 ring-rose-500/20"
                     : "bg-white/10 text-emerald-300 border border-white/10 hover:bg-white/15"
-                }`}
+                  }`}
                 title={isMuted ? "Unmute Microphone" : "Mute Microphone"}
               >
                 {isMuted || isMutedByMod ? <MicOff size={13} /> : <Mic size={13} />}
@@ -4002,11 +4219,10 @@ export function JunctionRoom({
                   e.stopPropagation();
                   setIsDeafened(!isDeafened);
                 }}
-                className={`w-8 h-8 rounded-full flex items-center justify-center transition-all active:scale-90 cursor-pointer ${
-                  isDeafened
+                className={`w-8 h-8 rounded-full flex items-center justify-center transition-all active:scale-90 cursor-pointer ${isDeafened
                     ? "bg-amber-500/25 text-amber-300 border border-amber-500/40 hover:bg-amber-500/35"
                     : "bg-white/5 text-slate-400 hover:text-white hover:bg-white/10 border border-white/5"
-                }`}
+                  }`}
                 title={isDeafened ? "Undeafen Audio" : "Deafen Audio"}
               >
                 {isDeafened ? <VolumeX size={13} /> : <Volume2 size={13} />}
@@ -4024,11 +4240,10 @@ export function JunctionRoom({
                   setInRoomPopups([]);
                   onMaximize?.();
                 }}
-                className={`w-8 h-8 rounded-full flex items-center justify-center transition-all active:scale-90 cursor-pointer relative ${
-                  minimizedUnreadCount > 0
+                className={`w-8 h-8 rounded-full flex items-center justify-center transition-all active:scale-90 cursor-pointer relative ${minimizedUnreadCount > 0
                     ? "bg-indigo-600 text-white shadow-[0_0_18px_rgba(99,102,241,0.65)] ring-2 ring-indigo-400/80"
                     : "bg-indigo-600 hover:bg-indigo-500 text-white shadow-md shadow-indigo-600/30"
-                }`}
+                  }`}
                 title={
                   minimizedUnreadCount > 0
                     ? `${minimizedUnreadCount} new message${minimizedUnreadCount > 1 ? "s" : ""} - Open Room Chat`
@@ -4073,9 +4288,26 @@ export function JunctionRoom({
 
           {/* Toast notice for Mod claim / info */}
           {modNoticeToast && (
-            <div className="fixed top-16 sm:top-20 inset-x-4 max-w-md mx-auto bg-amber-950/95 border border-amber-500/50 text-amber-200 px-4 py-2.5 rounded-2xl text-center text-xs font-semibold flex items-center justify-center gap-2 shadow-2xl backdrop-blur-xl z-50 animate-fadeIn pointer-events-auto">
-              <Sparkles size={16} className="text-amber-400 shrink-0" />
-              <span>{modNoticeToast}</span>
+            <div
+              onClick={() => setModNoticeToast(null)}
+              className="fixed top-3.5 sm:top-5 inset-x-3 sm:inset-x-auto sm:right-6 max-w-sm mx-auto sm:mx-0 bg-[#161208]/95 border border-amber-500/50 text-amber-200 px-3.5 py-2 rounded-2xl text-xs font-semibold flex items-center justify-between gap-2.5 shadow-2xl backdrop-blur-2xl z-[120] animate-fadeIn pointer-events-auto cursor-pointer group hover:bg-amber-950/90 transition-all"
+              title="Click to dismiss"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <Sparkles size={15} className="text-amber-400 shrink-0 animate-pulse" />
+                <span className="truncate">{modNoticeToast}</span>
+              </div>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setModNoticeToast(null);
+                }}
+                className="text-amber-400/70 hover:text-amber-200 p-1 rounded-lg hover:bg-amber-800/40 shrink-0 transition-colors"
+                title="Dismiss"
+              >
+                <X size={14} />
+              </button>
             </div>
           )}
 
@@ -4085,151 +4317,149 @@ export function JunctionRoom({
           {/* Main Left Content Area */}
           <div className={`flex-1 flex flex-col pb-20 lg:pb-0 overflow-y-auto overflow-x-hidden transition-all duration-300`}>
             {/* Top Room Header - Lightweight & Fluid */}
-            <div className="w-full max-w-7xl mx-auto px-3.5 sm:px-6 pt-3.5 sm:pt-3 pb-2 sm:pb-3">
-              <div className="flex items-center justify-between gap-2 sm:gap-4">
+            <div className="w-full max-w-7xl mx-auto px-3.5 sm:px-6 pt-2.5 sm:pt-3 pb-2 sm:pb-3 relative">
+              {/* Dynamic Room Capacity Dropdown / Modal (Shared between Desktop & Mobile) */}
+              {isCapacityMenuOpen && (
+                <>
+                  <div
+                    className="fixed inset-0 z-40 bg-black/60 sm:bg-black/30 backdrop-blur-sm"
+                    onClick={() => setIsCapacityMenuOpen(false)}
+                  />
+                  <div className="fixed sm:absolute top-20 sm:top-14 left-4 right-4 sm:left-6 sm:right-auto max-w-xs w-full mx-auto sm:mx-0 p-3.5 rounded-2xl bg-[#12131F]/98 border border-white/20 shadow-2xl z-50 animate-fadeIn backdrop-blur-2xl">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <div className="flex items-center gap-1.5 text-xs font-bold text-white">
+                        <Users size={13} className="text-indigo-400" />
+                        <span>Dynamic Room Capacity</span>
+                      </div>
+                      <span className="text-[10px] text-slate-400 font-mono">
+                        {participants.length} seated
+                      </span>
+                    </div>
+
+                    <p className="text-[10px] text-slate-400 font-light mb-3">
+                      Dynamically expand or shrink seat capacity for this private room.
+                    </p>
+
+                    <div className="flex items-center justify-between p-2 rounded-xl bg-white/5 border border-white/10 mb-3">
+                      <button
+                        type="button"
+                        disabled={isUpdatingCapacity || (junction?.maxParticipants || 2) <= 2 || (junction?.maxParticipants || 2) <= participants.length}
+                        onClick={() => handleUpdateCapacity(Math.max(2, (junction?.maxParticipants || 2) - 2))}
+                        className="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-white font-bold flex items-center justify-center transition-all cursor-pointer text-sm"
+                        title="Decrease by 2 seats"
+                      >
+                        -
+                      </button>
+
+                      <div className="text-center">
+                        <div className="text-sm font-black text-white">
+                          {junction?.maxParticipants || 2} Seats
+                        </div>
+                        <div className="text-[9px] text-indigo-300 font-medium">
+                          {isUpdatingCapacity ? "Updating..." : "Active Room Limit"}
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        disabled={isUpdatingCapacity || (junction?.maxParticipants || 2) >= 12}
+                        onClick={() => handleUpdateCapacity(Math.min(12, (junction?.maxParticipants || 2) + 2))}
+                        className="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-white font-bold flex items-center justify-center transition-all cursor-pointer text-sm"
+                        title="Increase by 2 seats"
+                      >
+                        +
+                      </button>
+                    </div>
+
+                    <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">
+                      Quick Seat Presets
+                    </div>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {[2, 4, 6, 8, 10, 12].map((size) => {
+                        const isActive = (junction?.maxParticipants || 2) === size;
+                        const isBelowOccupied = size < participants.length;
+                        return (
+                          <button
+                            key={size}
+                            type="button"
+                            disabled={isUpdatingCapacity || isBelowOccupied}
+                            onClick={() => {
+                              if (size !== (junction?.maxParticipants || 2)) {
+                                handleUpdateCapacity(size);
+                              }
+                            }}
+                            className={`py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex flex-col items-center justify-center ${isActive
+                              ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30 ring-1 ring-white/30"
+                              : isBelowOccupied
+                                ? "bg-white/5 text-slate-600 border border-white/5 cursor-not-allowed opacity-40"
+                                : "bg-white/5 hover:bg-white/15 text-slate-300 border border-white/10"
+                              }`}
+                            title={isBelowOccupied ? `Cannot set below ${participants.length} current participants` : `${size} seats`}
+                          >
+                            <span>{size}</span>
+                            <span className="text-[8px] opacity-75 font-normal">seats</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Room Lock Quick Row */}
+                    <div className="mt-3 pt-2.5 border-t border-white/10 flex items-center justify-between">
+                      <div className="flex items-center gap-1.5">
+                        {junction?.isLocked ? (
+                          <Lock size={12} className="text-amber-400 shrink-0" />
+                        ) : (
+                          <Unlock size={12} className="text-slate-400 shrink-0" />
+                        )}
+                        <div className="flex flex-col">
+                          <span className="text-[11px] font-bold text-white leading-tight">
+                            {junction?.isLocked ? "Room Locked" : "Room Open"}
+                          </span>
+                          <span className="text-[9px] text-slate-400 leading-tight">
+                            {junction?.isLocked ? "New users blocked" : "Open to invitees"}
+                          </span>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleToggleLock}
+                        disabled={isTogglingLock}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${junction?.isLocked
+                          ? "bg-amber-500 text-black shadow-sm hover:bg-amber-400"
+                          : "bg-white/10 text-slate-300 hover:bg-white/20 border border-white/10"
+                          }`}
+                      >
+                        {isTogglingLock ? "..." : (junction?.isLocked ? "Unlock" : "Lock")}
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {/* DESKTOP HEADER (sm:flex hidden) */}
+              <div className="hidden sm:flex items-center justify-between gap-4">
                 {/* Left: Title / Occupant Count / Role in one compact, clean row */}
-                <div className="min-w-0 flex items-center gap-2 sm:gap-3">
+                <div className="min-w-0 flex items-center gap-3">
                   <div className="min-w-0 flex flex-col justify-center">
-                    <div className="min-w-0 flex items-center gap-1.5 sm:gap-2 flex-wrap">
+                    <div className="min-w-0 flex items-center gap-2 flex-wrap">
                       <h1 className="text-sm sm:text-base font-bold text-white tracking-tight truncate drop-shadow-sm leading-tight">
                         {junction?.name || "Junction Room"}
                       </h1>
 
                       {/* Participant Count / Capacity Pill */}
                       {isPrivateRoom && isHost ? (
-                        <div className="relative">
-                          <button
-                            type="button"
-                            onClick={() => setIsCapacityMenuOpen(!isCapacityMenuOpen)}
-                            className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/40 text-[10px] sm:text-xs font-bold transition-all shadow-sm cursor-pointer active:scale-95 shrink-0"
-                            title="Dynamic Room Capacity (Host Feature)"
-                          >
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                            <span>{participants.length}/{junction?.maxParticipants || 2} Seats</span>
-                            <ChevronDown size={11} className={`transition-transform duration-200 ${isCapacityMenuOpen ? "rotate-180" : ""}`} />
-                          </button>
-
-                          {isCapacityMenuOpen && (
-                            <>
-                              <div
-                                className="fixed inset-0 z-40"
-                                onClick={() => setIsCapacityMenuOpen(false)}
-                              />
-                              <div className="absolute left-0 sm:left-auto sm:right-0 top-full mt-2 w-64 p-3.5 rounded-2xl bg-[#12131F]/98 border border-white/20 shadow-2xl z-50 animate-fadeIn backdrop-blur-2xl">
-                                <div className="flex items-center justify-between mb-1.5">
-                                  <div className="flex items-center gap-1.5 text-xs font-bold text-white">
-                                    <Users size={13} className="text-indigo-400" />
-                                    <span>Dynamic Room Capacity</span>
-                                  </div>
-                                  <span className="text-[10px] text-slate-400 font-mono">
-                                    {participants.length} seated
-                                  </span>
-                                </div>
-
-                                <p className="text-[10px] text-slate-400 font-light mb-3">
-                                  Dynamically expand or shrink seat capacity for this private room.
-                                </p>
-
-                                <div className="flex items-center justify-between p-2 rounded-xl bg-white/5 border border-white/10 mb-3">
-                                  <button
-                                    type="button"
-                                    disabled={isUpdatingCapacity || (junction?.maxParticipants || 2) <= 2 || (junction?.maxParticipants || 2) <= participants.length}
-                                    onClick={() => handleUpdateCapacity(Math.max(2, (junction?.maxParticipants || 2) - 2))}
-                                    className="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-white font-bold flex items-center justify-center transition-all cursor-pointer text-sm"
-                                    title="Decrease by 2 seats"
-                                  >
-                                    -
-                                  </button>
-
-                                  <div className="text-center">
-                                    <div className="text-sm font-black text-white">
-                                      {junction?.maxParticipants || 2} Seats
-                                    </div>
-                                    <div className="text-[9px] text-indigo-300 font-medium">
-                                      {isUpdatingCapacity ? "Updating..." : "Active Room Limit"}
-                                    </div>
-                                  </div>
-
-                                  <button
-                                    type="button"
-                                    disabled={isUpdatingCapacity || (junction?.maxParticipants || 2) >= 12}
-                                    onClick={() => handleUpdateCapacity(Math.min(12, (junction?.maxParticipants || 2) + 2))}
-                                    className="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-white font-bold flex items-center justify-center transition-all cursor-pointer text-sm"
-                                    title="Increase by 2 seats"
-                                  >
-                                    +
-                                  </button>
-                                </div>
-
-                                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">
-                                  Quick Seat Presets
-                                </div>
-                                <div className="grid grid-cols-3 gap-1.5">
-                                  {[2, 4, 6, 8, 10, 12].map((size) => {
-                                    const isActive = (junction?.maxParticipants || 2) === size;
-                                    const isBelowOccupied = size < participants.length;
-                                    return (
-                                      <button
-                                        key={size}
-                                        type="button"
-                                        disabled={isUpdatingCapacity || isBelowOccupied}
-                                        onClick={() => {
-                                          if (size !== (junction?.maxParticipants || 2)) {
-                                            handleUpdateCapacity(size);
-                                          }
-                                        }}
-                                        className={`py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex flex-col items-center justify-center ${
-                                          isActive
-                                            ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30 ring-1 ring-white/30"
-                                            : isBelowOccupied
-                                              ? "bg-white/5 text-slate-600 border border-white/5 cursor-not-allowed opacity-40"
-                                              : "bg-white/5 hover:bg-white/15 text-slate-300 border border-white/10"
-                                        }`}
-                                        title={isBelowOccupied ? `Cannot set below ${participants.length} current participants` : `${size} seats`}
-                                      >
-                                        <span>{size}</span>
-                                        <span className="text-[8px] opacity-75 font-normal">seats</span>
-                                      </button>
-                                    );
-                                  })}
-                                </div>
-
-                                {/* Room Lock Quick Row */}
-                                <div className="mt-3 pt-2.5 border-t border-white/10 flex items-center justify-between">
-                                  <div className="flex items-center gap-1.5">
-                                    {junction?.isLocked ? (
-                                      <Lock size={12} className="text-amber-400 shrink-0" />
-                                    ) : (
-                                      <Unlock size={12} className="text-slate-400 shrink-0" />
-                                    )}
-                                    <div className="flex flex-col">
-                                      <span className="text-[11px] font-bold text-white leading-tight">
-                                        {junction?.isLocked ? "Room Locked" : "Room Open"}
-                                      </span>
-                                      <span className="text-[9px] text-slate-400 leading-tight">
-                                        {junction?.isLocked ? "New users blocked" : "Open to invitees"}
-                                      </span>
-                                    </div>
-                                  </div>
-                                  <button
-                                    type="button"
-                                    onClick={handleToggleLock}
-                                    disabled={isTogglingLock}
-                                    className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                                      junction?.isLocked
-                                        ? "bg-amber-500 text-black shadow-sm hover:bg-amber-400"
-                                        : "bg-white/10 text-slate-300 hover:bg-white/20 border border-white/10"
-                                    }`}
-                                  >
-                                    {isTogglingLock ? "..." : (junction?.isLocked ? "Unlock" : "Lock")}
-                                  </button>
-                                </div>
-                              </div>
-                            </>
-                          )}
-                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setIsCapacityMenuOpen(!isCapacityMenuOpen)}
+                          className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/40 text-xs font-bold transition-all shadow-sm cursor-pointer active:scale-95 shrink-0"
+                          title="Dynamic Room Capacity (Host Feature)"
+                        >
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                          <span>{participants.length}/{junction?.maxParticipants || 2} Seats</span>
+                          <ChevronDown size={11} className={`transition-transform duration-200 ${isCapacityMenuOpen ? "rotate-180" : ""}`} />
+                        </button>
                       ) : (
-                        <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-[10px] sm:text-xs font-semibold text-slate-300 shrink-0">
+                        <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-xs font-semibold text-slate-300 shrink-0">
                           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                           <span>{participants.length}/{junction?.maxParticipants || (isPrivateRoom ? 2 : 10)} Seats</span>
                         </div>
@@ -4250,19 +4480,31 @@ export function JunctionRoom({
                   </div>
                 </div>
 
-                {/* Right: Clean, Lightweight Controls */}
-                <div className="flex items-center justify-end gap-1 sm:gap-1.5 shrink-0">
+                {/* Right: Clean, Spacious Controls */}
+                <div className="flex items-center justify-end gap-1.5 shrink-0">
+                  {/* Waiting Knocks Indicator for Host */}
+                  {!isWaitingRoom && isHost && activeKnocksForHost.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => handleAdmitKnock(activeKnocksForHost[0].identity)}
+                      className="h-8 sm:h-9 px-2.5 rounded-full flex items-center gap-1.5 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 text-[11px] font-bold cursor-pointer transition-all shrink-0 animate-pulse"
+                      title={`Click to admit @${activeKnocksForHost[0].name}`}
+                    >
+                      <Bell size={12} className="text-emerald-400" />
+                      <span>Waiting ({activeKnocksForHost.length})</span>
+                    </button>
+                  )}
+
                   {/* Lock / Unlock Room Control - Host Feature for Private Rooms */}
                   {isPrivateRoom && isHost && (
                     <button
                       type="button"
                       onClick={handleToggleLock}
                       disabled={isTogglingLock}
-                      className={`h-8 sm:h-9 px-2.5 sm:px-3 rounded-full flex items-center gap-1.5 border transition-all cursor-pointer shadow-sm active:scale-95 shrink-0 ${
-                        junction?.isLocked
-                          ? "bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border-amber-400/50 shadow-amber-500/10"
-                          : "bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border-white/10"
-                      }`}
+                      className={`h-8 sm:h-9 px-2.5 sm:px-3 rounded-full flex items-center gap-1.5 border transition-all cursor-pointer shadow-sm active:scale-95 shrink-0 ${junction?.isLocked
+                        ? "bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border-amber-400/50 shadow-amber-500/10"
+                        : "bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border-white/10"
+                        }`}
                       title={junction?.isLocked ? "Room is Locked (Click to Unlock)" : "Room is Open (Click to Lock Room)"}
                     >
                       {junction?.isLocked ? (
@@ -4273,7 +4515,7 @@ export function JunctionRoom({
                       ) : (
                         <>
                           <Unlock size={13} className="text-slate-400" />
-                          <span className="text-[11px] font-semibold hidden xs:inline">Lock Room</span>
+                          <span className="text-[11px] font-semibold text-slate-300">Lock Room</span>
                         </>
                       )}
                     </button>
@@ -4282,35 +4524,65 @@ export function JunctionRoom({
                   {/* Room Locked indicator for fellow users in private room */}
                   {isPrivateRoom && !isHost && junction?.isLocked && (
                     <div
-                      className="h-8 sm:h-9 px-2.5 rounded-full flex items-center gap-1.5 bg-amber-500/15 border border-amber-400/30 text-amber-300 text-[11px] font-semibold shrink-0"
+                      className="h-8 sm:h-9 px-2.5 sm:px-3 rounded-full flex items-center gap-1.5 bg-amber-500/15 border border-amber-400/30 text-amber-300 text-[11px] font-semibold shrink-0"
                       title="This private room is locked by the host"
                     >
                       <Lock size={12} className="text-amber-400" />
-                      <span className="hidden xs:inline">Locked</span>
+                      <span>Locked</span>
                     </div>
                   )}
 
-                  {/* Admin Terminate Junction Button */}
-                  {isAdmin && (
+                  {/* Duration / Expiration Countdown Pill (Private Rooms Only) */}
+                  {isPrivateRoom && junction && (
+                    <div
+                      className={`h-8 sm:h-9 px-2.5 sm:px-3 rounded-full flex items-center gap-1.5 border text-xs font-medium shrink-0 transition-all ${timeLeftMs !== null && timeLeftMs < 10 * 60 * 1000
+                        ? "bg-amber-500/15 border-amber-500/30 text-amber-300 animate-pulse"
+                        : junction.expiresAt
+                          ? "bg-white/[0.04] border-white/10 text-slate-200"
+                          : "bg-purple-500/10 border-purple-500/20 text-purple-300"
+                        }`}
+                      title={
+                        junction.expiresAt
+                          ? `Room closes at ${new Date(junction.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+                          : "Permanent Room (Does not auto-expire)"
+                      }
+                    >
+                      <Clock
+                        size={12}
+                        className={
+                          timeLeftMs !== null && timeLeftMs < 10 * 60 * 1000
+                            ? "text-amber-400"
+                            : junction.expiresAt
+                              ? "text-indigo-400"
+                              : "text-purple-400"
+                        }
+                      />
+                      <span className="font-semibold text-xs">
+                        {formattedDurationRemaining}
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Terminate Junction Button (Super Admin for all rooms, Room Creator for private rooms) */}
+                  {canDeleteRoom && (
                     <button
                       type="button"
                       onClick={handleForceDeleteRoom}
                       className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 flex items-center justify-center transition-all cursor-pointer shadow-sm active:scale-95 shrink-0"
-                      title="Terminate Junction (Admin Clearance)"
+                      title={isPrivateRoom ? "Delete Room (Room Creator / Super Admin)" : "Terminate Junction (Super Admin Only)"}
                     >
                       <Trash2 size={14} className="text-rose-400" />
                     </button>
                   )}
 
-                  {/* Music Mode Trigger Button (Beside Share) */}
+                  {/* Music Mode Trigger Button */}
                   <button
                     type="button"
                     onClick={() => setIsMusicModalOpen(true)}
-                    className={`w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95 relative ${
-                      musicState.isActive
-                        ? "bg-indigo-600 text-white border border-indigo-400/50 shadow-[0_0_15px_rgba(99,102,241,0.5)]"
-                        : "bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10"
-                    }`}
+                    className={`w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95 relative ${musicState.isActive
+                      ? "bg-indigo-600 text-white border border-indigo-400/50 shadow-[0_0_15px_rgba(99,102,241,0.5)]"
+                      : "bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10"
+                      }`}
                     title={musicState.isActive ? `Music: ${musicState.currentTrack?.title || "Playing"}` : "Music & Media (AUX Cord)"}
                   >
                     <Headphones size={15} className={musicState.isPlaying ? "text-white animate-pulse" : "text-indigo-400"} />
@@ -4340,6 +4612,187 @@ export function JunctionRoom({
                   </button>
                 </div>
               </div>
+
+              {/* MOBILE HEADER (flex sm:hidden flex-col gap-1.5) */}
+              <div className="flex sm:hidden flex-col gap-1.5">
+                {/* Row 1: Room Title & Compact Action Cluster */}
+                <div className="flex items-center justify-between gap-2">
+                  {/* Room Name with live pulse */}
+                  <div className="min-w-0 flex-1 flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0 animate-pulse" />
+                    <h1 className="text-sm font-bold text-white tracking-tight truncate drop-shadow-sm leading-tight">
+                      {junction?.name || "Junction Room"}
+                    </h1>
+                  </div>
+
+                  {/* Compact Quick Actions Cluster */}
+                  <div className="flex items-center gap-1 shrink-0">
+                    {/* Waiting Knocks button on mobile */}
+                    {!isWaitingRoom && isHost && activeKnocksForHost.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => handleAdmitKnock(activeKnocksForHost[0].identity)}
+                        className="h-8 px-2 rounded-full flex items-center gap-1 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 text-[10px] font-bold active:scale-95 transition-all animate-pulse"
+                        title={`Admit @${activeKnocksForHost[0].name}`}
+                      >
+                        <Bell size={11} className="text-emerald-400" />
+                        <span>{activeKnocksForHost.length}</span>
+                      </button>
+                    )}
+
+                    {/* Delete Room button (if authorized) */}
+                    {canDeleteRoom && (
+                      <button
+                        type="button"
+                        onClick={handleForceDeleteRoom}
+                        className="w-8 h-8 rounded-full bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 flex items-center justify-center transition-all cursor-pointer shadow-sm active:scale-95 shrink-0"
+                        title={isPrivateRoom ? "Delete Room" : "Terminate Junction"}
+                      >
+                        <Trash2 size={13} className="text-rose-400" />
+                      </button>
+                    )}
+
+                    {/* Music AUX button */}
+                    <button
+                      type="button"
+                      onClick={() => setIsMusicModalOpen(true)}
+                      className={`w-8 h-8 rounded-full flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95 relative ${musicState.isActive
+                        ? "bg-indigo-600 text-white border border-indigo-400/50 shadow-[0_0_15px_rgba(99,102,241,0.5)]"
+                        : "bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10"
+                        }`}
+                      title="Music & Media (AUX Cord)"
+                    >
+                      <Headphones size={13} className={musicState.isPlaying ? "text-white animate-pulse" : "text-indigo-400"} />
+                      {musicState.isActive && (
+                        <span className="absolute top-0 right-0 w-2 h-2 bg-emerald-400 rounded-full ring-2 ring-[#0E0F17] animate-pulse" />
+                      )}
+                    </button>
+
+                    {/* Invite Friends button */}
+                    <button
+                      type="button"
+                      onClick={() => setIsInviteModalOpen(true)}
+                      className="w-8 h-8 rounded-full bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95"
+                      title="Invite Friends"
+                    >
+                      <Share2 size={13} className="text-indigo-400" />
+                    </button>
+
+                    {/* Minimize Room button */}
+                    <button
+                      type="button"
+                      className="w-8 h-8 rounded-full bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95"
+                      title="Minimize Room"
+                      onClick={handleMinimize}
+                    >
+                      <Minimize2 size={13} className="text-indigo-400" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Row 2: Status & Settings Ribbon (Fluid horizontal strip, no collision!) */}
+                <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
+                  {/* Capacity Pill */}
+                  {isPrivateRoom && isHost ? (
+                    <button
+                      type="button"
+                      onClick={() => setIsCapacityMenuOpen(!isCapacityMenuOpen)}
+                      className="h-6 px-2 rounded-full flex items-center gap-1 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/40 text-[10px] font-bold transition-all shadow-sm shrink-0 active:scale-95"
+                      title="Dynamic Room Capacity"
+                    >
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                      <span>{participants.length}/{junction?.maxParticipants || 2} Seats</span>
+                      <ChevronDown size={9} className={`transition-transform duration-200 ${isCapacityMenuOpen ? "rotate-180" : ""}`} />
+                    </button>
+                  ) : (
+                    <div className="h-6 px-2 rounded-full flex items-center gap-1 bg-white/5 border border-white/10 text-[10px] font-semibold text-slate-300 shrink-0">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                      <span>{participants.length}/{junction?.maxParticipants || (isPrivateRoom ? 2 : 10)} Seats</span>
+                    </div>
+                  )}
+
+                  {/* Lock Status / Toggle Pill */}
+                  {isPrivateRoom && isHost && (
+                    <button
+                      type="button"
+                      onClick={handleToggleLock}
+                      disabled={isTogglingLock}
+                      className={`h-6 px-2 rounded-full flex items-center gap-1 border transition-all cursor-pointer shadow-sm active:scale-95 shrink-0 text-[10px] font-bold ${junction?.isLocked
+                        ? "bg-amber-500/20 text-amber-300 border-amber-400/50 shadow-amber-500/10"
+                        : "bg-white/5 text-slate-300 hover:text-white border-white/10"
+                        }`}
+                      title={junction?.isLocked ? "Room is Locked (Tap to Unlock)" : "Room is Open (Tap to Lock)"}
+                    >
+                      {junction?.isLocked ? (
+                        <>
+                          <Lock size={10} className="text-amber-400" />
+                          <span>Locked</span>
+                        </>
+                      ) : (
+                        <>
+                          <Unlock size={10} className="text-slate-400" />
+                          <span>Open</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+
+                  {isPrivateRoom && !isHost && junction?.isLocked && (
+                    <div
+                      className="h-6 px-2 rounded-full flex items-center gap-1 bg-amber-500/15 border border-amber-400/30 text-amber-300 text-[10px] font-semibold shrink-0"
+                      title="Room locked by host"
+                    >
+                      <Lock size={10} className="text-amber-400" />
+                      <span>Locked</span>
+                    </div>
+                  )}
+
+                  {/* Duration / Expiration Countdown Pill */}
+                  {isPrivateRoom && junction && (
+                    <div
+                      className={`h-6 px-2 rounded-full flex items-center gap-1 border text-[10px] font-medium shrink-0 transition-all ${timeLeftMs !== null && timeLeftMs < 10 * 60 * 1000
+                        ? "bg-amber-500/15 border-amber-500/30 text-amber-300 animate-pulse"
+                        : junction.expiresAt
+                          ? "bg-white/[0.04] border-white/10 text-slate-200"
+                          : "bg-purple-500/10 border-purple-500/20 text-purple-300"
+                        }`}
+                      title={
+                        junction.expiresAt
+                          ? `Closes at ${new Date(junction.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+                          : "Permanent Room"
+                      }
+                    >
+                      <Clock
+                        size={10}
+                        className={
+                          timeLeftMs !== null && timeLeftMs < 10 * 60 * 1000
+                            ? "text-amber-400"
+                            : junction.expiresAt
+                              ? "text-indigo-400"
+                              : "text-purple-400"
+                        }
+                      />
+                      <span className="font-semibold text-[10px]">
+                        {formattedDurationRemaining}
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Role Badge */}
+                  {myPlatformRole !== "user" && (
+                    <div className="shrink-0 scale-90 origin-left">
+                      <RoleBadge role={myPlatformRole} size="xs" />
+                    </div>
+                  )}
+                </div>
+
+                {/* Row 3: Description if present */}
+                {junction?.description && (
+                  <p className="text-[10px] text-slate-400 font-normal truncate leading-tight mt-0.5">
+                    {junction.description}
+                  </p>
+                )}
+              </div>
             </div>
 
             {/* Synchronized Music & Media Stage (The AUX Cord) */}
@@ -4364,17 +4817,17 @@ export function JunctionRoom({
 
             {/* Dynamic Seat Stage Grid */}
             <div className={`relative z-10 w-full mx-auto px-2.5 sm:px-6 my-auto py-2 sm:py-4 ${SEAT_SLOTS.length <= 2 ? "max-w-2xl" :
-                SEAT_SLOTS.length <= 4 ? "max-w-3xl" :
-                  SEAT_SLOTS.length <= 6 ? "max-w-4xl" :
-                    SEAT_SLOTS.length <= 8 ? "max-w-5xl" :
-                      "max-w-6xl"
+              SEAT_SLOTS.length <= 4 ? "max-w-3xl" :
+                SEAT_SLOTS.length <= 6 ? "max-w-4xl" :
+                  SEAT_SLOTS.length <= 8 ? "max-w-5xl" :
+                    "max-w-6xl"
               }`}>
               <div className={`grid gap-2.5 sm:gap-4 justify-center mx-auto ${SEAT_SLOTS.length <= 2 ? "grid-cols-1 sm:grid-cols-2" :
-                  SEAT_SLOTS.length <= 4 ? "grid-cols-2 sm:grid-cols-2" :
-                    SEAT_SLOTS.length <= 6 ? "grid-cols-2 sm:grid-cols-3" :
-                      SEAT_SLOTS.length <= 8 ? "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4" :
-                        SEAT_SLOTS.length <= 10 ? "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5" :
-                          "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6"
+                SEAT_SLOTS.length <= 4 ? "grid-cols-2 sm:grid-cols-2" :
+                  SEAT_SLOTS.length <= 6 ? "grid-cols-2 sm:grid-cols-3" :
+                    SEAT_SLOTS.length <= 8 ? "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4" :
+                      SEAT_SLOTS.length <= 10 ? "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5" :
+                        "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6"
                 }`}>
                 {SEAT_SLOTS.map((_, index) => {
                   const participant = seatedParticipants[index];
@@ -4413,12 +4866,12 @@ export function JunctionRoom({
                         key={participant.id || participant.identity || index}
                         style={cardThemeStyle}
                         className={`relative w-full min-w-0 p-3 sm:p-4 rounded-2xl sm:rounded-[1.4rem] flex flex-col justify-between items-center text-center transition-all duration-300 border overflow-hidden backdrop-blur-xl group/card shadow-[0_12px_32px_-8px_rgba(0,0,0,0.6)] ${SEAT_SLOTS.length <= 2
-                            ? "min-h-[190px] sm:min-h-[285px]"
-                            : SEAT_SLOTS.length <= 4
-                              ? "min-h-[180px] sm:min-h-[265px]"
-                              : SEAT_SLOTS.length <= 8
-                                ? "min-h-[155px] sm:min-h-[225px]"
-                                : "min-h-[140px] sm:min-h-[200px]"
+                          ? "min-h-[190px] sm:min-h-[285px]"
+                          : SEAT_SLOTS.length <= 4
+                            ? "min-h-[180px] sm:min-h-[265px]"
+                            : SEAT_SLOTS.length <= 8
+                              ? "min-h-[155px] sm:min-h-[225px]"
+                              : "min-h-[140px] sm:min-h-[200px]"
                           } ${participantRole === "super_admin"
                             ? "ring-1.5 ring-amber-400/80 shadow-[0_0_25px_rgba(245,158,11,0.25)]"
                             : participantRole === "admin"
@@ -4538,8 +4991,8 @@ export function JunctionRoom({
                                   setActiveModMenuParticipant(participant.identity);
                                 }}
                                 className={`p-1 sm:p-1.5 rounded-lg border backdrop-blur-md transition-all active:scale-95 cursor-pointer shrink-0 touch-manipulation ${menuAnchor?.participantIdentity === participant.identity
-                                    ? "bg-indigo-600 text-white border-indigo-400 shadow-md"
-                                    : "text-slate-400 hover:text-white bg-black/30 hover:bg-black/50 border-white/10"
+                                  ? "bg-indigo-600 text-white border-indigo-400 shadow-md"
+                                  : "text-slate-400 hover:text-white bg-black/30 hover:bg-black/50 border-white/10"
                                   }`}
                                 title={`Participant Actions for ${participant.name}`}
                               >
@@ -4552,8 +5005,8 @@ export function JunctionRoom({
                         {/* Center Squircle Avatar */}
                         <div
                           className={`relative my-1.5 sm:my-3 cursor-pointer transition-all duration-300 hover:scale-105 active:scale-95 group rounded-2xl sm:rounded-[1.4rem] ${speaking
-                              ? "ring-2.5 ring-emerald-400 ring-offset-2 ring-offset-[#0E1017] shadow-[0_0_24px_rgba(52,211,153,0.45)] animate-pulse"
-                              : "ring-1.5 ring-white/15 shadow-xl hover:ring-white/30"
+                            ? "ring-2.5 ring-emerald-400 ring-offset-2 ring-offset-[#0E1017] shadow-[0_0_24px_rgba(52,211,153,0.45)] animate-pulse"
+                            : "ring-1.5 ring-white/15 shadow-xl hover:ring-white/30"
                             }`}
                           onClick={() => {
                             const effectiveAvatar = isLocal
@@ -4701,11 +5154,10 @@ export function JunctionRoom({
                         handleCopyLink();
                         setIsInviteModalOpen(true);
                       }}
-                      className={`relative w-full min-w-0 p-3 sm:p-4 rounded-2xl sm:rounded-[1.4rem] border border-dashed backdrop-blur-xl flex flex-col justify-between items-center text-center group cursor-pointer transition-all duration-300 active:scale-98 shadow-md overflow-hidden ${
-                        junction?.isLocked
+                      className={`relative w-full min-w-0 p-3 sm:p-4 rounded-2xl sm:rounded-[1.4rem] border border-dashed backdrop-blur-xl flex flex-col justify-between items-center text-center group cursor-pointer transition-all duration-300 active:scale-98 shadow-md overflow-hidden ${junction?.isLocked
                           ? "border-amber-500/25 bg-amber-950/[0.08] hover:border-amber-400/40 hover:shadow-[0_8px_30px_rgba(245,158,11,0.12)]"
                           : "border-white/15 hover:border-indigo-400/50 bg-gradient-to-b from-white/[0.04] to-white/[0.015] hover:from-indigo-600/[0.08] hover:to-purple-600/[0.03] hover:shadow-[0_8px_30px_rgba(99,102,241,0.18)]"
-                      } ${SEAT_SLOTS.length <= 2
+                        } ${SEAT_SLOTS.length <= 2
                           ? "min-h-[190px] sm:min-h-[285px]"
                           : SEAT_SLOTS.length <= 4
                             ? "min-h-[180px] sm:min-h-[265px]"
@@ -4735,11 +5187,10 @@ export function JunctionRoom({
 
                       {/* Center Icon */}
                       <div className="relative my-2 sm:my-3">
-                        <div className={`w-16 h-16 sm:w-20 sm:h-20 rounded-2xl sm:rounded-[1.3rem] border border-dashed flex items-center justify-center transition-all duration-300 shadow-inner group-hover:scale-105 ${
-                          junction?.isLocked
+                        <div className={`w-16 h-16 sm:w-20 sm:h-20 rounded-2xl sm:rounded-[1.3rem] border border-dashed flex items-center justify-center transition-all duration-300 shadow-inner group-hover:scale-105 ${junction?.isLocked
                             ? "border-amber-500/30 bg-amber-500/10 text-amber-300"
                             : "border-white/20 group-hover:border-indigo-400/60 bg-white/[0.02] group-hover:bg-indigo-500/10 text-slate-400 group-hover:text-indigo-300"
-                        }`}>
+                          }`}>
                           {junction?.isLocked ? (
                             <Lock className="w-6 h-6 sm:w-8 sm:h-8 transition-transform duration-300 group-hover:scale-110" />
                           ) : (
@@ -4750,9 +5201,8 @@ export function JunctionRoom({
 
                       {/* Bottom Prompt */}
                       <div className="flex flex-col items-center gap-0.5 z-10">
-                        <span className={`text-xs sm:text-sm font-semibold transition-colors flex items-center gap-1 ${
-                          junction?.isLocked ? "text-amber-200/90" : "text-slate-300 group-hover:text-white"
-                        }`}>
+                        <span className={`text-xs sm:text-sm font-semibold transition-colors flex items-center gap-1 ${junction?.isLocked ? "text-amber-200/90" : "text-slate-300 group-hover:text-white"
+                          }`}>
                           <span>{junction?.isLocked ? "Room Locked" : "Open Seat"}</span>
                           {!junction?.isLocked && (
                             <span className="text-[10px] text-indigo-400 opacity-0 group-hover:opacity-100 transition-all transform group-hover:translate-x-0.5">→</span>
@@ -5946,8 +6396,8 @@ export function JunctionRoom({
                         type="button"
                         onClick={() => setReportCategory(cat)}
                         className={`px-2.5 py-1 rounded-full text-xs font-semibold transition-all cursor-pointer ${reportCategory === cat
-                            ? "bg-rose-500/25 text-rose-300 border border-rose-500/50 shadow-sm"
-                            : "bg-white/5 text-slate-400 border border-white/10 hover:bg-white/10 hover:text-slate-200"
+                          ? "bg-rose-500/25 text-rose-300 border border-rose-500/50 shadow-sm"
+                          : "bg-white/5 text-slate-400 border border-white/10 hover:bg-white/10 hover:text-slate-200"
                           }`}
                       >
                         {cat}
@@ -5994,8 +6444,8 @@ export function JunctionRoom({
                       handleReportParticipant(reportingTarget.identity, fullReason);
                     }}
                     className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${!reportReasonText.trim() || isSubmittingReport
-                        ? "bg-rose-500/30 text-rose-300/50 border border-rose-500/20 cursor-not-allowed"
-                        : "bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-600/30 active:scale-95"
+                      ? "bg-rose-500/30 text-rose-300/50 border border-rose-500/20 cursor-not-allowed"
+                      : "bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-600/30 active:scale-95"
                       }`}
                   >
                     {isSubmittingReport ? (
@@ -6209,6 +6659,113 @@ export function JunctionRoom({
                 {isMinimized ? "Keep Minimized" : "Stay in Room"}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Floating Host Admission Notification Banner (Host Inside Room Only) */}
+      {!isWaitingRoom && isHost && activeKnocksForHost.length > 0 && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[200] max-w-md w-[calc(100%-2rem)] animate-slideDown">
+          <div className="bg-[#151722]/95 backdrop-blur-xl border border-amber-500/40 rounded-2xl p-3.5 shadow-2xl flex items-center justify-between gap-3 text-white">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-8 h-8 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0 border border-amber-500/30">
+                <Bell size={16} className="animate-bounce" />
+              </div>
+              <div className="min-w-0">
+                <p className="text-xs font-semibold truncate">
+                  {activeKnocksForHost[0].name} wants to enter
+                </p>
+                <p className="text-[10px] text-slate-400">
+                  {activeKnocksForHost.length > 1 ? `+${activeKnocksForHost.length - 1} more waiting` : "Waiting for admission"}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => handleDenyKnock(activeKnocksForHost[0].identity)}
+                className="px-2.5 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 text-xs font-medium transition-colors cursor-pointer"
+              >
+                Deny
+              </button>
+              <button
+                type="button"
+                onClick={() => handleAdmitKnock(activeKnocksForHost[0].identity)}
+                className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md shadow-emerald-600/30 transition-all flex items-center gap-1 cursor-pointer"
+              >
+                <Check size={12} />
+                <span>Admit</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Waiting Room Screen for Locked Rooms */}
+      {isWaitingRoom && (
+        <div className="fixed inset-0 z-[150] bg-[#0B0C10] flex flex-col items-center justify-center p-4 text-center">
+          <div className="max-w-md w-full p-8 rounded-3xl bg-[#12131A] border border-white/10 shadow-2xl flex flex-col items-center animate-fadeIn">
+            <div className="relative mb-6">
+              <div className="w-20 h-20 rounded-full bg-indigo-600/20 text-indigo-400 flex items-center justify-center border border-indigo-500/30 shadow-[0_0_30px_rgba(99,102,241,0.25)]">
+                <Clock size={36} className="animate-pulse text-indigo-400" />
+              </div>
+              <span className="absolute -top-1 -right-1 flex h-4 w-4">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-4 w-4 bg-indigo-500"></span>
+              </span>
+            </div>
+
+            {waitingStatus === "denied" ? (
+              <>
+                <h2 className="text-xl font-bold text-white mb-2">Request Declined</h2>
+                <p className="text-xs text-slate-400 mb-6 leading-relaxed">
+                  The host was unable to let you into this room at this time.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => onLeave?.()}
+                  className="w-full py-3 rounded-xl bg-white/10 hover:bg-white/15 text-white font-medium text-xs transition-all cursor-pointer"
+                >
+                  Return to Lobby
+                </button>
+              </>
+            ) : (
+              <>
+                <h2 className="text-xl font-bold text-white mb-1.5">You're in the Waiting Room</h2>
+                <p className="text-xs text-indigo-300 font-medium mb-3">
+                  {junction?.name || "Private Junction"}
+                </p>
+                <p className="text-xs text-slate-400 mb-6 leading-relaxed">
+                  This room is currently locked by the host. We notified the host that you're waiting outside. You'll join automatically once admitted!
+                </p>
+
+                <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white/5 border border-white/10 mb-6">
+                  <UserAvatar
+                    avatar={guest?.avatar || "zap"}
+                    color={guest?.color || "#6366F1"}
+                    size="sm"
+                  />
+                  <span className="text-xs text-slate-300">
+                    Waiting as <strong className="text-white">{myDisplayName}</strong>
+                  </span>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    fetch(`/api/junctions/${junctionId}`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ action: "cancel_knock", identity: myIdentity }),
+                    }).catch(() => { });
+                    onLeave?.();
+                  }}
+                  className="w-full py-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white font-medium text-xs transition-all cursor-pointer border border-white/10"
+                >
+                  Cancel & Return to Lobby
+                </button>
+              </>
+            )}
           </div>
         </div>
       )}

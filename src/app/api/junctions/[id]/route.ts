@@ -13,11 +13,25 @@ import {
   updateJunctionDetails,
   touchParticipantHeartbeat,
   toggleRoomLock,
+  knockWaitingRoom,
+  admitWaitingGuest,
+  denyWaitingGuest,
+  cancelWaitingKnock,
+  getWaitingGuests,
+  isIdentityAdmitted,
 } from "@/lib/junctions-store";
 import { generateRandomNickname } from "@/lib/guest-utils";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
+
+function getSbAdmin() {
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+  return serviceKey && url
+    ? createClient(url, serviceKey, { auth: { autoRefreshToken: false, persistSession: false } })
+    : anonSupabase;
+}
 
 export async function GET(
   request: NextRequest,
@@ -37,10 +51,12 @@ export async function GET(
 
     const junction = await getJunctionById(params.id);
     if (!junction) {
-      return NextResponse.json({ error: "Junction not found" }, { status: 404 });
+      return NextResponse.json({ error: "Junction not found or expired" }, { status: 404 });
     }
+    const waitingGuests = getWaitingGuests(params.id);
+    const isAdmitted = identity ? isIdentityAdmitted(params.id, identity) : false;
     return NextResponse.json(
-      { junction },
+      { junction, waitingGuests, isAdmitted },
       {
         headers: {
           "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
@@ -91,11 +107,7 @@ export async function POST(
       // Verify authentic Supabase session token if provided
       const authHeader = request.headers.get("authorization");
       const token = authHeader?.replace(/^Bearer\s+/i, "");
-      const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-      const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
-      const sbAdmin = (serviceKey && url)
-        ? createClient(url, serviceKey, { auth: { autoRefreshToken: false, persistSession: false } })
-        : anonSupabase;
+      const sbAdmin = getSbAdmin();
 
       let authUser: any = null;
       let userProfile: any = null;
@@ -155,7 +167,7 @@ export async function POST(
             .select("id")
             .ilike("username", cleanName)
             .maybeSingle();
-          if (existingUser) {
+          if (existingUser && participant.id !== existingUser.id) {
             // A registered user owns this name. An unauthenticated guest must be assigned a clean guest nickname.
             const guestNickname = generateRandomNickname();
             participant.name = guestNickname;
@@ -166,9 +178,133 @@ export async function POST(
 
       const result = await addParticipantToJunction(params.id, participant, tabSessionId);
       if (!result.success) {
-        return NextResponse.json({ error: result.error }, { status: 400 });
+        return NextResponse.json({ error: result.error, isLocked: (result as any).isLocked }, { status: 400 });
       }
       return NextResponse.json({ junction: result.junction });
+    }
+
+    if (action === "knock") {
+      const { guest } = body;
+      if (!guest || !guest.identity) {
+        return NextResponse.json({ error: "Missing guest information" }, { status: 400 });
+      }
+      const junction = await getJunctionById(params.id);
+      if (!junction) {
+        return NextResponse.json({ error: "Junction not found or expired" }, { status: 404 });
+      }
+      if (!junction.isLocked) {
+        return NextResponse.json({ status: "open", isLocked: false, junction });
+      }
+      const waitingGuest = {
+        id: guest.id || `guest_${Date.now()}`,
+        identity: guest.identity,
+        name: guest.name || guest.displayName || "Friend",
+        username: guest.username || guest.identity,
+        avatar: guest.avatar || "zap",
+        color: guest.color || "#6366F1",
+        knockedAt: Date.now(),
+      };
+      knockWaitingRoom(params.id, waitingGuest);
+
+      try {
+        const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+        const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+        const sb = (serviceKey && url) ? createClient(url, serviceKey, { auth: { autoRefreshToken: false, persistSession: false } }) : anonSupabase;
+        sb.channel(`room_realtime_${params.id}`).send({
+          type: "broadcast",
+          event: "room_updated",
+          payload: {
+            type: "waiting_room_knock",
+            payload: { guest: waitingGuest, junctionId: params.id },
+          },
+        }).then();
+      } catch (err) {
+        console.warn("Realtime knock broadcast notice:", err);
+      }
+
+      return NextResponse.json({ status: "waiting_room", isLocked: true });
+    }
+
+    if (action === "admit") {
+      const { hostIdentity, targetIdentity } = body;
+      if (!targetIdentity) {
+        return NextResponse.json({ error: "Missing target identity" }, { status: 400 });
+      }
+      const junction = await getJunctionById(params.id);
+      if (!junction) {
+        return NextResponse.json({ error: "Junction not found" }, { status: 404 });
+      }
+      const cleanHost = (junction.creatorId || junction.moderatorIdentity || "").trim().toLowerCase();
+      const cleanRequester = (hostIdentity || "").trim().toLowerCase();
+      const isHost = Boolean(cleanHost && cleanRequester === cleanHost);
+      const isStaff = requesterRole === "super_admin" || requesterRole === "admin";
+      if (!isHost && !isStaff) {
+        return NextResponse.json({ error: "Unauthorized: only the host can admit guests" }, { status: 403 });
+      }
+      admitWaitingGuest(params.id, targetIdentity);
+
+      try {
+        const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+        const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+        const sb = (serviceKey && url) ? createClient(url, serviceKey, { auth: { autoRefreshToken: false, persistSession: false } }) : anonSupabase;
+        sb.channel(`room_realtime_${params.id}`).send({
+          type: "broadcast",
+          event: "room_updated",
+          payload: {
+            type: "waiting_room_admitted",
+            payload: { targetIdentity, junctionId: params.id },
+          },
+        }).then();
+      } catch (err) {
+        console.warn("Realtime admit broadcast notice:", err);
+      }
+
+      return NextResponse.json({ success: true, admitted: targetIdentity });
+    }
+
+    if (action === "deny") {
+      const { hostIdentity, targetIdentity } = body;
+      if (!targetIdentity) {
+        return NextResponse.json({ error: "Missing target identity" }, { status: 400 });
+      }
+      const junction = await getJunctionById(params.id);
+      if (!junction) {
+        return NextResponse.json({ error: "Junction not found" }, { status: 404 });
+      }
+      const cleanHost = (junction.creatorId || junction.moderatorIdentity || "").trim().toLowerCase();
+      const cleanRequester = (hostIdentity || "").trim().toLowerCase();
+      const isHost = Boolean(cleanHost && cleanRequester === cleanHost);
+      const isStaff = requesterRole === "super_admin" || requesterRole === "admin";
+      if (!isHost && !isStaff) {
+        return NextResponse.json({ error: "Unauthorized: only the host can deny guests" }, { status: 403 });
+      }
+      denyWaitingGuest(params.id, targetIdentity);
+
+      try {
+        const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+        const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+        const sb = (serviceKey && url) ? createClient(url, serviceKey, { auth: { autoRefreshToken: false, persistSession: false } }) : anonSupabase;
+        sb.channel(`room_realtime_${params.id}`).send({
+          type: "broadcast",
+          event: "room_updated",
+          payload: {
+            type: "waiting_room_denied",
+            payload: { targetIdentity, junctionId: params.id },
+          },
+        }).then();
+      } catch (err) {
+        console.warn("Realtime deny broadcast notice:", err);
+      }
+
+      return NextResponse.json({ success: true, denied: targetIdentity });
+    }
+
+    if (action === "cancel_knock") {
+      const { identity } = body;
+      if (identity) {
+        cancelWaitingKnock(params.id, identity);
+      }
+      return NextResponse.json({ success: true });
     }
 
     if (action === "leave") {
@@ -276,12 +412,39 @@ export async function DELETE(
 ) {
   try {
     const { searchParams } = new URL(request.url);
-    const creatorId = searchParams.get("creatorId") || undefined;
-    const callerRole = searchParams.get("callerRole") || undefined;
+    let creatorId = searchParams.get("creatorId") || undefined;
+    let callerRole = searchParams.get("callerRole") || undefined;
+
+    // Check Authorization header for authenticated user verification
+    const authHeader = request.headers.get("Authorization");
+    if (authHeader?.startsWith("Bearer ")) {
+      const token = authHeader.replace("Bearer ", "");
+      try {
+        const sbAdmin = getSbAdmin();
+        const { data: { user } } = await sbAdmin.auth.getUser(token);
+        if (user) {
+          const { data: prof } = await sbAdmin
+            .from("profiles")
+            .select("*")
+            .eq("id", user.id)
+            .maybeSingle();
+          if (prof) {
+            const rawRole = prof.role || prof.social_links?.role || "user";
+            callerRole = rawRole;
+            creatorId = prof.username || prof.display_name || creatorId;
+          }
+        }
+      } catch (e) {
+        console.warn("Auth check error in DELETE junction:", e);
+      }
+    }
 
     const success = await deleteJunction(params.id, creatorId, callerRole);
     if (!success) {
-      return NextResponse.json({ error: "Junction not found or unauthorized" }, { status: 404 });
+      return NextResponse.json(
+        { error: "Unauthorized: Only Super Admin can delete public Junctions; private rooms can only be deleted by the room creator or Super Admin." },
+        { status: 403 }
+      );
     }
     return NextResponse.json({ success: true, message: "Junction deleted" });
   } catch (error: any) {

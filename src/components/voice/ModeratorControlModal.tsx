@@ -29,6 +29,7 @@ interface ModeratorControlModalProps {
   participants?: JunctionParticipant[];
   currentModerator: string;
   isStaff?: boolean;
+  isSuperAdmin?: boolean;
   onModerateParticipant: (targetIdentity: string, action: "mute" | "unmute" | "kick" | "ban" | "unban" | "promote_mod" | "demote_mod") => Promise<void>;
   onClearChat: () => void;
   onEndJunction: () => Promise<void>;
@@ -43,6 +44,7 @@ export function ModeratorControlModal({
   participants,
   currentModerator,
   isStaff = false,
+  isSuperAdmin = false,
   onModerateParticipant,
   onClearChat,
   onEndJunction,
@@ -63,6 +65,7 @@ export function ModeratorControlModal({
 
   const isPrivate = Boolean(junction.isCustom || junction.creatorId || junction.id.startsWith("junc_"));
   const isCreatorHost = Boolean(isPrivate && junction.creatorId && currentModerator.toLowerCase() === junction.creatorId.toLowerCase());
+  const canDeleteRoom = isPrivate ? (isSuperAdmin || isCreatorHost) : Boolean(isSuperAdmin);
   const canKick = isStaff || isCreatorHost;
 
   const participantList = (participants && participants.length > 0) ? participants : junction.participants;
@@ -168,8 +171,8 @@ export function ModeratorControlModal({
           <button
             onClick={() => setActiveTab("participants")}
             className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${activeTab === "participants"
-                ? "bg-amber-500 text-black shadow-md"
-                : "text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:text-slate-200"
+              ? "bg-amber-500 text-black shadow-md"
+              : "text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:text-slate-200"
               }`}
           >
             <Users size={14} />
@@ -178,8 +181,8 @@ export function ModeratorControlModal({
           <button
             onClick={() => setActiveTab("room")}
             className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${activeTab === "room"
-                ? "bg-amber-500 text-black shadow-md"
-                : "text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:text-slate-200"
+              ? "bg-amber-500 text-black shadow-md"
+              : "text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:text-slate-200"
               }`}
           >
             <Settings size={14} />
@@ -241,8 +244,8 @@ export function ModeratorControlModal({
                         }
                         disabled={actionLoading !== null}
                         className={`p-1.5 px-2 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer ${p.isMutedByMod
-                            ? "bg-slate-200 dark:bg-slate-800 hover:bg-slate-700 text-slate-700 dark:text-slate-300"
-                            : "bg-rose-600/20 hover:bg-rose-600/40 text-rose-300 border border-rose-500/30"
+                          ? "bg-slate-200 dark:bg-slate-800 hover:bg-slate-700 text-slate-700 dark:text-slate-300"
+                          : "bg-rose-600/20 hover:bg-rose-600/40 text-rose-300 border border-rose-500/30"
                           }`}
                         title={p.isMutedByMod ? "Remove force mute (allow user to speak)" : "Force mute user mic"}
                       >
@@ -365,8 +368,8 @@ export function ModeratorControlModal({
                   onClick={handleToggleLock}
                   disabled={actionLoading !== null}
                   className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-colors cursor-pointer ${junction.isLocked
-                      ? "bg-slate-200 dark:bg-slate-800 hover:bg-slate-700 text-slate-800 dark:text-slate-200"
-                      : "bg-amber-500/20 hover:bg-amber-500/40 text-amber-500 border border-amber-500/30"
+                    ? "bg-slate-200 dark:bg-slate-800 hover:bg-slate-700 text-slate-800 dark:text-slate-200"
+                    : "bg-amber-500/20 hover:bg-amber-500/40 text-amber-500 border border-amber-500/30"
                     }`}
                 >
                   {junction.isLocked ? "Unlock Room" : "Lock Room"}
@@ -374,8 +377,8 @@ export function ModeratorControlModal({
               </div>
             )}
 
-            {/* Edit Junction Details (Creator Only) */}
-            {currentModerator === junction.creatorId && (
+            {/* Edit Junction Details (Creator or Staff) */}
+            {(isCreatorHost || isStaff) && (
               <div className="p-3.5 sm:p-4 rounded-2xl bg-slate-100 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800">
                 <div className="flex items-center justify-between mb-3">
                   <div className="text-xs font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
@@ -437,8 +440,8 @@ export function ModeratorControlModal({
                               key={size}
                               onClick={() => setEditCapacity(size)}
                               className={`py-1.5 rounded-lg text-xs font-bold transition-colors ${editCapacity === size
-                                  ? "bg-indigo-600/30 text-indigo-300 border border-indigo-500/30"
-                                  : "bg-black/20 text-slate-400 border border-white/5 hover:bg-white/5"
+                                ? "bg-indigo-600/30 text-indigo-300 border border-indigo-500/30"
+                                : "bg-black/20 text-slate-400 border border-white/5 hover:bg-white/5"
                                 }`}
                             >
                               {size}
@@ -500,8 +503,8 @@ export function ModeratorControlModal({
               )}
             </div>
 
-            {/* End Junction Danger Zone */}
-            {currentModerator === junction.creatorId && (
+            {/* End Junction Danger Zone (Super Admin for all rooms, Room Creator for private rooms) */}
+            {canDeleteRoom && (
               <div className="p-4 rounded-2xl bg-rose-950/30 border border-rose-500/40">
                 <div className="flex items-center gap-2 text-rose-400 font-bold text-xs mb-1">
                   <AlertTriangle size={15} />

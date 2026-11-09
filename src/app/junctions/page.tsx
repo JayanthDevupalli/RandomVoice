@@ -330,8 +330,9 @@ export default function JunctionsPage() {
     })
     .sort((a, b) => (b.participants?.length ?? b.currentCount) - (a.participants?.length ?? a.currentCount));
 
+  const now = Date.now();
   const publicStations = filteredJunctions.filter(isPublicJunction);
-  const userRooms = filteredJunctions.filter((j) => !isPublicJunction(j) && !j.isLocked);
+  const userRooms = filteredJunctions.filter((j) => !isPublicJunction(j) && !j.isLocked && (!j.expiresAt || j.expiresAt > now));
   const currentTabRooms = activeTab === "public" ? publicStations : userRooms;
 
   if (!isLoaded || !guest) {

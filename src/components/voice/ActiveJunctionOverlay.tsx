@@ -44,7 +44,7 @@ export function ActiveJunctionOverlay() {
       {activeJunctionId && isLoaded && user && !user.isBanned && (
         <div className={isMinimized ? "contents" : "fixed inset-0 z-[100] bg-background overflow-hidden flex flex-col"}>
           <JunctionRoom
-            key={activeJunctionId}
+            key={`${activeJunctionId}_${user.id || 'guest'}_${user.username || ''}`}
             junctionId={activeJunctionId}
             guest={user as any}
             isMinimized={isMinimized}

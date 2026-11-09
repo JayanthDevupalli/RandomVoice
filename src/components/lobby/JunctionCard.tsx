@@ -18,8 +18,10 @@ import {
   Loader2,
   MapPin,
   Shield,
+  Clock,
 } from "lucide-react";
 import Link from "next/link";
+import { supabase } from "@/lib/supabase";
 import { useGuestUser } from "@/hooks/useGuestUser";
 import { useUser } from "@/hooks/useUser";
 import { useActiveJunction } from "@/components/providers/ActiveJunctionContext";
@@ -68,6 +70,21 @@ const CITY_FAMOUS_MAP: Record<string, string> = {
   "Old Delhi": "Chandni Chowk, Jama Masjid & Historic Food"
 };
 
+function formatDurationRemaining(expiresAt?: number | null, durationType?: string): string | null {
+  if (durationType === "permanent") return "Permanent ♾️";
+  if (!expiresAt) {
+    if (durationType) return durationType;
+    return null;
+  }
+  const diff = expiresAt - Date.now();
+  if (diff <= 0) return "Ended";
+  const mins = Math.floor(diff / 60000);
+  if (mins < 60) return `${mins}m left`;
+  const hours = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  return remMins > 0 ? `${hours}h ${remMins}m left` : `${hours}h left`;
+}
+
 export const JunctionCard = React.memo(
   function JunctionCard({ junction, onDelete }: JunctionCardProps) {
     const { guest } = useGuestUser();
@@ -93,8 +110,26 @@ export const JunctionCard = React.memo(
     const maxCapacity = junction.maxParticipants || (isPublic ? 10 : 2);
     const isFull = participantCount >= maxCapacity;
     const isLocked = junction.isLocked;
-    const isCreator = guest?.name === junction.creatorId;
+    const isPrivate = !isPublic;
+    const isSuperAdmin = user?.role === "super_admin";
+    const isRoomCreator = Boolean(
+      junction.creatorId && [
+        user?.username,
+        user?.displayName,
+        user?.name,
+        user?.id,
+        guest?.name,
+        guest?.displayName,
+        guest?.id,
+      ].some((alias) => alias && alias.trim().toLowerCase() === junction.creatorId?.trim().toLowerCase())
+    );
+
+    // Only Super Admin can delete public Junctions.
+    // In private rooms, can delete by room creator or Super Admin.
+    const canDelete = isPrivate ? (isSuperAdmin || isRoomCreator) : isSuperAdmin;
     const firstParticipant = displayedParticipants[0];
+    const durationLabel = isPrivate ? formatDurationRemaining(junction.expiresAt, junction.durationType) : null;
+    const isUrgent = Boolean(isPrivate && junction.expiresAt && junction.expiresAt - Date.now() < 10 * 60 * 1000);
 
     const handleDelete = async (e: React.MouseEvent) => {
       e.preventDefault();
@@ -102,14 +137,34 @@ export const JunctionCard = React.memo(
       if (!confirm("Are you sure you want to delete this room?")) return;
       try {
         setIsDeleting(true);
-        await fetch(`/api/junctions/${junction.id}?creatorId=${encodeURIComponent(guest?.name || "")}`, {
-          method: "DELETE",
-        });
+        const creatorParam = user?.username || user?.displayName || user?.name || guest?.name || "";
+        const roleParam = user?.role || "user";
+
+        const headers: Record<string, string> = {};
+        try {
+          const { data: { session } } = await supabase.auth.getSession();
+          if (session?.access_token) {
+            headers["Authorization"] = `Bearer ${session.access_token}`;
+          }
+        } catch {}
+
+        const res = await fetch(
+          `/api/junctions/${junction.id}?creatorId=${encodeURIComponent(creatorParam)}&callerRole=${encodeURIComponent(roleParam)}`,
+          {
+            method: "DELETE",
+            headers,
+          }
+        );
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.error || "Failed to delete room");
+        }
         if (onDelete) {
           onDelete(junction.id);
         }
-      } catch (err) {
-        console.error(err);
+      } catch (err: any) {
+        console.error("Failed to delete junction:", err);
+        alert(err.message || "Failed to delete room");
         setIsDeleting(false);
       }
     };
@@ -146,6 +201,18 @@ export const JunctionCard = React.memo(
                 <IconComponent size={11} className="text-indigo-400 shrink-0" />
                 <span className="truncate">{categoryLabel}</span>
               </span>
+              {durationLabel && (
+                <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-medium border truncate ${
+                  durationLabel === "Permanent ♾️"
+                    ? "bg-purple-500/10 border-purple-500/20 text-purple-300"
+                    : isUrgent
+                    ? "bg-amber-500/15 border-amber-500/30 text-amber-300 animate-pulse"
+                    : "bg-white/[0.04] border-white/[0.06] text-slate-300"
+                }`}>
+                  <Clock size={9} className={durationLabel === "Permanent ♾️" ? "text-purple-400" : isUrgent ? "text-amber-400" : "text-slate-400"} />
+                  <span>{durationLabel}</span>
+                </span>
+              )}
             </div>
 
             <div className="flex items-center gap-2 shrink-0 pointer-events-auto">
@@ -172,12 +239,12 @@ export const JunctionCard = React.memo(
                 </div>
               )}
 
-              {isCreator && (
+              {canDelete && (
                 <button
                   onClick={handleDelete}
                   disabled={isDeleting}
                   className="p-1 rounded text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors shrink-0 disabled:opacity-50 ml-0.5"
-                  title="Delete Room"
+                  title={isPrivate ? "Delete Voice Room" : "Delete Junction (Super Admin)"}
                 >
                   {isDeleting ? <Loader2 size={12} className="animate-spin text-rose-400" /> : <Trash2 size={12} />}
                 </button>
@@ -262,14 +329,6 @@ export const JunctionCard = React.memo(
                 <Shield size={11} />
                 <span>Suspended</span>
               </button>
-            ) : isLocked ? (
-              <button
-                disabled
-                className="py-1.5 px-3 rounded-lg bg-white/[0.04] border border-white/[0.08] text-rose-400/90 font-medium text-xs flex items-center gap-1 cursor-not-allowed"
-              >
-                <Lock size={11} />
-                <span>Locked</span>
-              </button>
             ) : isFull ? (
               <button
                 disabled
@@ -277,6 +336,14 @@ export const JunctionCard = React.memo(
               >
                 <Lock size={11} />
                 <span>Full</span>
+              </button>
+            ) : isLocked ? (
+              <button
+                disabled
+                className="py-1.5 px-3 rounded-lg bg-white/[0.04] border border-white/[0.08] text-rose-400/90 font-medium text-xs flex items-center gap-1 cursor-not-allowed"
+              >
+                <Lock size={11} />
+                <span>Locked</span>
               </button>
             ) : (
               <Link

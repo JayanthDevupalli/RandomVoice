@@ -1,6 +1,6 @@
 import { supabase as anonSupabase } from "./supabase";
 import { createClient } from "@supabase/supabase-js";
-import { Junction, JunctionParticipant, UserRole, UserReportRecord } from "./types";
+import { Junction, JunctionParticipant, UserRole, UserReportRecord, WaitingGuest } from "./types";
 import {
   kickLiveKitParticipant,
   muteLiveKitParticipant,
@@ -21,6 +21,69 @@ export function resolvePlatformRole(username?: string, rawRole?: string): UserRo
   return "user";
 }
 
+// ─── Waiting Room In-Memory Stores ──────────────────────────────────────────
+// Maps junctionId -> Set of admitted lowercased identities
+const admittedIdentitiesByJunction = new Map<string, Set<string>>();
+// Maps junctionId -> Map of identity -> WaitingGuest
+const waitingGuestsByJunction = new Map<string, Map<string, WaitingGuest>>();
+
+export function knockWaitingRoom(junctionId: string, guest: WaitingGuest): { success: boolean; queueLength: number } {
+  let waitingMap = waitingGuestsByJunction.get(junctionId);
+  if (!waitingMap) {
+    waitingMap = new Map();
+    waitingGuestsByJunction.set(junctionId, waitingMap);
+  }
+  const cleanId = (guest.identity || "").trim().toLowerCase();
+  waitingMap.set(cleanId, guest);
+  return { success: true, queueLength: waitingMap.size };
+}
+
+export function admitWaitingGuest(junctionId: string, targetIdentity: string): boolean {
+  const cleanTarget = (targetIdentity || "").trim().toLowerCase();
+  let admittedSet = admittedIdentitiesByJunction.get(junctionId);
+  if (!admittedSet) {
+    admittedSet = new Set();
+    admittedIdentitiesByJunction.set(junctionId, admittedSet);
+  }
+  admittedSet.add(cleanTarget);
+
+  const waitingMap = waitingGuestsByJunction.get(junctionId);
+  if (waitingMap) {
+    waitingMap.delete(cleanTarget);
+  }
+  return true;
+}
+
+export function denyWaitingGuest(junctionId: string, targetIdentity: string): boolean {
+  const cleanTarget = (targetIdentity || "").trim().toLowerCase();
+  const waitingMap = waitingGuestsByJunction.get(junctionId);
+  if (waitingMap) {
+    waitingMap.delete(cleanTarget);
+  }
+  return true;
+}
+
+export function cancelWaitingKnock(junctionId: string, targetIdentity: string): boolean {
+  const cleanTarget = (targetIdentity || "").trim().toLowerCase();
+  const waitingMap = waitingGuestsByJunction.get(junctionId);
+  if (waitingMap) {
+    waitingMap.delete(cleanTarget);
+  }
+  return true;
+}
+
+export function getWaitingGuests(junctionId: string): WaitingGuest[] {
+  const waitingMap = waitingGuestsByJunction.get(junctionId);
+  return waitingMap ? Array.from(waitingMap.values()) : [];
+}
+
+export function isIdentityAdmitted(junctionId: string, identity?: string): boolean {
+  if (!identity) return false;
+  const cleanId = identity.trim().toLowerCase();
+  const admittedSet = admittedIdentitiesByJunction.get(junctionId);
+  return Boolean(admittedSet && admittedSet.has(cleanId));
+}
+
 // ─── Helpers: DB row ↔ TypeScript mapping ───────────────────────────────────
 
 interface JunctionRow {
@@ -38,6 +101,8 @@ interface JunctionRow {
   moderator_identity: string;
   is_locked: boolean;
   banned_identities: string[];
+  expires_at?: number | null;
+  duration_type?: string;
 }
 
 interface ParticipantRow {
@@ -77,13 +142,55 @@ function rowToJunction(
     (typeof row.id === "string" && row.id.startsWith("junc_"))
   );
 
+  // Extract duration metadata from direct row columns OR internal tag metadata
+  let resolvedDurationType: string | undefined = row.duration_type;
+  let resolvedExpiresAt: number | null | undefined = row.expires_at;
+
+  const rawTags = Array.isArray(row.tags) ? row.tags : [];
+  const cleanTags: string[] = [];
+
+  for (const t of rawTags) {
+    if (typeof t === "string" && t.startsWith("__duration:")) {
+      if (!resolvedDurationType) {
+        resolvedDurationType = t.replace("__duration:", "").replace(/__$/, "");
+      }
+    } else if (typeof t === "string" && t.startsWith("__expires:")) {
+      if (resolvedExpiresAt === undefined || resolvedExpiresAt === null) {
+        const val = parseInt(t.replace("__expires:", "").replace(/__$/, ""), 10);
+        if (!isNaN(val) && val > 0) {
+          resolvedExpiresAt = val;
+        }
+      }
+    } else {
+      cleanTags.push(t);
+    }
+  }
+
+  // If a private room has duration type but expiresAt wasn't explicitly saved:
+  if (isPrivate && resolvedDurationType && resolvedDurationType !== "permanent" && !resolvedExpiresAt) {
+    resolvedExpiresAt = computeExpiresAt(resolvedDurationType, row.created_at || Date.now());
+  }
+
+  // Backwards compatibility for private rooms created when duration was defaulted to 1h
+  if (isPrivate && !resolvedDurationType && (resolvedExpiresAt === undefined || resolvedExpiresAt === null)) {
+    const createdAtTime = typeof row.created_at === "number" ? row.created_at : Date.now();
+    const standard1hExpiry = createdAtTime + 60 * 60 * 1000;
+    if (Date.now() < standard1hExpiry) {
+      resolvedDurationType = "1h";
+      resolvedExpiresAt = standard1hExpiry;
+    } else {
+      resolvedDurationType = "permanent";
+      resolvedExpiresAt = null;
+    }
+  }
+
   return {
     id: row.id,
     name: row.name,
     description: row.description,
     category: row.category as Junction["category"],
     icon: row.icon,
-    tags: row.tags || [],
+    tags: cleanTags.length > 0 ? cleanTags : (row.tags || []),
     maxParticipants: row.max_participants || (isPrivate ? 2 : 10),
     currentCount: participants.length,
     createdAt: row.created_at,
@@ -92,6 +199,8 @@ function rowToJunction(
     moderatorIdentity: isPrivate ? (row.creator_id || row.moderator_identity || "") : "",
     isLocked: row.is_locked,
     bannedIdentities: row.banned_identities || [],
+    expiresAt: isPrivate ? (resolvedExpiresAt ?? null) : undefined,
+    durationType: isPrivate ? (resolvedDurationType ?? "permanent") : undefined,
     participants: participants.map((p) => {
       const part = rowToParticipant(p, roleMap, profileMap);
       if (isPrivate) {
@@ -426,6 +535,28 @@ export function invalidateJunctionsCache() {
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
+function computeExpiresAt(durationType?: string, now = Date.now()): number | null {
+  if (!durationType || durationType === "permanent") return null;
+  switch (durationType) {
+    case "30m":
+      return now + 30 * 60 * 1000;
+    case "1h":
+      return now + 60 * 60 * 1000;
+    case "2h":
+      return now + 2 * 60 * 60 * 1000;
+    case "3h":
+      return now + 3 * 60 * 60 * 1000;
+    case "24h":
+    case "1d":
+      return now + 24 * 60 * 60 * 1000;
+    case "48h":
+    case "2d":
+      return now + 48 * 60 * 60 * 1000;
+    default:
+      return null;
+  }
+}
+
 export async function getAllJunctions(): Promise<Junction[]> {
   const now = Date.now();
   if (cachedJunctions && now - cachedJunctions.timestamp < LOBBY_CACHE_TTL_MS) {
@@ -447,6 +578,33 @@ export async function getAllJunctions(): Promise<Junction[]> {
   const pRows = pRes.data;
 
   if (jRes.error || !jRows) return [];
+
+  // Filter out and auto-cleanup expired junctions
+  const expiredIds: string[] = [];
+  const activeJRows = (jRows as JunctionRow[]).filter((row) => {
+    let exp = row.expires_at;
+    if ((!exp || typeof exp !== "number") && Array.isArray(row.tags)) {
+      for (const t of row.tags) {
+        if (typeof t === "string" && t.startsWith("__expires:")) {
+          const val = parseInt(t.replace("__expires:", "").replace(/__$/, ""), 10);
+          if (!isNaN(val) && val > 0) exp = val;
+        }
+      }
+    }
+    if (exp && typeof exp === "number" && now >= exp) {
+      expiredIds.push(row.id);
+      return false;
+    }
+    return true;
+  });
+
+  if (expiredIds.length > 0) {
+    supabase.from("junctions").delete().in("id", expiredIds).then();
+    expiredIds.forEach((id) => {
+      waitingGuestsByJunction.delete(id);
+      admittedIdentitiesByJunction.delete(id);
+    });
+  }
 
   const rawParticipants = (pRows || []) as ParticipantRow[];
   const allIdentities = Array.from(
@@ -534,7 +692,7 @@ export async function getAllJunctions(): Promise<Junction[]> {
     participantsByJunction[p.junction_id].push(p);
   }
 
-  const result = (jRows as JunctionRow[])
+  const result = activeJRows
     .map((row) =>
       rowToJunction(row, participantsByJunction[row.id] || [], roleMap, profileMap)
     )
@@ -550,7 +708,14 @@ export async function getAllJunctions(): Promise<Junction[]> {
 }
 
 export async function getJunctionById(id: string): Promise<Junction | undefined> {
-  return fetchJunctionWithParticipants(id);
+  const junc = await fetchJunctionWithParticipants(id);
+  if (junc && junc.expiresAt && Date.now() >= junc.expiresAt) {
+    supabase.from("junctions").delete().eq("id", id).then();
+    waitingGuestsByJunction.delete(id);
+    admittedIdentitiesByJunction.delete(id);
+    return undefined;
+  }
+  return junc;
 }
 
 export async function createJunction(data: {
@@ -561,19 +726,27 @@ export async function createJunction(data: {
   maxParticipants?: number;
   creator: { name: string; avatar: string; color: string };
   isLocked?: boolean;
+  durationType?: string;
 }): Promise<Junction> {
   const creatorIdentity = data.creator.name;
   const junctionId = "junc_" + Date.now().toString(36) + "_" + Math.random().toString(36).substring(2, 6);
   const now = Date.now();
+  const durType = data.durationType || "1h";
+  const expiresAt = computeExpiresAt(durType, now);
 
-  // Insert junction — creator is recorded and designated as host (moderator).
-  const { error: jError } = await supabase.from("junctions").insert({
+  const baseTags = (data.tags && data.tags.length > 0) ? data.tags : ["Custom", data.category];
+  const metadataTags: string[] = [`__duration:${durType}__`];
+  if (expiresAt) {
+    metadataTags.push(`__expires:${expiresAt}__`);
+  }
+
+  const insertPayload: any = {
     id: junctionId,
     name: data.name,
     description: data.description || "A user-created voice junction.",
     category: data.category,
     icon: "Mic",
-    tags: data.tags.length > 0 ? data.tags : ["Custom", data.category],
+    tags: [...baseTags, ...metadataTags],
     max_participants: data.maxParticipants || 2,
     current_count: 0,
     created_at: now,
@@ -582,7 +755,20 @@ export async function createJunction(data: {
     moderator_identity: creatorIdentity,
     is_locked: data.isLocked || false,
     banned_identities: [],
-  });
+    expires_at: expiresAt,
+    duration_type: durType,
+  };
+
+  // Insert junction — creator is recorded and designated as host (moderator).
+  let { error: jError } = await supabase.from("junctions").insert(insertPayload);
+
+  // Graceful fallback if expires_at or duration_type columns do not exist yet in Supabase
+  if (jError && (jError.message?.includes("expires_at") || (jError as any).details?.includes("expires_at") || jError.message?.includes("duration_type"))) {
+    delete insertPayload.expires_at;
+    delete insertPayload.duration_type;
+    const retry = await supabase.from("junctions").insert(insertPayload);
+    jError = retry.error;
+  }
 
   if (jError) {
     console.error("Error creating junction:", jError);
@@ -630,7 +816,7 @@ export async function addParticipantToJunction(
   junctionId: string,
   participant: Omit<JunctionParticipant, "joinedAt">,
   tabSessionId?: string
-): Promise<{ success: boolean; error?: string; junction?: Junction }> {
+): Promise<{ success: boolean; error?: string; isLocked?: boolean; junction?: Junction }> {
   const cleanParticipantIdentity = (participant.identity || "").trim().toLowerCase();
 
   if (tabSessionId) {
@@ -702,8 +888,14 @@ export async function addParticipantToJunction(
     (cleanParticipantIdentity === cleanCreator || cleanUsername === cleanCreator || cleanName === cleanCreator)
   );
 
-  if (junction.isLocked && !isAlreadyPresent && !isCreator) {
-    return { success: false, error: "This room is locked by the host." };
+  const isAdmitted =
+    isIdentityAdmitted(junctionId, cleanParticipantIdentity) ||
+    isIdentityAdmitted(junctionId, cleanUsername) ||
+    isIdentityAdmitted(junctionId, cleanName) ||
+    isIdentityAdmitted(junctionId, participant.id);
+
+  if (junction.isLocked && !isAlreadyPresent && !isCreator && !isAdmitted) {
+    return { success: false, error: "This room is locked by the host.", isLocked: true };
   }
 
   // Determine avatar and cardBgColor from participant or existing
@@ -873,13 +1065,15 @@ export async function removeParticipantFromJunction(
 
   await syncCount(junctionId);
 
-  // Clear moderator_identity if room is empty
+  // Clear moderator_identity and auto-unlock if room is empty
   const junction = await fetchJunctionWithParticipants(junctionId);
   if (junction && junction.participants.length === 0) {
     await supabase
       .from("junctions")
-      .update({ moderator_identity: "", current_count: 0 })
+      .update({ moderator_identity: "", current_count: 0, is_locked: false })
       .eq("id", junctionId);
+    waitingGuestsByJunction.delete(junctionId);
+    admittedIdentitiesByJunction.delete(junctionId);
   }
 
   invalidateJunctionsCache();
@@ -936,7 +1130,7 @@ export async function moderateParticipant(
   action: "mute" | "unmute" | "kick" | "ban" | "unban" | "promote_mod" | "demote_mod",
   moderatorUserId?: string,
   requesterRole?: UserRole
-): Promise<{ success: boolean; error?: string; junction?: Junction }> {
+): Promise<{ success: boolean; error?: string; isLocked?: boolean; junction?: Junction }> {
   const junction = await fetchJunctionWithParticipants(junctionId);
 
   if (!junction) {
@@ -1119,7 +1313,7 @@ export async function moderateParticipant(
 export async function claimModeratorRole(
   _junctionId: string,
   _identity: string
-): Promise<{ success: boolean; error?: string; junction?: Junction }> {
+): Promise<{ success: boolean; error?: string; isLocked?: boolean; junction?: Junction }> {
   return {
     success: false,
     error: "Room Host concept has been decommissioned. All participants are equal speakers.",
@@ -1130,7 +1324,7 @@ export async function updateParticipantProfile(
   junctionId: string,
   identity: string,
   updates: { name?: string; avatar?: string; color?: string; cardBgColor?: string; isMuted?: boolean }
-): Promise<{ success: boolean; error?: string; junction?: Junction }> {
+): Promise<{ success: boolean; error?: string; isLocked?: boolean; junction?: Junction }> {
   const junction = await fetchJunctionWithParticipants(junctionId);
 
   if (!junction) {
@@ -1171,7 +1365,7 @@ export async function updateJunctionDetails(
   junctionId: string,
   moderatorIdentity: string,
   updates: { name?: string; maxParticipants?: number }
-): Promise<{ success: boolean; error?: string; junction?: Junction }> {
+): Promise<{ success: boolean; error?: string; isLocked?: boolean; junction?: Junction }> {
   const { data: jRow, error: jError } = await supabase
     .from("junctions")
     .select("id, is_custom, creator_id, moderator_identity")
@@ -1236,7 +1430,7 @@ export async function toggleRoomLock(
   junctionId: string,
   moderatorIdentity: string,
   isLocked: boolean
-): Promise<{ success: boolean; error?: string; junction?: Junction }> {
+): Promise<{ success: boolean; error?: string; isLocked?: boolean; junction?: Junction }> {
   const junction = await fetchJunctionWithParticipants(junctionId);
 
   if (!junction) {
@@ -1290,25 +1484,33 @@ export async function deleteJunction(
   creatorId?: string,
   callerRole?: string
 ): Promise<boolean> {
-  const isStaff =
-    callerRole === "super_admin" ||
-    callerRole === "admin";
-
-  // Prevent unauthenticated calls from deleting any rooms
-  if (!creatorId && !isStaff) {
-    return false;
-  }
+  const isSuperAdmin = callerRole === "super_admin";
 
   const junction = await fetchJunctionWithParticipants(junctionId);
   if (!junction) return false;
 
-  // Protect public stations from being deleted by non-staff
-  if (!junction.isCustom && !isStaff) {
-    return false;
-  }
+  const isPrivate = Boolean(
+    junction.isCustom ||
+    junction.creatorId ||
+    (typeof junction.id === "string" && junction.id.startsWith("junc_"))
+  );
 
-  if (creatorId && !isStaff) {
-    if (junction.creatorId !== creatorId) return false;
+  // Rule 1: Public Junctions (Stations) can ONLY be deleted by Super Admin
+  if (!isPrivate) {
+    if (!isSuperAdmin) {
+      return false;
+    }
+  } else {
+    // Rule 2: Private rooms can ONLY be deleted by the room creator or Super Admin
+    if (!isSuperAdmin) {
+      if (!creatorId) return false;
+      const cleanParam = creatorId.trim().toLowerCase();
+      const cleanCreator = (junction.creatorId || "").trim().toLowerCase();
+      const cleanMod = (junction.moderatorIdentity || "").trim().toLowerCase();
+      if (cleanCreator !== cleanParam && cleanMod !== cleanParam) {
+        return false;
+      }
+    }
   }
 
   // Participants are cascade-deleted by the FK constraint
@@ -1318,6 +1520,8 @@ export async function deleteJunction(
     .eq("id", junctionId);
 
   if (!error) {
+    waitingGuestsByJunction.delete(junctionId);
+    admittedIdentitiesByJunction.delete(junctionId);
     invalidateJunctionsCache();
     return true;
   }

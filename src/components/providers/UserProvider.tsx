@@ -38,6 +38,29 @@ function resolveUserRole(username?: string, dbRole?: string): UserRole {
   return "user";
 }
 
+function syncGuestStorageWithProfile(profile: any, displayName: string, cardBg: string) {
+  if (typeof window === "undefined") return;
+  try {
+    const syncGuest = {
+      id: profile.id,
+      name: profile.username || displayName,
+      username: profile.username,
+      displayName: displayName,
+      avatar: profile.avatar || "sparkles",
+      color: "#6366F1",
+      cardBgColor: cardBg,
+      bio: profile.bio || "",
+    };
+    localStorage.setItem("junction_guest_profile", JSON.stringify(syncGuest));
+    localStorage.setItem("junction_onboarding_completed", "true");
+    window.dispatchEvent(
+      new CustomEvent("yapclub_guest_profile_sync", { detail: { guest: syncGuest, onboarded: true } })
+    );
+  } catch (e) {
+    console.warn("Failed to sync guest storage with profile:", e);
+  }
+}
+
 const UserContext = createContext<UserContextType | null>(null);
 
 export function UserProvider({ children }: { children: React.ReactNode }) {
@@ -84,6 +107,9 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
               isBanned: isUserBanned,
               bannedReason: userBannedReason,
             });
+
+            // Ensure guest local storage and sync events strictly align with registered account identity
+            syncGuestStorageWithProfile(profile, displayName, cardBg);
           }
         } else {
           // User is logged out / guest.
@@ -157,6 +183,9 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
               isBanned: isUserBanned,
               bannedReason: userBannedReason,
             });
+
+            // Immediately synchronize guest profile cache so legacy guest callers receive registered identity
+            syncGuestStorageWithProfile(profile, displayName, cardBg);
           }
         } catch (err) {
           console.warn("Error fetching profile on auth state change:", err);
@@ -265,6 +294,8 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
               updated.banned_reason || updated.social_links?.banned_reason || undefined;
             const displayName = updated.display_name || updated.social_links?.display_name || updated.username;
 
+            syncGuestStorageWithProfile(updated, displayName, cardBg);
+
             return {
               ...prev,
               name: displayName,
@@ -322,6 +353,8 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
             isBanned: isUserBanned,
             bannedReason: userBannedReason,
           });
+
+          syncGuestStorageWithProfile(profile, displayName, cardBg);
         }
       }
     } catch (e) {

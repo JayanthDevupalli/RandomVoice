@@ -1,5 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAllJunctions, createJunction, purgeUserFromAllJunctions } from "@/lib/junctions-store";
+import { createClient } from "@supabase/supabase-js";
+
+const sbAdmin = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL || "",
+  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ""
+);
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -46,10 +52,31 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: true, purged: purgedCount > 0, count: purgedCount });
     }
 
-    const { name, description, category, tags, creator, maxParticipants, isLocked } = body;
+    const { name, description, category, tags, creator, maxParticipants, isLocked, durationType } = body;
 
     if (!name || !category || !creator) {
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
+    }
+
+    const authHeader = request.headers.get("Authorization");
+    if (authHeader?.startsWith("Bearer ")) {
+      const token = authHeader.replace("Bearer ", "");
+      try {
+        const { data: { user: authUser } } = await sbAdmin.auth.getUser(token);
+        if (authUser) {
+          const { data: prof } = await sbAdmin
+            .from("profiles")
+            .select("*")
+            .eq("id", authUser.id)
+            .maybeSingle();
+          if (prof) {
+            creator.name = prof.username || creator.name;
+            if (prof.avatar) creator.avatar = prof.avatar;
+          }
+        }
+      } catch (e) {
+        console.warn("Auth check error in POST /api/junctions:", e);
+      }
     }
 
     const newJunction = await createJunction({
@@ -60,6 +87,7 @@ export async function POST(request: NextRequest) {
       maxParticipants,
       creator,
       isLocked: !!isLocked,
+      durationType,
     });
 
     return NextResponse.json({ junction: newJunction }, { status: 201 });

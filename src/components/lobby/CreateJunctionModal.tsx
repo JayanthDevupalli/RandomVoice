@@ -4,7 +4,8 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { GuestUser, Junction } from "@/lib/types";
 import { useUser } from "@/hooks/useUser";
-import { X, Plus, Sparkles, Gamepad2, Cpu, Coffee, Music, Languages, Dices, Loader2, Users, Lock, Unlock } from "lucide-react";
+import { supabase } from "@/lib/supabase";
+import { X, Plus, Sparkles, Gamepad2, Cpu, Coffee, Music, Languages, Dices, Loader2, Users, Clock } from "lucide-react";
 
 interface CreateJunctionModalProps {
   isOpen: boolean;
@@ -23,6 +24,16 @@ const CATEGORIES: { id: Junction["category"]; label: string; icon: any }[] = [
   { id: "languages", label: "Language Practice", icon: Languages },
 ];
 
+const DURATION_OPTIONS = [
+  { id: "30m", label: "30 Mins", desc: "Closes automatically after 30 minutes." },
+  { id: "1h", label: "1 Hour", desc: "Closes automatically after 1 hour (Standard)." },
+  { id: "2h", label: "2 Hours", desc: "Closes automatically after 2 hours." },
+  { id: "3h", label: "3 Hours", desc: "Closes automatically after 3 hours." },
+  { id: "24h", label: "1 Day", desc: "Active for 24 hours, then automatically cleans up." },
+  { id: "48h", label: "2 Days", desc: "Active for 48 hours, then automatically cleans up." },
+  { id: "permanent", label: "Permanent ♾️", desc: "Stays active indefinitely until manually deleted." },
+];
+
 export function CreateJunctionModal({ isOpen, onClose, guest, onCreated }: CreateJunctionModalProps) {
   const router = useRouter();
   const { user, isRegistered } = useUser();
@@ -30,7 +41,7 @@ export function CreateJunctionModal({ isOpen, onClose, guest, onCreated }: Creat
   const [description, setDescription] = useState("");
   const [category, setCategory] = useState<Junction["category"]>("casual");
   const [maxParticipants, setMaxParticipants] = useState<number>(2);
-  const [isLocked, setIsLocked] = useState<boolean>(false);
+  const [durationType, setDurationType] = useState<string>("1h");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -51,17 +62,26 @@ export function CreateJunctionModal({ isOpen, onClose, guest, onCreated }: Creat
     setError(null);
 
     try {
-      const creatorName = (isRegistered && user?.isRegistered && user?.username ? user.username : (guest.name || "Guest")).trim();
+      const creatorName = (user?.username || user?.displayName || user?.name || guest?.name || "Guest").trim();
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.access_token) {
+          headers["Authorization"] = `Bearer ${session.access_token}`;
+        }
+      } catch {}
+
       const res = await fetch("/api/junctions", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           name: name.trim(),
           description: description.trim() || `Welcome to ${name.trim()} voice room!`,
           category,
-          tags: ["Custom", category, isLocked ? "Private" : "Public"],
+          tags: ["Custom", category],
           maxParticipants: maxParticipants || 2,
-          isLocked: isLocked,
+          isLocked: false,
+          durationType,
           creator: {
             name: creatorName,
             avatar: (isRegistered && user?.avatar) || guest.avatar || "zap",
@@ -204,51 +224,38 @@ export function CreateJunctionModal({ isOpen, onClose, guest, onCreated }: Creat
             </div>
           </div>
 
-          {/* Private Room (Locked) Toggle */}
-          <div className={`p-3.5 sm:p-4 rounded-xl border transition-all duration-300 ${
-            isLocked
-              ? "bg-amber-500/10 border-amber-500/30 shadow-[0_0_20px_rgba(245,158,11,0.1)]"
-              : "bg-white/5 border-white/10"
-          }`}>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className={`p-2 rounded-xl transition-colors ${
-                  isLocked ? "bg-amber-500/20 text-amber-400" : "bg-white/5 text-slate-400"
-                }`}>
-                  {isLocked ? <Lock size={16} /> : <Unlock size={16} />}
-                </div>
-                <div>
-                  <div className="text-xs sm:text-sm font-semibold text-white flex items-center gap-1.5">
-                    <span>Private Room</span>
-                    {isLocked && (
-                      <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                        Locked
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-[11px] text-slate-400 font-light mt-0.5">
-                    {isLocked
-                      ? "Only people you invite or admit can join"
-                      : "Anyone in YapClub lobby can discover and drop in"}
-                  </p>
-                </div>
-              </div>
-
-              <button
-                type="button"
-                role="switch"
-                aria-checked={isLocked}
-                onClick={() => setIsLocked(!isLocked)}
-                className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                  isLocked ? "bg-amber-500 shadow-md shadow-amber-500/30" : "bg-white/15"
-                }`}
-              >
-                <span
-                  className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
-                    isLocked ? "translate-x-5" : "translate-x-0"
-                  }`}
-                />
-              </button>
+          {/* Room Duration Selector */}
+          <div className="p-3.5 sm:p-4 rounded-xl bg-white/5 border border-white/10 mt-4 sm:mt-5">
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-[10px] font-bold uppercase tracking-widest text-slate-400 flex items-center gap-1.5">
+                <Clock size={12} className="text-indigo-400" />
+                <span>Room Lifespan / Duration</span>
+              </label>
+              <span className="text-xs font-semibold text-indigo-300">
+                {DURATION_OPTIONS.find((d) => d.id === durationType)?.label}
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-400 font-light mb-3">
+              {DURATION_OPTIONS.find((d) => d.id === durationType)?.desc}
+            </p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {DURATION_OPTIONS.map((opt) => {
+                const isSelected = durationType === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setDurationType(opt.id)}
+                    className={`py-2 px-2.5 rounded-xl text-xs font-medium border transition-all duration-200 cursor-pointer flex items-center justify-center text-center ${
+                      isSelected
+                        ? "bg-indigo-600 text-white border-indigo-500 shadow-md shadow-indigo-600/30 ring-1 ring-white/20 font-semibold scale-[1.02]"
+                        : "bg-white/5 border-white/10 text-slate-400 hover:border-white/20 hover:text-white hover:bg-white/10"
+                    }`}
+                  >
+                    <span>{opt.label}</span>
+                  </button>
+                );
+              })}
             </div>
           </div>
 

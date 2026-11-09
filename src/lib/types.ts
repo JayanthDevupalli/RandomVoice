@@ -17,6 +17,18 @@ export interface Junction {
   moderatorIdentity: string;
   isLocked?: boolean;
   bannedIdentities?: string[];
+  expiresAt?: number | null;
+  durationType?: string;
+}
+
+export interface WaitingGuest {
+  id: string;
+  identity: string;
+  name: string;
+  username?: string;
+  avatar: string;
+  color: string;
+  knockedAt: number;
 }
 
 export interface JunctionParticipant {
