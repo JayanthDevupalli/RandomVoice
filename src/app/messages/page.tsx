@@ -29,7 +29,8 @@ import {
   Lock,
   UserPlus,
   Info,
-  Smile
+  Smile,
+  Tag
 } from "lucide-react";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import { useRouter } from "next/navigation";
@@ -43,12 +44,14 @@ import {
   serializeTextMessage, 
   serializeVoiceMessage,
   serializeGifMessage,
+  serializeNicknameMessage,
   getSenderColor,
   getProfileDisplayName,
   isSameDay,
   formatChatDateDivider,
   ParsedMessage,
   MessageReaction,
+  NicknameUpdateData,
   toggleReactionInContent
 } from "@/lib/chat-utils";
 import { QuickReactionPicker, ReactionBadges } from "@/components/chat/MessageReactions";
@@ -76,7 +79,7 @@ function formatGroupSubtitle(
 export default function MessagesPage() {
   const { user, isRegistered, isLoaded } = useUser();
   const { markAsRead, unreadByConversation } = useUnreadMessages();
-  const { onlineUserIds } = useGlobalPresence();
+  const { onlineUserIds, showOnline, setShowOnline } = useGlobalPresence();
   const { startCall, callState, activeCall } = useDMVoiceCall();
   const router = useRouter();
   
@@ -108,6 +111,8 @@ export default function MessagesPage() {
   const [nicknames, setNicknames] = useState<Record<string, string>>({});
   const [isNicknameModalOpen, setIsNicknameModalOpen] = useState(false);
   const [nicknameInput, setNicknameInput] = useState("");
+  const [nicknameTargetUserId, setNicknameTargetUserId] = useState<string | null>(null);
+  const [nicknameTargetName, setNicknameTargetName] = useState<string | null>(null);
 
   const filteredConversations = useMemo(() => {
     return conversations.filter((conv) => {
@@ -478,16 +483,7 @@ export default function MessagesPage() {
       } catch (err) {}
     }
 
-    // 2. Persist to DB conversation_members so future visits reflect seen state
-    Promise.resolve(
-      supabase
-        .from("conversation_members")
-        .update({ last_read_at: safeReadTime })
-        .eq("conversation_id", activeConversationId)
-        .eq("user_id", user.id)
-    ).catch(() => {});
-
-    // 3. Persist to profiles.social_links so peers can read the receipt reliably
+    // 2. Persist to profiles.social_links so peers can read the receipt reliably
     Promise.resolve(
       supabase
         .from("profiles")
@@ -542,6 +538,25 @@ export default function MessagesPage() {
 
   const activeConversation = conversations.find(c => c.id === activeConversationId);
 
+  // Real-time conversation-level nicknames parsed chronologically from messages
+  const conversationNicknames = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const msg of messages) {
+      const parsed = parseMessageContent(msg.content);
+      if (parsed.type === "nickname_update" && parsed.nicknameUpdate) {
+        const { targetUserId, nickname, action } = parsed.nicknameUpdate;
+        if (targetUserId) {
+          if (action === "set" && nickname && nickname.trim()) {
+            map[targetUserId] = nickname.trim();
+          } else if (action === "cleared") {
+            delete map[targetUserId];
+          }
+        }
+      }
+    }
+    return map;
+  }, [messages]);
+
   // Load active group members for header subtitle, online indicators & member management
   const loadActiveGroupMembers = useCallback(async () => {
     if (!activeConversationId || activeConversation?.type !== "group") {
@@ -555,7 +570,6 @@ export default function MessagesPage() {
         .select(`
           user_id,
           role,
-          last_read_at,
           profiles (
             id,
             username,
@@ -571,7 +585,7 @@ export default function MessagesPage() {
         // Fallback flat query if join fails
         const { data: flatMembers } = await supabase
           .from("conversation_members")
-          .select("user_id, role, last_read_at")
+          .select("user_id, role")
           .eq("conversation_id", activeConversationId);
 
         if (flatMembers && flatMembers.length > 0) {
@@ -722,8 +736,9 @@ export default function MessagesPage() {
   const handleSaveNickname = async (targetUserId: string, newNickname: string) => {
     if (!user?.id || !targetUserId) return;
     const updated = { ...nicknames };
-    if (newNickname.trim()) {
-      updated[targetUserId] = newNickname.trim();
+    const trimmedNick = newNickname.trim();
+    if (trimmedNick) {
+      updated[targetUserId] = trimmedNick;
     } else {
       delete updated[targetUserId];
     }
@@ -746,6 +761,8 @@ export default function MessagesPage() {
     }
 
     setIsNicknameModalOpen(false);
+    setNicknameTargetUserId(null);
+    setNicknameTargetName(null);
 
     // 4. Persist to Supabase user_metadata for cloud persistence across logins
     try {
@@ -754,6 +771,59 @@ export default function MessagesPage() {
       });
     } catch (e) {
       console.error("Failed to sync nicknames to Supabase user_metadata:", e);
+    }
+
+    // 5. Send Instagram-style Real-time System Announcement into active conversation
+    if (activeConversationId) {
+      const otherUser = activeConversation?.other_user;
+      const targetDisplayName = otherUser?.id === targetUserId 
+        ? getProfileDisplayName(otherUser, otherUser?.username || "friend")
+        : (user.id === targetUserId ? (user.name || user.displayName || user.username || "You") : (nicknameTargetName || "friend"));
+      
+      const myDisplayName = getProfileDisplayName(user, user.username || "Someone");
+
+      const nicknamePayload: NicknameUpdateData = {
+        setterId: user.id,
+        setterUsername: myDisplayName,
+        targetUserId,
+        targetUsername: targetDisplayName,
+        nickname: trimmedNick,
+        action: trimmedNick ? "set" : "cleared",
+      };
+
+      const serialized = serializeNicknameMessage(nicknamePayload);
+
+      // Optimistic append to message list for instant UI feedback
+      const tempId = `temp-nick-${Date.now()}`;
+      const nowIso = new Date().toISOString();
+      const optimisticMsg = {
+        id: tempId,
+        conversation_id: activeConversationId,
+        sender_id: user.id,
+        content: serialized,
+        created_at: nowIso,
+        profiles: {
+          username: user.username,
+          avatar: user.avatar,
+          social_links: { display_name: myDisplayName },
+        },
+      };
+      setMessages((prev) => [...prev, optimisticMsg]);
+
+      try {
+        await supabase.from("messages").insert({
+          conversation_id: activeConversationId,
+          sender_id: user.id,
+          content: serialized,
+        });
+
+        await supabase
+          .from("conversations")
+          .update({ last_message_at: nowIso })
+          .eq("id", activeConversationId);
+      } catch (err) {
+        console.error("Failed to publish nickname announcement:", err);
+      }
     }
   };
 
@@ -1223,23 +1293,6 @@ export default function MessagesPage() {
             });
           }
         });
-
-      supabase
-        .from("conversation_members")
-        .select("last_read_at")
-        .eq("conversation_id", activeConversationId)
-        .eq("user_id", otherUserId)
-        .maybeSingle()
-        .then(({ data, error }) => {
-          if (!error && data?.last_read_at) {
-            setOtherUserLastReadAt((prev) => {
-              if (!prev || new Date(data.last_read_at).getTime() > new Date(prev).getTime()) {
-                return data.last_read_at;
-              }
-              return prev;
-            });
-          }
-        });
     }
 
     // 2. Realtime presence & broadcast channel (Active for direct and group conversations)
@@ -1365,7 +1418,9 @@ export default function MessagesPage() {
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
           const nowIso = new Date().toISOString();
-          await presenceChannel.track({ user_id: user.id, online_at: Date.now(), last_read_at: nowIso });
+          if (showOnline) {
+            await presenceChannel.track({ user_id: user.id, online_at: Date.now(), last_read_at: nowIso });
+          }
         }
       });
 
@@ -1413,7 +1468,18 @@ export default function MessagesPage() {
       setIsOtherUserConvOnline(false);
       setIsOtherUserTyping(false);
     };
-  }, [activeConversationId, user?.id, activeConversation?.other_user?.id, activeConversation?.type]);
+  }, [activeConversationId, user?.id, activeConversation?.other_user?.id, activeConversation?.type, showOnline]);
+
+  // Dynamically track or untrack on active conversation's presence channel when toggle changes
+  useEffect(() => {
+    if (!presenceChannelRef.current || !user?.id) return;
+    if (showOnline) {
+      const nowIso = new Date().toISOString();
+      presenceChannelRef.current.track({ user_id: user.id, online_at: Date.now(), last_read_at: nowIso }).catch(() => {});
+    } else {
+      presenceChannelRef.current.untrack().catch(() => {});
+    }
+  }, [showOnline, user?.id]);
 
   const isOtherUserOnline = isOtherUserConvOnline || (activeConversation?.other_user?.id ? onlineUserIds.has(activeConversation.other_user.id) : false);
 
@@ -1621,9 +1687,9 @@ export default function MessagesPage() {
           }`}
         >
           {/* Header */}
-          <div className="p-4 border-b border-white/5 bg-background/40 sm:bg-transparent">
-            <div className="flex items-center justify-between mb-3.5">
-              <div className="flex items-center gap-2">
+          <div className="px-3.5 py-2.5 sm:p-4 border-b border-white/5 bg-background/40 sm:bg-transparent">
+            <div className="flex items-center justify-between gap-2 mb-2 sm:mb-3">
+              <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
                 <button 
                   onClick={() => router.push("/junctions")}
                   className="p-1.5 -ml-1.5 rounded-full text-slate-400 hover:text-white hover:bg-white/10 active:scale-95 transition-all"
@@ -1632,16 +1698,56 @@ export default function MessagesPage() {
                 >
                   <ArrowLeft size={18} />
                 </button>
-                <h2 className="text-xl sm:text-lg font-bold text-white tracking-tight">Messages</h2>
+                <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">Messages</h2>
               </div>
-              <button 
-                onClick={() => setIsGroupModalOpen(true)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white text-xs font-semibold transition-all shadow-md"
-                title="New Group"
-              >
-                <Plus size={14} />
-                <span>New Group</span>
-              </button>
+
+              {/* Action Cluster: Online Toggle Switch + New Group */}
+              <div className="flex items-center gap-1.5 sm:gap-2">
+                {/* Sleek inline switch */}
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={showOnline}
+                  onClick={() => setShowOnline(!showOnline)}
+                  className="flex items-center gap-1.5 px-2 sm:px-2.5 py-1 rounded-full bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 transition-colors cursor-pointer select-none"
+                  title={showOnline ? "Status: Online. Click to appear Offline." : "Status: Offline. Click to appear Online."}
+                >
+                  <span className="relative flex h-2 w-2 shrink-0">
+                    {showOnline && (
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                    )}
+                    <span
+                      className={`relative inline-flex rounded-full h-2 w-2 ${
+                        showOnline ? "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]" : "bg-slate-500"
+                      }`}
+                    />
+                  </span>
+                  <span className="text-[11px] font-medium text-slate-300 hidden sm:inline">
+                    {showOnline ? "Online" : "Offline"}
+                  </span>
+                  <div
+                    className={`relative inline-flex h-4 w-7 shrink-0 rounded-full p-0.5 transition-colors duration-200 ease-in-out ${
+                      showOnline ? "bg-emerald-500" : "bg-slate-700/80"
+                    }`}
+                  >
+                    <span
+                      className={`pointer-events-none inline-block h-3 w-3 transform rounded-full bg-white shadow-sm transition-transform duration-200 ease-in-out ${
+                        showOnline ? "translate-x-3" : "translate-x-0"
+                      }`}
+                    />
+                  </div>
+                </button>
+
+                {/* New Group Button */}
+                <button 
+                  onClick={() => setIsGroupModalOpen(true)}
+                  className="flex items-center gap-1 sm:gap-1.5 px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-full bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white text-xs font-semibold transition-all shadow-md shrink-0"
+                  title="New Group"
+                >
+                  <Plus size={14} />
+                  <span>Group</span>
+                </button>
+              </div>
             </div>
 
             {/* Search Bar */}
@@ -1652,7 +1758,7 @@ export default function MessagesPage() {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Search conversations..." 
-                className="w-full pl-9 pr-8 py-2 bg-black/30 border border-white/10 rounded-xl text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-500/50 transition-colors"
+                className="w-full pl-9 pr-8 py-1.5 sm:py-2 bg-black/30 border border-white/10 rounded-xl text-xs sm:text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-500/50 transition-colors"
               />
               {searchQuery && (
                 <button 
@@ -1665,7 +1771,7 @@ export default function MessagesPage() {
             </div>
 
             {/* WhatsApp-Style Chat Filter Pills */}
-            <div className="flex items-center gap-1.5 mt-3 overflow-x-auto no-scrollbar scroll-smooth">
+            <div className="flex items-center gap-1.5 mt-2 sm:mt-2.5 overflow-x-auto no-scrollbar scroll-smooth">
               <button
                 type="button"
                 onClick={() => setChatFilter("all")}
@@ -1908,7 +2014,7 @@ export default function MessagesPage() {
               {(() => {
                 const isGroup = activeConversation?.type === "group";
                 const otherUserId = activeConversation?.other_user?.id;
-                const customNickname = otherUserId ? nicknames[otherUserId] : null;
+                const customNickname = otherUserId ? (nicknames[otherUserId] || conversationNicknames[otherUserId]) : null;
                 const isBlocked = otherUserId ? blockedUsers.includes(otherUserId) : false;
                 const isBlockedByOther = otherUserId ? blockedMeUsers.includes(otherUserId) : false;
                 const shownName = getProfileDisplayName(activeConversation?.other_user, activeConversation?.other_user?.username || "Chat");
@@ -2090,6 +2196,8 @@ export default function MessagesPage() {
                             <>
                               <button
                                 onClick={() => {
+                                  setNicknameTargetUserId(otherUserId);
+                                  setNicknameTargetName(shownName || "Friend");
                                   setNicknameInput(customNickname || "");
                                   setIsNicknameModalOpen(true);
                                   setIsHeaderMenuOpen(false);
@@ -2199,6 +2307,74 @@ export default function MessagesPage() {
                                 <span className="text-[10px] text-slate-500 ml-1 font-mono">
                                   {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                                 </span>
+                              </div>
+                            </div>
+                          </Fragment>
+                        );
+                      }
+
+                      if (parsed.type === "nickname_update" || parsed.nicknameUpdate) {
+                        const update = parsed.nicknameUpdate;
+                        const isSetter = msg.sender_id === user.id || update?.setterId === user.id;
+                        const targetIsMe = update ? update.targetUserId === user.id : false;
+                        const isSet = update ? update.action === "set" && Boolean(update.nickname) : Boolean(parsed.text && !parsed.text.includes("removed"));
+                        const nick = update?.nickname || "";
+                        
+                        // Clean, concise display names (reduced context)
+                        const setterName = isSetter 
+                          ? "You" 
+                          : getProfileDisplayName(msg.profiles, update?.setterUsername || msg.profiles?.username || "Someone");
+
+                        let noticeText = "";
+                        if (nick) {
+                          if (isSetter) {
+                            noticeText = isSet
+                              ? `You set nickname to "${nick}"`
+                              : `You cleared the nickname`;
+                          } else if (targetIsMe) {
+                            noticeText = isSet
+                              ? `${setterName} set your nickname to "${nick}"`
+                              : `${setterName} cleared your nickname`;
+                          } else {
+                            const targetName = update?.targetUsername || "member";
+                            noticeText = isSet
+                              ? `${setterName} set ${targetName}'s nickname to "${nick}"`
+                              : `${setterName} cleared ${targetName}'s nickname`;
+                          }
+                        } else {
+                          noticeText = parsed.text?.replace("🏷️", "").trim() || "Nickname updated";
+                        }
+
+                        return (
+                          <Fragment key={msg.id}>
+                            {isNewDay && dateLabel && (
+                              <div className="w-full flex justify-center my-2.5 select-none pointer-events-none sticky top-1 z-20">
+                                <div className="px-3.5 py-1 rounded-full bg-[#141622]/95 backdrop-blur-md border border-white/10 text-[11px] font-semibold text-slate-300 shadow-md flex items-center gap-1.5 tracking-wide">
+                                  <span>{dateLabel}</span>
+                                </div>
+                              </div>
+                            )}
+                            <div id={`msg-${msg.id}`} className="w-full flex justify-center my-1.5 px-3">
+                              <div className="inline-flex items-center justify-center gap-1.5 px-3 py-1 rounded-full bg-white/[0.04] border border-white/5 text-slate-400 text-[11px] sm:text-xs leading-none shadow-sm max-w-fit text-center">
+                                <Tag size={11} className="text-indigo-400/80 shrink-0" />
+                                <span className="text-slate-300 font-normal">{noticeText}</span>
+                                {isSetter && isSet && (
+                                  <>
+                                    <span className="text-slate-500">·</span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setNicknameTargetUserId(update?.targetUserId || activeConversation?.other_user?.id || null);
+                                        setNicknameTargetName(update?.targetUsername || (activeConversation?.other_user ? getProfileDisplayName(activeConversation.other_user, activeConversation.other_user.username || "Friend") : "Friend"));
+                                        setNicknameInput(nick || "");
+                                        setIsNicknameModalOpen(true);
+                                      }}
+                                      className="text-indigo-400 hover:text-indigo-300 font-semibold cursor-pointer underline underline-offset-2 shrink-0"
+                                    >
+                                      Change
+                                    </button>
+                                  </>
+                                )}
                               </div>
                             </div>
                           </Fragment>
@@ -3062,15 +3238,24 @@ export default function MessagesPage() {
       {isNicknameModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-[#12131A] border border-white/10 rounded-2xl p-5 max-w-sm w-full shadow-2xl">
-            <h3 className="text-base font-bold text-white mb-1">Set Contact Nickname</h3>
+            <div className="flex items-center gap-2 mb-1">
+              <Tag size={18} className="text-indigo-400" />
+              <h3 className="text-base font-bold text-white">
+                {nicknameTargetName
+                  ? `Set Nickname for ${nicknameTargetName}`
+                  : activeConversation?.other_user
+                    ? `Set Nickname for ${getProfileDisplayName(activeConversation.other_user, activeConversation.other_user.username || "Friend")}`
+                    : "Set Contact Nickname"}
+              </h3>
+            </div>
             <p className="text-xs text-slate-400 mb-4">
-              Give this contact a personal nickname. Only you can see this name.
+              Everyone in this chat will be notified and can see this nickname (Instagram style).
             </p>
             <input
               type="text"
               value={nicknameInput}
               onChange={(e) => setNicknameInput(e.target.value)}
-              placeholder="e.g. Bestie, Johnny, Colleague"
+              placeholder="e.g. Bestie, Johnny, Bro"
               maxLength={30}
               className="w-full px-3.5 py-2.5 bg-black/40 border border-white/10 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500/50 mb-4"
               autoFocus
@@ -3078,28 +3263,39 @@ export default function MessagesPage() {
             <div className="flex items-center justify-end gap-2">
               <button
                 type="button"
-                onClick={() => setIsNicknameModalOpen(false)}
-                className="px-3 py-1.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
+                onClick={() => {
+                  setIsNicknameModalOpen(false);
+                  setNicknameTargetUserId(null);
+                  setNicknameTargetName(null);
+                }}
+                className="px-3 py-1.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-white hover:bg-white/5 transition-colors cursor-pointer"
               >
                 Cancel
               </button>
-              {activeConversation?.other_user?.id && nicknames[activeConversation.other_user.id] && (
-                <button
-                  type="button"
-                  onClick={() => handleSaveNickname(activeConversation.other_user.id, "")}
-                  className="px-3 py-1.5 rounded-xl text-xs font-semibold text-rose-400 hover:bg-rose-500/10 transition-colors"
-                >
-                  Clear
-                </button>
-              )}
+              {(() => {
+                const targetId = nicknameTargetUserId || activeConversation?.other_user?.id;
+                if (!targetId) return null;
+                const hasExistingNick = Boolean(nicknames[targetId] || conversationNicknames[targetId]);
+                if (!hasExistingNick) return null;
+                return (
+                  <button
+                    type="button"
+                    onClick={() => handleSaveNickname(targetId, "")}
+                    className="px-3 py-1.5 rounded-xl text-xs font-semibold text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
+                  >
+                    Clear
+                  </button>
+                );
+              })()}
               <button
                 type="button"
                 onClick={() => {
-                  if (activeConversation?.other_user?.id) {
-                    handleSaveNickname(activeConversation.other_user.id, nicknameInput);
+                  const targetId = nicknameTargetUserId || activeConversation?.other_user?.id;
+                  if (targetId) {
+                    handleSaveNickname(targetId, nicknameInput);
                   }
                 }}
-                className="px-4 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-md active:scale-95 transition-all"
+                className="px-4 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-md active:scale-95 transition-all cursor-pointer"
               >
                 Save
               </button>

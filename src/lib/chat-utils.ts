@@ -22,14 +22,24 @@ export interface GroupedReaction {
   hasReacted: boolean;
 }
 
+export interface NicknameUpdateData {
+  setterId: string;
+  setterUsername: string;
+  targetUserId: string;
+  targetUsername: string;
+  nickname: string;
+  action: "set" | "cleared";
+}
+
 export interface ParsedMessage {
-  type: "text" | "voice" | "room_invite" | "gif";
+  type: "text" | "voice" | "room_invite" | "gif" | "nickname_update";
   text?: string;
   audioUrl?: string;
   duration?: number;
   gifUrl?: string;
   gifTitle?: string;
   roomInvite?: RoomInviteData;
+  nicknameUpdate?: NicknameUpdateData;
   replyTo?: {
     id: string;
     sender: string;
@@ -62,11 +72,36 @@ export function parseMessageContent(raw: string): ParsedMessage {
     };
   }
 
-  // 2. Parse JSON formatted messages
+  // 2. Check if raw content is a plain nickname notice
+  if (trimmed.startsWith("🏷️")) {
+    return {
+      type: "nickname_update",
+      text: trimmed,
+    };
+  }
+
+  // 3. Parse JSON formatted messages
   if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
     try {
       const parsed = JSON.parse(trimmed);
       const reactions = Array.isArray(parsed.reactions) ? parsed.reactions : undefined;
+
+      if (parsed.type === "nickname_update" || parsed.nicknameUpdate) {
+        const update: NicknameUpdateData = parsed.nicknameUpdate || {
+          setterId: parsed.setterId || "",
+          setterUsername: parsed.setterUsername || "Someone",
+          targetUserId: parsed.targetUserId || "",
+          targetUsername: parsed.targetUsername || "friend",
+          nickname: parsed.nickname || "",
+          action: parsed.action || (parsed.nickname ? "set" : "cleared"),
+        };
+        return {
+          type: "nickname_update",
+          nicknameUpdate: update,
+          text: parsed.text || (update.action === "set" ? `🏷️ Nickname set to "${update.nickname}"` : `🏷️ Nickname removed`),
+          reactions,
+        };
+      }
 
       if (parsed.type === "gif") {
         return {
@@ -123,6 +158,24 @@ export function parseMessageContent(raw: string): ParsedMessage {
   }
 
   return { type: "text", text: raw };
+}
+
+export function serializeNicknameMessage(data: NicknameUpdateData): string {
+  const isSet = data.action === "set" && Boolean(data.nickname && data.nickname.trim().length > 0);
+  const cleanNick = data.nickname ? data.nickname.trim() : "";
+  const fallbackText = isSet
+    ? `🏷️ Nickname set to "${cleanNick}"`
+    : `🏷️ Nickname cleared`;
+
+  return JSON.stringify({
+    type: "nickname_update",
+    nicknameUpdate: {
+      ...data,
+      nickname: cleanNick,
+      action: isSet ? "set" : "cleared",
+    },
+    text: fallbackText,
+  });
 }
 
 export function serializeTextMessage(
