@@ -1270,15 +1270,26 @@ export function JunctionRoom({
   const isRoomCreator = Boolean(
     isPrivateRoom &&
     !isWaitingRoom &&
-    junction?.creatorId &&
+    (junction?.creatorId || junction?.moderatorIdentity) &&
     (isLocalIdentity(junction.creatorId) ||
-      (myIdentity && junction.creatorId.toLowerCase() === myIdentity.toLowerCase()) ||
-      (user?.username && junction.creatorId.toLowerCase() === user.username.toLowerCase()) ||
-      (guest?.name && junction.creatorId.toLowerCase() === guest.name.toLowerCase()))
+      isLocalIdentity(junction.moderatorIdentity) ||
+      (myIdentity && junction.creatorId && junction.creatorId.toLowerCase() === myIdentity.toLowerCase()) ||
+      (myIdentity && junction.moderatorIdentity && junction.moderatorIdentity.toLowerCase() === myIdentity.toLowerCase()) ||
+      (user?.username && junction.creatorId && junction.creatorId.toLowerCase() === user.username.toLowerCase()) ||
+      (user?.displayName && junction.creatorId && junction.creatorId.toLowerCase() === user.displayName.toLowerCase()) ||
+      (user?.name && junction.creatorId && junction.creatorId.toLowerCase() === user.name.toLowerCase()) ||
+      (user?.id && junction.creatorId && junction.creatorId.toLowerCase() === user.id.toLowerCase()) ||
+      (guest?.name && junction.creatorId && junction.creatorId.toLowerCase() === guest.name.toLowerCase()) ||
+      (guest?.displayName && junction.creatorId && junction.creatorId.toLowerCase() === guest.displayName.toLowerCase()) ||
+      (guest?.id && junction.creatorId && junction.creatorId.toLowerCase() === guest.id.toLowerCase()))
   );
 
   const isHost = Boolean(
     isPrivateRoom && !isWaitingRoom && isRoomCreator
+  );
+
+  const canLockUnlock = Boolean(
+    isPrivateRoom && (isHost || isSuperAdmin)
   );
 
   // Only Super Admin can delete public Junctions.
@@ -1598,16 +1609,22 @@ export function JunctionRoom({
   const [isTogglingLock, setIsTogglingLock] = useState(false);
 
   const handleToggleLock = async () => {
-    if (isTogglingLock || !isPrivateRoom || !isHost) return;
+    if (isTogglingLock || !canLockUnlock) return;
     const targetLockedState = !junction?.isLocked;
     setIsTogglingLock(true);
     try {
+      const authHeaders = await getAuthHeaders();
       const res = await fetch(`/api/junctions/${junctionId}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          ...authHeaders,
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify({
           action: "lock",
           moderatorIdentity: myIdentity,
+          moderatorUserId: user?.id,
+          requesterRole: myPlatformRole,
           isLocked: targetLockedState,
         }),
       });
@@ -3348,13 +3365,19 @@ export function JunctionRoom({
   };
 
   const handleToggleRoomLock = async (isLocked: boolean) => {
-    if (!isCurrentModerator) return;
+    if (!isCurrentModerator && !isSuperAdmin) return;
+    const authHeaders = await getAuthHeaders();
     const res = await fetch(`/api/junctions/${junctionId}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        ...authHeaders,
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify({
         action: "lock",
         moderatorIdentity: myIdentity,
+        moderatorUserId: user?.id,
+        requesterRole: myPlatformRole,
         isLocked,
       }),
     });
@@ -4447,12 +4470,12 @@ export function JunctionRoom({
                       </h1>
 
                       {/* Participant Count / Capacity Pill */}
-                      {isPrivateRoom && isHost ? (
+                      {isPrivateRoom && (isHost || isSuperAdmin) ? (
                         <button
                           type="button"
                           onClick={() => setIsCapacityMenuOpen(!isCapacityMenuOpen)}
                           className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/40 text-xs font-bold transition-all shadow-sm cursor-pointer active:scale-95 shrink-0"
-                          title="Dynamic Room Capacity (Host Feature)"
+                          title="Dynamic Room Capacity"
                         >
                           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                           <span>{participants.length}/{junction?.maxParticipants || 2} Seats</span>
@@ -4495,8 +4518,8 @@ export function JunctionRoom({
                     </button>
                   )}
 
-                  {/* Lock / Unlock Room Control - Host Feature for Private Rooms */}
-                  {isPrivateRoom && isHost && (
+                  {/* Lock / Unlock Room Control - Host Feature & Super Admin Clearance */}
+                  {isPrivateRoom && (isHost || isSuperAdmin) && (
                     <button
                       type="button"
                       onClick={handleToggleLock}
@@ -4522,7 +4545,7 @@ export function JunctionRoom({
                   )}
 
                   {/* Room Locked indicator for fellow users in private room */}
-                  {isPrivateRoom && !isHost && junction?.isLocked && (
+                  {isPrivateRoom && !isHost && !isSuperAdmin && junction?.isLocked && (
                     <div
                       className="h-8 sm:h-9 px-2.5 sm:px-3 rounded-full flex items-center gap-1.5 bg-amber-500/15 border border-amber-400/30 text-amber-300 text-[11px] font-semibold shrink-0"
                       title="This private room is locked by the host"
@@ -4693,7 +4716,7 @@ export function JunctionRoom({
                 {/* Row 2: Status & Settings Ribbon (Fluid horizontal strip, no collision!) */}
                 <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
                   {/* Capacity Pill */}
-                  {isPrivateRoom && isHost ? (
+                  {isPrivateRoom && (isHost || isSuperAdmin) ? (
                     <button
                       type="button"
                       onClick={() => setIsCapacityMenuOpen(!isCapacityMenuOpen)}
@@ -4712,7 +4735,7 @@ export function JunctionRoom({
                   )}
 
                   {/* Lock Status / Toggle Pill */}
-                  {isPrivateRoom && isHost && (
+                  {isPrivateRoom && (isHost || isSuperAdmin) && (
                     <button
                       type="button"
                       onClick={handleToggleLock}
@@ -4737,7 +4760,7 @@ export function JunctionRoom({
                     </button>
                   )}
 
-                  {isPrivateRoom && !isHost && junction?.isLocked && (
+                  {isPrivateRoom && !isHost && !isSuperAdmin && junction?.isLocked && (
                     <div
                       className="h-6 px-2 rounded-full flex items-center gap-1 bg-amber-500/15 border border-amber-400/30 text-amber-300 text-[10px] font-semibold shrink-0"
                       title="Room locked by host"

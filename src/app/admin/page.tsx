@@ -103,6 +103,7 @@ export default function AdminPortalPage() {
   const [deskSearch, setDeskSearch] = useState("");
   const [isActioningReport, setIsActioningReport] = useState<string | null>(null);
   const [isSanitizingBans, setIsSanitizingBans] = useState(false);
+  const [unlockingRoomId, setUnlockingRoomId] = useState<string | null>(null);
 
   // Confirmation Modals
   const [pendingAction, setPendingAction] = useState<{
@@ -439,6 +440,40 @@ export default function AdminPortalPage() {
       showToast("error", err.message);
     } finally {
       setIsSubmittingAction(false);
+    }
+  };
+
+  // Handle Room Unlock (Super Admin & Admin Clearance)
+  const handleUnlockRoom = async (junctionId: string) => {
+    if (unlockingRoomId) return;
+    setUnlockingRoomId(junctionId);
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch("/api/admin/rooms", {
+        method: "PATCH",
+        headers: {
+          ...headers,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          junctionId,
+          isLocked: false,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || "Failed to unlock room");
+      }
+
+      showToast("success", "Room unlocked successfully");
+      setRooms((prev) =>
+        prev.map((r) => (r.id === junctionId ? { ...r, isLocked: false } : r))
+      );
+    } catch (err: any) {
+      showToast("error", err.message || "Failed to unlock room");
+    } finally {
+      setUnlockingRoomId(null);
     }
   };
 
@@ -1898,20 +1933,33 @@ export default function AdminPortalPage() {
                         </div>
                       </div>
 
-                      {/* Terminate Room Button */}
-                      <button
-                        onClick={() => {
-                          setPendingAction({
-                            type: "delete_room",
-                            targetId: room.id,
-                            targetName: room.name,
-                          });
-                        }}
-                        className="w-full py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/20 text-rose-300 font-semibold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                      >
-                        <Trash2 size={12} />
-                        <span>Force Terminate</span>
-                      </button>
+                      {/* Action Buttons: Unlock (Super Admin) & Force Terminate */}
+                      <div className="flex items-center gap-2 mt-2">
+                        {isLocked && (
+                          <button
+                            onClick={() => handleUnlockRoom(room.id)}
+                            disabled={unlockingRoomId === room.id}
+                            className="flex-1 py-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 font-semibold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                            title="Unlock this room as Super Admin"
+                          >
+                            <Unlock size={12} />
+                            <span>{unlockingRoomId === room.id ? "Unlocking..." : "Unlock Room"}</span>
+                          </button>
+                        )}
+                        <button
+                          onClick={() => {
+                            setPendingAction({
+                              type: "delete_room",
+                              targetId: room.id,
+                              targetName: room.name,
+                            });
+                          }}
+                          className={`${isLocked ? "flex-1" : "w-full"} py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/20 text-rose-300 font-semibold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer`}
+                        >
+                          <Trash2 size={12} />
+                          <span>Force Terminate</span>
+                        </button>
+                      </div>
                     </div>
                   );
                 })

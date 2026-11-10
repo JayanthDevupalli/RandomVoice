@@ -285,12 +285,18 @@ export default function JunctionsPage() {
     };
     window.addEventListener("focus", handleFocus);
 
+    const handleRoomUnlocked = () => {
+      triggerDebouncedFetch();
+    };
+    window.addEventListener("yapclub_room_unlocked", handleRoomUnlocked);
+
     return () => {
       if (abortController) abortController.abort();
       if (debounceTimer) clearTimeout(debounceTimer);
       clearTimeout(timeoutId);
       window.removeEventListener("focus", handleFocus);
       window.removeEventListener("yapclub_junction_left", handleJunctionLeft);
+      window.removeEventListener("yapclub_room_unlocked", handleRoomUnlocked);
       supabase.removeChannel(globalPresenceChannel);
       supabase.removeChannel(channel);
     };
@@ -315,6 +321,26 @@ export default function JunctionsPage() {
     return (typeof j.id === "string" && j.id.startsWith("station_")) || (Array.isArray(j.tags) && j.tags.includes("Public"));
   };
 
+  const isSuperAdmin = user?.role === "super_admin";
+
+  const isRoomCreator = (j: Junction) => {
+    const creatorIdentifier = (j.creatorId || j.moderatorIdentity || "").trim().toLowerCase();
+    if (!creatorIdentifier) return false;
+    const userAliases = [
+      user?.username,
+      user?.displayName,
+      user?.name,
+      user?.id,
+      guest?.name,
+      guest?.displayName,
+      guest?.username,
+      guest?.id,
+    ]
+      .filter(Boolean)
+      .map((a) => a!.trim().toLowerCase());
+    return userAliases.includes(creatorIdentifier);
+  };
+
   const filteredJunctions = junctions
     .filter((j) => {
       const matchesCategory =
@@ -328,11 +354,28 @@ export default function JunctionsPage() {
         (Array.isArray(j.tags) && j.tags.some((t) => t.toLowerCase().includes(searchQuery.toLowerCase())));
       return matchesCategory && matchesSearch;
     })
-    .sort((a, b) => (b.participants?.length ?? b.currentCount) - (a.participants?.length ?? a.currentCount));
+    .sort((a, b) => {
+      // Prioritize creator's own rooms (especially if locked) at top of private list so creator can immediately find their room
+      if (activeTab === "private") {
+        const aMine = isRoomCreator(a);
+        const bMine = isRoomCreator(b);
+        if (aMine && !bMine) return -1;
+        if (!aMine && bMine) return 1;
+      }
+      return (b.participants?.length ?? b.currentCount) - (a.participants?.length ?? a.currentCount);
+    });
 
   const now = Date.now();
   const publicStations = filteredJunctions.filter(isPublicJunction);
-  const userRooms = filteredJunctions.filter((j) => !isPublicJunction(j) && !j.isLocked && (!j.expiresAt || j.expiresAt > now));
+  const userRooms = filteredJunctions.filter((j) => {
+    if (isPublicJunction(j)) return false;
+    if (j.expiresAt && j.expiresAt <= now) return false;
+    // Even if locked, ONLY the creator (and Super Admin) can see their created room!
+    if (j.isLocked) {
+      return isRoomCreator(j) || isSuperAdmin;
+    }
+    return true;
+  });
   const currentTabRooms = activeTab === "public" ? publicStations : userRooms;
 
   if (!isLoaded || !guest) {

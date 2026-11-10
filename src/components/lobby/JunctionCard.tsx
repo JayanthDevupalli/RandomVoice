@@ -14,6 +14,7 @@ import {
   Mic,
   ArrowRight,
   Lock,
+  Unlock,
   Trash2,
   Loader2,
   MapPin,
@@ -113,16 +114,64 @@ export const JunctionCard = React.memo(
     const isPrivate = !isPublic;
     const isSuperAdmin = user?.role === "super_admin";
     const isRoomCreator = Boolean(
-      junction.creatorId && [
+      (junction.creatorId || junction.moderatorIdentity) && [
         user?.username,
         user?.displayName,
         user?.name,
         user?.id,
         guest?.name,
         guest?.displayName,
+        guest?.username,
         guest?.id,
-      ].some((alias) => alias && alias.trim().toLowerCase() === junction.creatorId?.trim().toLowerCase())
+      ].some((alias) => {
+        const clean = alias?.trim().toLowerCase();
+        return clean && (
+          clean === junction.creatorId?.trim().toLowerCase() ||
+          clean === junction.moderatorIdentity?.trim().toLowerCase()
+        );
+      })
     );
+
+    const [isUnlocking, setIsUnlocking] = useState(false);
+
+    const handleUnlockRoom = async (e: React.MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (isUnlocking) return;
+      try {
+        setIsUnlocking(true);
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        try {
+          const { data: { session } } = await supabase.auth.getSession();
+          if (session?.access_token) {
+            headers["Authorization"] = `Bearer ${session.access_token}`;
+          }
+        } catch {}
+
+        const myIdentity = (user?.username || user?.displayName || user?.name || guest?.name || "User").trim();
+        const res = await fetch(`/api/junctions/${junction.id}`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            action: "lock",
+            moderatorIdentity: myIdentity,
+            moderatorUserId: user?.id,
+            requesterRole: user?.role || "user",
+            isLocked: false,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || "Failed to unlock room");
+        }
+        window.dispatchEvent(new CustomEvent("yapclub_room_unlocked", { detail: { junctionId: junction.id } }));
+      } catch (err: any) {
+        console.error("Failed to unlock room:", err);
+        alert(err.message || "Failed to unlock room");
+      } finally {
+        setIsUnlocking(false);
+      }
+    };
 
     // Only Super Admin can delete public Junctions.
     // In private rooms, can delete by room creator or Super Admin.
@@ -179,7 +228,7 @@ export const JunctionCard = React.memo(
         <div className="absolute inset-x-0 top-0 h-[1px] bg-gradient-to-r from-transparent via-white/[0.12] to-transparent pointer-events-none" />
 
         {/* Card link overlay for effortless click-to-join */}
-        {!user?.isBanned && !isLocked && !isFull && (
+        {!user?.isBanned && (!isLocked || isRoomCreator || isSuperAdmin) && !isFull && (
           <Link
             href={`/junction/${junction.id}`}
             onClick={() => {
@@ -217,9 +266,11 @@ export const JunctionCard = React.memo(
 
             <div className="flex items-center gap-2 shrink-0 pointer-events-auto">
               {isLocked && (
-                <span className="inline-flex items-center gap-1 text-[11px] text-rose-400 font-medium">
+                <span className={`inline-flex items-center gap-1 text-[11px] font-medium ${
+                  isRoomCreator ? "text-amber-300" : isSuperAdmin ? "text-indigo-300" : "text-rose-400"
+                }`}>
                   <Lock size={10} />
-                  <span>Locked</span>
+                  <span>{isRoomCreator ? "Locked (Your Room)" : isSuperAdmin ? "Locked (Admin Access)" : "Locked"}</span>
                 </span>
               )}
 
@@ -338,13 +389,35 @@ export const JunctionCard = React.memo(
                 <span>Full</span>
               </button>
             ) : isLocked ? (
-              <button
-                disabled
-                className="py-1.5 px-3 rounded-lg bg-white/[0.04] border border-white/[0.08] text-rose-400/90 font-medium text-xs flex items-center gap-1 cursor-not-allowed"
-              >
-                <Lock size={11} />
-                <span>Locked</span>
-              </button>
+              isSuperAdmin || isRoomCreator ? (
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={handleUnlockRoom}
+                    disabled={isUnlocking}
+                    className="py-1.5 px-2.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 font-medium text-xs flex items-center gap-1 transition-all cursor-pointer shadow-sm active:scale-95"
+                    title={isSuperAdmin ? "Unlock this room as Super Admin" : "Unlock your room"}
+                  >
+                    <Unlock size={11} />
+                    <span>{isUnlocking ? "..." : "Unlock"}</span>
+                  </button>
+                  <Link
+                    href={`/junction/${junction.id}`}
+                    className="group/btn relative py-1.5 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs flex items-center gap-1 shadow-sm shadow-indigo-600/30 active:scale-95 transition-all"
+                  >
+                    <Mic size={11} className="text-indigo-200 group-hover/btn:text-white transition-colors" />
+                    <span>{isRoomCreator ? "Re-enter" : "Enter"}</span>
+                  </Link>
+                </div>
+              ) : (
+                <button
+                  disabled
+                  className="py-1.5 px-3 rounded-lg bg-white/[0.04] border border-white/[0.08] text-rose-400/90 font-medium text-xs flex items-center gap-1 cursor-not-allowed"
+                >
+                  <Lock size={11} />
+                  <span>Locked</span>
+                </button>
+              )
             ) : (
               <Link
                 href={`/junction/${junction.id}`}

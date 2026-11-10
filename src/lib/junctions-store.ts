@@ -881,11 +881,15 @@ export async function addParticipantToJunction(
     (typeof junction.id === "string" && junction.id.startsWith("junc_"))
   );
   const cleanCreator = (junction.creatorId || "").trim().toLowerCase();
+  const cleanModIdentity = (junction.moderatorIdentity || "").trim().toLowerCase();
   const cleanUsername = (participant.username || "").trim().toLowerCase();
   const cleanName = (participant.name || "").trim().toLowerCase();
+  const cleanDbId = (participant.id || "").trim().toLowerCase();
+  const cleanDisplayName = (participant.displayName || "").trim().toLowerCase();
   const isCreator = Boolean(
-    isPrivate && cleanCreator &&
-    (cleanParticipantIdentity === cleanCreator || cleanUsername === cleanCreator || cleanName === cleanCreator)
+    isPrivate &&
+    ((cleanCreator && (cleanParticipantIdentity === cleanCreator || cleanUsername === cleanCreator || cleanName === cleanCreator || cleanDbId === cleanCreator || cleanDisplayName === cleanCreator)) ||
+     (cleanModIdentity && (cleanParticipantIdentity === cleanModIdentity || cleanUsername === cleanModIdentity || cleanName === cleanModIdentity || cleanDbId === cleanModIdentity || cleanDisplayName === cleanModIdentity)))
   );
 
   const isAdmitted =
@@ -894,7 +898,9 @@ export async function addParticipantToJunction(
     isIdentityAdmitted(junctionId, cleanName) ||
     isIdentityAdmitted(junctionId, participant.id);
 
-  if (junction.isLocked && !isAlreadyPresent && !isCreator && !isAdmitted) {
+  const isSuperAdmin = participant.userRole === "super_admin";
+
+  if (junction.isLocked && !isAlreadyPresent && !isCreator && !isAdmitted && !isSuperAdmin) {
     return { success: false, error: "This room is locked by the host.", isLocked: true };
   }
 
@@ -1065,12 +1071,22 @@ export async function removeParticipantFromJunction(
 
   await syncCount(junctionId);
 
-  // Clear moderator_identity and auto-unlock if room is empty
+  // Clear moderator_identity and auto-unlock ONLY if public station is empty.
+  // For private rooms created by users, preserve creator's locked room state so
+  // if creator locks and exits, their room remains safely locked and found by creator / Super Admin!
   const junction = await fetchJunctionWithParticipants(junctionId);
   if (junction && junction.participants.length === 0) {
+    const isPrivate = Boolean(
+      junction.isCustom ||
+      junction.creatorId ||
+      (typeof junction.id === "string" && junction.id.startsWith("junc_"))
+    );
     await supabase
       .from("junctions")
-      .update({ moderator_identity: "", current_count: 0, is_locked: false })
+      .update({
+        current_count: 0,
+        ...(isPrivate ? {} : { moderator_identity: "", is_locked: false }),
+      })
       .eq("id", junctionId);
     waitingGuestsByJunction.delete(junctionId);
     admittedIdentitiesByJunction.delete(junctionId);
@@ -1429,7 +1445,9 @@ export async function updateJunctionDetails(
 export async function toggleRoomLock(
   junctionId: string,
   moderatorIdentity: string,
-  isLocked: boolean
+  isLocked: boolean,
+  callerRoleParam?: string,
+  moderatorUserId?: string
 ): Promise<{ success: boolean; error?: string; isLocked?: boolean; junction?: Junction }> {
   const junction = await fetchJunctionWithParticipants(junctionId);
 
@@ -1443,16 +1461,43 @@ export async function toggleRoomLock(
     (typeof junction.id === "string" && junction.id.startsWith("junc_"))
   );
 
-  if (!isPrivate) {
+  // Locking a public station is disallowed, but unlocking can be done if room is locked
+  if (!isPrivate && isLocked) {
     return { success: false, error: "Cannot lock a public station" };
   }
 
+  // Determine platform role of the caller
+  let callerRole: UserRole = resolvePlatformRole(moderatorIdentity, callerRoleParam);
+  if (callerRole === "user") {
+    try {
+      let query = supabase.from("profiles").select("*");
+      if (moderatorUserId && isUUID(moderatorUserId)) {
+        query = query.or(`id.eq.${moderatorUserId},username.ilike.${moderatorIdentity}`);
+      } else {
+        query = query.ilike("username", moderatorIdentity);
+      }
+      const { data: callerProf } = await query.maybeSingle();
+
+      if (callerProf) {
+        callerRole = resolvePlatformRole(callerProf.username, callerProf.role || callerProf.social_links?.role);
+      }
+    } catch (e) {
+      console.error("Error resolving caller platform role in toggleRoomLock:", e);
+    }
+  }
+
+  const isSuperAdmin = callerRole === "super_admin";
+  const isStaff = isSuperAdmin || callerRole === "admin" || callerRole === "manager";
+
   const cleanModId = (moderatorIdentity || "").trim().toLowerCase();
   const cleanCreator = (junction.creatorId || "").trim().toLowerCase();
-  const callerRole = resolvePlatformRole(moderatorIdentity);
-  const isStaff = callerRole === "super_admin" || callerRole === "admin" || callerRole === "manager";
+  const cleanModIdentity = (junction.moderatorIdentity || "").trim().toLowerCase();
+  const cleanUserId = (moderatorUserId || "").trim().toLowerCase();
 
-  const isCreator = Boolean(cleanCreator && cleanModId === cleanCreator);
+  const isCreator = Boolean(
+    (cleanCreator && (cleanModId === cleanCreator || (cleanUserId && cleanUserId === cleanCreator))) ||
+    (cleanModIdentity && (cleanModId === cleanModIdentity || (cleanUserId && cleanUserId === cleanModIdentity)))
+  );
 
   let isMod = false;
   if (!isCreator && !isStaff) {
@@ -1465,14 +1510,34 @@ export async function toggleRoomLock(
     isMod = modParticipant?.role === "moderator";
   }
 
+  // Super Admin has authority to lock/unlock any room. Room hosts / mods can lock/unlock private rooms.
   if (!isCreator && !isMod && !isStaff) {
-    return { success: false, error: "Unauthorized: Only the room host can lock or unlock the room" };
+    return { success: false, error: "Unauthorized: Only the room host or Super Admin can lock or unlock the room" };
   }
 
   await supabase
     .from("junctions")
     .update({ is_locked: isLocked })
     .eq("id", junctionId);
+
+  // Broadcast realtime event so all active clients update instantly
+  try {
+    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+    const sb = (serviceKey && url)
+      ? createClient(url, serviceKey, { auth: { autoRefreshToken: false, persistSession: false } })
+      : supabase;
+    sb.channel(`room_realtime_${junctionId}`).send({
+      type: "broadcast",
+      event: "room_updated",
+      payload: {
+        type: "room_lock_updated",
+        payload: { isLocked },
+      },
+    }).then();
+  } catch (broadcastErr) {
+    console.warn("Failed to broadcast room_lock_updated:", broadcastErr);
+  }
 
   const updated = await fetchJunctionWithParticipants(junctionId);
   invalidateJunctionsCache();

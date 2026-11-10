@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { supabase as anonSupabase } from "@/lib/supabase";
-import { getAllJunctions, deleteJunction } from "@/lib/junctions-store";
+import { getAllJunctions, deleteJunction, toggleRoomLock } from "@/lib/junctions-store";
 
 export const dynamic = "force-dynamic";
 
@@ -124,6 +124,37 @@ export async function DELETE(request: NextRequest) {
     });
   } catch (err: any) {
     console.error("Admin room DELETE error:", err);
+    return NextResponse.json({ error: err.message }, { status: 500 });
+  }
+}
+
+// PATCH: Lock or Unlock room (Super Admin & Admin authority)
+export async function PATCH(request: NextRequest) {
+  try {
+    const auth = await verifyAdminAuth(request);
+    if (!auth.authorized || (auth.role !== "super_admin" && auth.role !== "admin")) {
+      return NextResponse.json({ error: "Unauthorized: Admin privileges required to modify room lock" }, { status: 403 });
+    }
+
+    const body = await request.json();
+    const { junctionId, isLocked } = body;
+
+    if (!junctionId || typeof isLocked !== "boolean") {
+      return NextResponse.json({ error: "Missing junctionId or isLocked parameter" }, { status: 400 });
+    }
+
+    const result = await toggleRoomLock(junctionId, auth.username || "super_admin", isLocked, auth.role);
+    if (!result.success) {
+      return NextResponse.json({ error: result.error }, { status: 400 });
+    }
+
+    return NextResponse.json({
+      success: true,
+      message: isLocked ? "Room locked successfully" : "Room unlocked successfully",
+      junction: result.junction,
+    });
+  } catch (err: any) {
+    console.error("Admin room PATCH error:", err);
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
