@@ -225,6 +225,7 @@ function LiveKitDataSync({
   onParticipantSync,
   onRemoteParticipantsChange,
   onParticipantLeave,
+  onParticipantJoin,
   isMuted,
   isMutedByMod,
   isDeafened,
@@ -236,7 +237,8 @@ function LiveKitDataSync({
   onSpeakingChange: (speakingIdentities: string[]) => void;
   onParticipantSync?: () => void;
   onRemoteParticipantsChange?: (participants: JunctionParticipant[]) => void;
-  onParticipantLeave?: (identity: string) => void;
+  onParticipantLeave?: (identity: string, extraId?: string) => void;
+  onParticipantJoin?: (identity: string, extraId?: string) => void;
   isMuted: boolean;
   isMutedByMod: boolean;
   isDeafened: boolean;
@@ -259,7 +261,7 @@ function LiveKitDataSync({
         id: meta.id || rp.sid || rp.identity,
         identity: rp.identity,
         username: meta.username || rp.identity,
-        name: rp.name || meta.name || meta.displayName || rp.identity,
+        name: rp.name || meta.displayName || meta.name || rp.identity,
         displayName: rp.name || meta.displayName || meta.name || rp.identity,
         avatar: meta.avatar || "zap",
         color: meta.color || "#6366F1",
@@ -301,23 +303,37 @@ function LiveKitDataSync({
       onParticipantSync?.();
     };
 
+    const handleParticipantConnected = (remotePeer: any) => {
+      if (remotePeer?.identity || remotePeer?.sid) {
+        onParticipantJoin?.(remotePeer.identity, remotePeer.sid);
+      }
+      onParticipantSync?.();
+    };
+
     const handleParticipantDisconnected = (remotePeer: any) => {
-      if (remotePeer?.identity) {
-        onParticipantLeave?.(remotePeer.identity);
+      const pIdentity = remotePeer?.identity;
+      const pSid = remotePeer?.sid;
+      if (pIdentity || pSid) {
+        onParticipantLeave?.(pIdentity, pSid);
         // Peer-assisted eviction: when a remote peer abruptly drops or closes their tab, notify the server immediately
         fetch(`/api/junctions/${junctionId}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             action: "leave",
-            identity: remotePeer.identity,
-            participantId: remotePeer.identity,
+            identity: pIdentity,
+            participantId: pSid,
           }),
-        }).catch(() => { });
+        })
+          .catch(() => { })
+          .finally(() => {
+            onParticipantSync?.();
+          });
+      } else {
+        onParticipantSync?.();
       }
-      onParticipantSync?.();
       if (room && room.state === ConnectionState.Connected) {
-        publishRef.current?.({ type: "room_participant_left", payload: { identity: remotePeer?.identity } });
+        publishRef.current?.({ type: "room_participant_left", payload: { identity: pIdentity, id: pSid } });
       }
     };
 
@@ -326,7 +342,7 @@ function LiveKitDataSync({
     };
 
     room.on(RoomEvent.Connected, handleParticipantChange);
-    room.on(RoomEvent.ParticipantConnected, handleParticipantChange);
+    room.on(RoomEvent.ParticipantConnected, handleParticipantConnected);
     room.on(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
     room.on(RoomEvent.ParticipantMetadataChanged, handleMetadataChange);
 
@@ -334,11 +350,11 @@ function LiveKitDataSync({
       room.off(RoomEvent.DataReceived, handleData);
       room.off(RoomEvent.ActiveSpeakersChanged, handleActiveSpeakers);
       room.off(RoomEvent.Connected, handleParticipantChange);
-      room.off(RoomEvent.ParticipantConnected, handleParticipantChange);
+      room.off(RoomEvent.ParticipantConnected, handleParticipantConnected);
       room.off(RoomEvent.ParticipantDisconnected, handleParticipantDisconnected);
       room.off(RoomEvent.ParticipantMetadataChanged, handleMetadataChange);
     };
-  }, [room, junctionId, onMessage, onSpeakingChange, onParticipantSync, onParticipantLeave, publishRef]);
+  }, [room, junctionId, onMessage, onSpeakingChange, onParticipantSync, onParticipantLeave, onParticipantJoin, publishRef]);
 
   useEffect(() => {
     if (localParticipant) {
@@ -553,6 +569,37 @@ export function JunctionRoom({
   const hasJoinedSuccessfullyRef = useRef<boolean>(false);
   const localJoinedAtRef = useRef<number>(Date.now());
   const hasSentUnloadBeacon = useRef<boolean>(false);
+  const departedIdentitiesRef = useRef<Set<string>>(new Set());
+
+  const markParticipantDeparted = useCallback((...identifiers: (string | undefined | null)[]) => {
+    identifiers.forEach((id) => {
+      if (id) {
+        const clean = id.toLowerCase().trim();
+        if (clean) departedIdentitiesRef.current.add(clean);
+      }
+    });
+  }, []);
+
+  const unmarkParticipantDeparted = useCallback((...identifiers: (string | undefined | null)[]) => {
+    identifiers.forEach((id) => {
+      if (id) {
+        const clean = id.toLowerCase().trim();
+        if (clean) departedIdentitiesRef.current.delete(clean);
+      }
+    });
+  }, []);
+
+  const isDeparted = useCallback((p?: { id?: string; identity?: string; username?: string; name?: string } | null) => {
+    if (!p) return false;
+    if (isLocalParticipant(p)) return false;
+    const set = departedIdentitiesRef.current;
+    if (set.size === 0) return false;
+    if (p.identity && set.has(p.identity.toLowerCase().trim())) return true;
+    if (p.username && set.has(p.username.toLowerCase().trim())) return true;
+    if (p.id && set.has(p.id.toLowerCase().trim())) return true;
+    if (p.name && set.has(p.name.toLowerCase().trim())) return true;
+    return false;
+  }, [isLocalParticipant]);
 
   // User platform clearance & identity - guests NEVER receive elevated platform roles
   const myParticipant = participants.find((p) => isLocalParticipant(p));
@@ -1771,7 +1818,8 @@ export function JunctionRoom({
           setWaitingKnocks([]);
         }
         setParticipants((prev) => {
-          const serverParticipants: JunctionParticipant[] = pollData.junction.participants || [];
+          const rawServerParticipants: JunctionParticipant[] = pollData.junction.participants || [];
+          const serverParticipants = rawServerParticipants.filter((sp) => !isDeparted(sp));
           const localInServer = serverParticipants.some((sp) => isLocalParticipant(sp));
 
           let updated = serverParticipants.map((sp: JunctionParticipant) => {
@@ -2097,7 +2145,9 @@ export function JunctionRoom({
 
         // Instant room ejection for all peers with zero lag
         if (action === "kick" || action === "ban") {
+          markParticipantDeparted(targetIdentity);
           setParticipants((prev) => prev.filter((p) => p.identity?.toLowerCase() !== targetIdentity?.toLowerCase() && !isLocalIdentity(targetIdentity)));
+          setLiveKitRemoteParticipants((prev) => prev.filter((p) => p.identity?.toLowerCase() !== targetIdentity?.toLowerCase() && !isLocalIdentity(targetIdentity)));
         }
 
         pollJunction();
@@ -2192,6 +2242,7 @@ export function JunctionRoom({
         }
       } else if (type === "room_participant_joined" && payload?.participant) {
         const newP: JunctionParticipant = payload.participant;
+        unmarkParticipantDeparted(newP.identity, newP.id, newP.username);
         const cleanTarget = (newP.identity || "").toLowerCase().trim();
         const cleanId = (newP.id || "").toLowerCase().trim();
         if (cleanTarget || cleanId) {
@@ -2218,12 +2269,24 @@ export function JunctionRoom({
         const cleanTarget = (payload.identity || "").toLowerCase().trim();
         const cleanId = (payload.id || "").toLowerCase().trim();
         if (cleanTarget || cleanId) {
+          markParticipantDeparted(cleanTarget, cleanId);
           setParticipants((prev) =>
             prev.filter((p) => {
               const pIdent = (p.identity || "").toLowerCase().trim();
               const pId = (p.id || "").toLowerCase().trim();
-              if (cleanTarget && pIdent === cleanTarget) return false;
-              if (cleanId && pId === cleanId) return false;
+              const pUser = (p.username || "").toLowerCase().trim();
+              if (cleanTarget && (pIdent === cleanTarget || pId === cleanTarget || pUser === cleanTarget)) return false;
+              if (cleanId && (pIdent === cleanId || pId === cleanId || pUser === cleanId)) return false;
+              return true;
+            })
+          );
+          setLiveKitRemoteParticipants((prev) =>
+            prev.filter((p) => {
+              const pIdent = (p.identity || "").toLowerCase().trim();
+              const pId = (p.id || "").toLowerCase().trim();
+              const pUser = (p.username || "").toLowerCase().trim();
+              if (cleanTarget && (pIdent === cleanTarget || pId === cleanTarget || pUser === cleanTarget)) return false;
+              if (cleanId && (pIdent === cleanId || pId === cleanId || pUser === cleanId)) return false;
               return true;
             })
           );
@@ -2389,14 +2452,32 @@ export function JunctionRoom({
     }
   }, [isLocalIdentity, isLocalParticipant, junctionId, user?.id, guest?.id, refreshUser, pollJunction, isPrivateRoom, mediaStream, broadcastRoomUpdate]);
 
-  const handleParticipantLeave = useCallback((ident: string) => {
-    const clean = ident.toLowerCase().trim();
-    if (!clean) return;
+  const handleParticipantLeave = useCallback((ident?: string, extraId?: string) => {
+    const clean = (ident || "").toLowerCase().trim();
+    const cleanExtra = (extraId || "").toLowerCase().trim();
+    if (!clean && !cleanExtra) return;
+
+    markParticipantDeparted(clean, cleanExtra);
+
     setParticipants((prev) =>
       prev.filter((p) => {
         const pIdent = (p.identity || "").toLowerCase().trim();
         const pId = (p.id || "").toLowerCase().trim();
-        return pIdent !== clean && pId !== clean;
+        const pUser = (p.username || "").toLowerCase().trim();
+        if (clean && (pIdent === clean || pId === clean || pUser === clean)) return false;
+        if (cleanExtra && (pIdent === cleanExtra || pId === cleanExtra || pUser === cleanExtra)) return false;
+        return true;
+      })
+    );
+
+    setLiveKitRemoteParticipants((prev) =>
+      prev.filter((p) => {
+        const pIdent = (p.identity || "").toLowerCase().trim();
+        const pId = (p.id || "").toLowerCase().trim();
+        const pUser = (p.username || "").toLowerCase().trim();
+        if (clean && (pIdent === clean || pId === clean || pUser === clean)) return false;
+        if (cleanExtra && (pIdent === cleanExtra || pId === cleanExtra || pUser === cleanExtra)) return false;
+        return true;
       })
     );
 
@@ -2404,8 +2485,8 @@ export function JunctionRoom({
     const cleanHolderId = (musicStateRef.current.auxHolderIdentity || "").toLowerCase().trim();
     const cleanHolderName = (musicStateRef.current.auxHolderName || "").toLowerCase().trim();
     if (
-      (cleanHolderId && (cleanHolderId === clean)) ||
-      (cleanHolderName && (cleanHolderName === clean))
+      (cleanHolderId && (cleanHolderId === clean || (cleanExtra && cleanHolderId === cleanExtra))) ||
+      (cleanHolderName && (cleanHolderName === clean || (cleanExtra && cleanHolderName === cleanExtra)))
     ) {
       setMusicState((prev) => ({
         ...prev,
@@ -2415,10 +2496,14 @@ export function JunctionRoom({
       }));
       broadcastRoomUpdate({
         type: "music_aux_release",
-        payload: { previousIdentity: musicStateRef.current.auxHolderIdentity || clean },
+        payload: { previousIdentity: musicStateRef.current.auxHolderIdentity || clean || cleanExtra },
       });
     }
-  }, [broadcastRoomUpdate]);
+  }, [broadcastRoomUpdate, markParticipantDeparted]);
+
+  const handleParticipantJoin = useCallback((ident?: string, extraId?: string) => {
+    unmarkParticipantDeparted(ident, extraId);
+  }, [unmarkParticipantDeparted]);
 
   const handleLiveKitConnected = useCallback(() => {
     isLiveKitConnectedRef.current = true;
@@ -2959,6 +3044,10 @@ export function JunctionRoom({
 
     // Optimistically update participants state case-insensitively
     const cleanTarget = targetIdentity.toLowerCase();
+    if (modAction === "kick" || modAction === "ban") {
+      markParticipantDeparted(cleanTarget);
+      setLiveKitRemoteParticipants((prev) => prev.filter((p) => p.identity?.toLowerCase() !== cleanTarget && !isLocalIdentity(targetIdentity)));
+    }
     setParticipants((prev) =>
       modAction === "kick" || modAction === "ban"
         ? prev.filter((p) => p.identity?.toLowerCase() !== cleanTarget && !isLocalIdentity(targetIdentity))
@@ -3809,7 +3898,7 @@ export function JunctionRoom({
     const list: JunctionParticipant[] = [];
 
     // 1. Add local participant if joined and not yet present in server list
-    if (hasJoinedSuccessfullyRef.current && !isLocalInParticipants) {
+    if (hasJoinedSuccessfullyRef.current && !isLocalInParticipants && !isDeparted({ id: myId, identity: myIdentity, username: user?.username || guest?.username })) {
       list.push({
         id: myId,
         identity: myIdentity,
@@ -3829,21 +3918,26 @@ export function JunctionRoom({
       });
     }
 
-    // 2. Add database participants
-    list.push(...participants);
+    // 2. Add database participants (excluding any departed identities)
+    list.push(...participants.filter((p) => !isDeparted(p)));
 
     // 3. Add LiveKit real-time remote participants (guarantees voice peers have immediate cards!)
-    list.push(...liveKitRemoteParticipants);
+    list.push(...liveKitRemoteParticipants.filter((p) => !isDeparted(p)));
 
-    // 4. Deduplicate and merge by identity / id with richest field retention
+    // 4. Deduplicate and merge by canonical identity with richest field retention
     const map = new Map<string, JunctionParticipant>();
     for (const p of list) {
-      const key = (p.id || p.identity || "").toLowerCase().trim();
+      if (isDeparted(p)) continue;
+      const key = (p.identity || p.username || "").toLowerCase().trim() || (p.id || p.name || "").toLowerCase().trim();
       if (!key) continue;
       const existing = map.get(key);
       if (!existing) {
         map.set(key, p);
       } else {
+        const existingTime = typeof existing.joinedAt === "number" ? existing.joinedAt : Number(existing.joinedAt) || 0;
+        const pTime = typeof p.joinedAt === "number" ? p.joinedAt : Number(p.joinedAt) || 0;
+        const resolvedJoinedAt = existingTime && pTime ? Math.min(existingTime, pTime) : (existingTime || pTime || Date.now());
+
         map.set(key, {
           ...existing,
           ...p,
@@ -3853,19 +3947,21 @@ export function JunctionRoom({
           avatar: p.avatar && p.avatar !== "zap" ? p.avatar : existing.avatar,
           cardBgColor: p.cardBgColor && p.cardBgColor !== "#465B73" ? p.cardBgColor : existing.cardBgColor,
           userRole: p.userRole && p.userRole !== "user" ? p.userRole : existing.userRole,
-          joinedAt: existing.joinedAt || p.joinedAt || Date.now(),
+          joinedAt: resolvedJoinedAt,
         });
       }
     }
 
-    const deduped = Array.from(map.values());
+    const deduped = Array.from(map.values()).filter((p) => !isDeparted(p));
 
     // Deterministic first-come first-served sequential sort by immutable arrival time with stable tie-breaker
     return deduped.sort((a, b) => {
       const timeA = typeof a.joinedAt === "number" ? a.joinedAt : Number(a.joinedAt) || 0;
       const timeB = typeof b.joinedAt === "number" ? b.joinedAt : Number(b.joinedAt) || 0;
       if (timeA !== timeB) return timeA - timeB;
-      return (a.id || a.identity || "").localeCompare(b.id || b.identity || "");
+      const keyA = (a.identity || a.username || a.id || "").toLowerCase().trim();
+      const keyB = (b.identity || b.username || b.id || "").toLowerCase().trim();
+      return keyA.localeCompare(keyB);
     });
   }, [
     isLocalInParticipants,
@@ -3882,6 +3978,7 @@ export function JunctionRoom({
     isLocalSpeaking,
     activeSpeakers,
     isLocalParticipant,
+    isDeparted,
   ]);
   const speakingParticipant = effectiveParticipants.find((p) => activeSpeakers.some((s) => s.toLowerCase() === p.identity?.toLowerCase())) || effectiveParticipants[0];
   const SEAT_SLOTS = Array.from({ length: junction?.maxParticipants || (isPrivateRoom ? 2 : 10) });
@@ -3894,23 +3991,24 @@ export function JunctionRoom({
     const seats: (JunctionParticipant | null)[] = Array.from({ length: maxSeats }, () => null);
 
     const getPKey = (p: JunctionParticipant) =>
-      (p.id || p.identity || "").toLowerCase().trim();
+      (p.identity || p.username || "").toLowerCase().trim() || (p.id || p.name || "").toLowerCase().trim();
 
-    // 1. Deterministically sort all active participants by arrival time (FCFS)
-    const sorted = [...effectiveParticipants].sort((a, b) => {
+    // 1. Filter out any departed participants & deterministically sort all active participants by arrival time (FCFS)
+    const valid = effectiveParticipants.filter((p) => !isDeparted(p));
+    const sorted = [...valid].sort((a, b) => {
       const timeA = typeof a.joinedAt === "number" ? a.joinedAt : Number(a.joinedAt) || 0;
       const timeB = typeof b.joinedAt === "number" ? b.joinedAt : Number(b.joinedAt) || 0;
       if (timeA !== timeB) return timeA - timeB;
       return getPKey(a).localeCompare(getPKey(b));
     });
 
-    // 2. Compactly allocate seats from #1 (index 0) upwards
+    // 2. Compactly allocate seats from #1 (index 0) upwards without any empty gaps
     for (let i = 0; i < Math.min(sorted.length, maxSeats); i++) {
       seats[i] = sorted[i];
     }
 
     return seats;
-  }, [effectiveParticipants, junction?.maxParticipants, isPrivateRoom]);
+  }, [effectiveParticipants, junction?.maxParticipants, isPrivateRoom, isDeparted]);
 
   // Kicked / Banned / Ended Modal (Rendered strictly AFTER all hooks to adhere to React Rules of Hooks)
   if (kickedNotice) {
@@ -4021,6 +4119,7 @@ export function JunctionRoom({
             onParticipantSync={pollJunction}
             onRemoteParticipantsChange={setLiveKitRemoteParticipants}
             onParticipantLeave={handleParticipantLeave}
+            onParticipantJoin={handleParticipantJoin}
             isMuted={isMuted}
             isMutedByMod={isMutedByMod}
             isDeafened={isDeafened}
@@ -4478,13 +4577,13 @@ export function JunctionRoom({
                           title="Dynamic Room Capacity"
                         >
                           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                          <span>{participants.length}/{junction?.maxParticipants || 2} Seats</span>
+                          <span>{effectiveParticipants.length}/{junction?.maxParticipants || 2} Seats</span>
                           <ChevronDown size={11} className={`transition-transform duration-200 ${isCapacityMenuOpen ? "rotate-180" : ""}`} />
                         </button>
                       ) : (
                         <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-xs font-semibold text-slate-300 shrink-0">
                           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                          <span>{participants.length}/{junction?.maxParticipants || (isPrivateRoom ? 2 : 10)} Seats</span>
+                          <span>{effectiveParticipants.length}/{junction?.maxParticipants || (isPrivateRoom ? 2 : 10)} Seats</span>
                         </div>
                       )}
 
@@ -4724,13 +4823,13 @@ export function JunctionRoom({
                       title="Dynamic Room Capacity"
                     >
                       <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                      <span>{participants.length}/{junction?.maxParticipants || 2} Seats</span>
+                      <span>{effectiveParticipants.length}/{junction?.maxParticipants || 2} Seats</span>
                       <ChevronDown size={9} className={`transition-transform duration-200 ${isCapacityMenuOpen ? "rotate-180" : ""}`} />
                     </button>
                   ) : (
                     <div className="h-6 px-2 rounded-full flex items-center gap-1 bg-white/5 border border-white/10 text-[10px] font-semibold text-slate-300 shrink-0">
                       <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                      <span>{participants.length}/{junction?.maxParticipants || (isPrivateRoom ? 2 : 10)} Seats</span>
+                      <span>{effectiveParticipants.length}/{junction?.maxParticipants || (isPrivateRoom ? 2 : 10)} Seats</span>
                     </div>
                   )}
 
@@ -4886,7 +4985,7 @@ export function JunctionRoom({
 
                     return (
                       <div
-                        key={participant.id || participant.identity || index}
+                        key={participant.identity || participant.username || participant.id || `seat-${index}`}
                         style={cardThemeStyle}
                         className={`relative w-full min-w-0 p-3 sm:p-4 rounded-2xl sm:rounded-[1.4rem] flex flex-col justify-between items-center text-center transition-all duration-300 border overflow-hidden backdrop-blur-xl group/card shadow-[0_12px_32px_-8px_rgba(0,0,0,0.6)] ${SEAT_SLOTS.length <= 2
                           ? "min-h-[190px] sm:min-h-[285px]"
