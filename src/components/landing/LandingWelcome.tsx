@@ -103,7 +103,6 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
     completeOnboarding({
       name: cleanName,
       displayName: cleanName,
-      username: cleanName.toLowerCase().replace(/[^a-z0-9_]/g, ""),
       avatar: selectedAvatar,
       color: selectedColor,
     });

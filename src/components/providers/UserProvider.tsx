@@ -113,31 +113,7 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
           }
         } else {
           // User is logged out / guest.
-          // Perform guest persona collision check asynchronously in the background so website entry is instantaneous!
-          setTimeout(async () => {
-            if (!mounted) return;
-            try {
-              const rawStored = localStorage.getItem("junction_guest_profile");
-              if (rawStored) {
-                const parsed = JSON.parse(rawStored);
-                if (parsed?.name) {
-                  const { data: existingProf } = await supabase
-                    .from("profiles")
-                    .select("id")
-                    .ilike("username", parsed.name.trim())
-                    .maybeSingle();
-
-                  if (existingProf && mounted) {
-                    const newGuest = generateRandomGuest();
-                    localStorage.setItem("junction_guest_profile", JSON.stringify(newGuest));
-                    window.dispatchEvent(
-                      new CustomEvent("yapclub_guest_profile_sync", { detail: { guest: newGuest, onboarded: true } })
-                    );
-                  }
-                }
-              }
-            } catch {}
-          }, 0);
+          // Keep existing guest profile intact.
         }
       } catch (err) {
         console.warn("Failed to check auth in UserProvider:", err);

@@ -50,8 +50,8 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'Missing "username" parameter' }, { status: 400 });
   }
 
-  // Reject suspended users immediately from acquiring voice credentials
-  if (await isUserSuspended(username)) {
+  // Reject suspended registered users immediately from acquiring voice credentials
+  if (!username.startsWith("guest_") && (await isUserSuspended(username))) {
     return NextResponse.json(
       { error: "Your account has been suspended by YapClub moderation." },
       { status: 403 }

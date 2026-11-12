@@ -154,26 +154,11 @@ export async function POST(
         participant.username = participant.id;
         // 3. Guest can NEVER have elevated platform roles
         participant.userRole = "user";
-        // 4. Ensure name is clean
+        // 4. Ensure name is clean, preserving user's chosen display name
         if (!participant.name) {
           participant.name = generateRandomNickname();
-          participant.displayName = participant.name;
         }
-        // 5. Prevent guest from spoofing a registered user's display name
-        if (participant.name) {
-          const cleanName = (participant.name || "").trim().toLowerCase();
-          const { data: existingUser } = await sbAdmin
-            .from("profiles")
-            .select("id")
-            .ilike("username", cleanName)
-            .maybeSingle();
-          if (existingUser && participant.id !== existingUser.id) {
-            // A registered user owns this name. An unauthenticated guest must be assigned a clean guest nickname.
-            const guestNickname = generateRandomNickname();
-            participant.name = guestNickname;
-            participant.displayName = guestNickname;
-          }
-        }
+        participant.displayName = participant.name;
       }
 
       const result = await addParticipantToJunction(params.id, participant, tabSessionId);

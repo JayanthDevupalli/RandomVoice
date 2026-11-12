@@ -530,8 +530,17 @@ export function JunctionRoom({
   const { user, isRegistered, refreshUser } = useUser();
 
   const myId = (isRegistered && user?.id) || guest?.id || "guest_" + Date.now();
-  const myIdentity = (isRegistered && user?.username) ? user.username : (user?.username || guest?.name || myId);
-  const myDisplayName = (isRegistered && (user?.displayName || user?.name)) || user?.displayName || user?.name || guest?.displayName || guest?.name || "Guest";
+  // Unique canonical identity: registered username for authenticated accounts, unique guest ID for guests.
+  // NEVER use guest display name as identity, so registered users and guests with the same name never collide!
+  const myIdentity = (isRegistered && user?.username)
+    ? user.username
+    : (isRegistered && user?.id ? user.id : (guest?.id || myId));
+  const myDisplayName = (isRegistered && (user?.displayName || user?.name))
+    || user?.displayName
+    || user?.name
+    || guest?.displayName
+    || guest?.name
+    || "Guest";
 
   const [localRoleOverride, setLocalRoleOverride] = useState<UserRole | null>(null);
   const localRoleOverrideRef = useRef<UserRole | null>(null);
@@ -540,29 +549,22 @@ export function JunctionRoom({
   const isLocalIdentity = useCallback((target?: string | null) => {
     if (!target) return false;
     const clean = target.trim().toLowerCase();
-    const candidates = [
-      myIdentity,
-      myId,
-      myDisplayName,
-      user?.username,
-      user?.displayName,
-      user?.name,
-      user?.id,
-      guest?.name,
-      guest?.displayName,
-      guest?.id,
-    ].filter(Boolean).map((s) => (s as string).trim().toLowerCase());
-    return candidates.includes(clean);
-  }, [myIdentity, myId, myDisplayName, user, guest]);
+    const myIdClean = myId.trim().toLowerCase();
+    const myIdentityClean = myIdentity.trim().toLowerCase();
+    if (clean === myIdentityClean || clean === myIdClean) return true;
+    if (user?.id && clean === user.id.trim().toLowerCase()) return true;
+    if (user?.username && clean === user.username.trim().toLowerCase()) return true;
+    if (guest?.id && clean === guest.id.trim().toLowerCase()) return true;
+    return false;
+  }, [myIdentity, myId, user?.id, user?.username, guest?.id]);
 
   const isLocalParticipant = useCallback((p?: { id?: string; identity?: string; name?: string; username?: string; displayName?: string } | null) => {
     if (!p) return false;
-    if (p.id && myId && p.id.toLowerCase().trim() === myId.toLowerCase().trim()) return true;
+    if (p.id && isLocalIdentity(p.id)) return true;
     if (p.identity && isLocalIdentity(p.identity)) return true;
     if (p.username && isLocalIdentity(p.username)) return true;
-    if (p.name && isLocalIdentity(p.name)) return true;
     return false;
-  }, [isLocalIdentity, myId]);
+  }, [isLocalIdentity]);
 
   const joinedJunctionIdRef = useRef<string | null>(null);
   const isJoiningRef = useRef<boolean>(false);
@@ -570,6 +572,7 @@ export function JunctionRoom({
   const localJoinedAtRef = useRef<number>(Date.now());
   const hasSentUnloadBeacon = useRef<boolean>(false);
   const departedIdentitiesRef = useRef<Set<string>>(new Set());
+  const joinedAtMapRef = useRef<Map<string, number>>(new Map());
 
   const markParticipantDeparted = useCallback((...identifiers: (string | undefined | null)[]) => {
     identifiers.forEach((id) => {
@@ -2458,6 +2461,8 @@ export function JunctionRoom({
     if (!clean && !cleanExtra) return;
 
     markParticipantDeparted(clean, cleanExtra);
+    if (clean) joinedAtMapRef.current.delete(clean);
+    if (cleanExtra) joinedAtMapRef.current.delete(cleanExtra);
 
     setParticipants((prev) =>
       prev.filter((p) => {
@@ -3898,7 +3903,7 @@ export function JunctionRoom({
     const list: JunctionParticipant[] = [];
 
     // 1. Add local participant if joined and not yet present in server list
-    if (hasJoinedSuccessfullyRef.current && !isLocalInParticipants && !isDeparted({ id: myId, identity: myIdentity, username: user?.username || guest?.username })) {
+    if (hasJoinedSuccessfullyRef.current && !isLocalInParticipants && !isDeparted({ id: myId, identity: myIdentity, username: (isRegistered && user?.username) || guest?.username || myId })) {
       list.push({
         id: myId,
         identity: myIdentity,
@@ -3928,39 +3933,113 @@ export function JunctionRoom({
     const map = new Map<string, JunctionParticipant>();
     for (const p of list) {
       if (isDeparted(p)) continue;
-      const key = (p.identity || p.username || "").toLowerCase().trim() || (p.id || p.name || "").toLowerCase().trim();
-      if (!key) continue;
-      const existing = map.get(key);
-      if (!existing) {
-        map.set(key, p);
-      } else {
-        const existingTime = typeof existing.joinedAt === "number" ? existing.joinedAt : Number(existing.joinedAt) || 0;
-        const pTime = typeof p.joinedAt === "number" ? p.joinedAt : Number(p.joinedAt) || 0;
-        const resolvedJoinedAt = existingTime && pTime ? Math.min(existingTime, pTime) : (existingTime || pTime || Date.now());
 
-        map.set(key, {
-          ...existing,
-          ...p,
-          isMuted: isLocalParticipant(p) ? isMuted : (p.isMuted !== undefined ? p.isMuted : existing.isMuted),
-          isMutedByMod: isLocalParticipant(p) ? isMutedByMod : (p.isMutedByMod ?? existing.isMutedByMod),
-          isSpeaking: isLocalParticipant(p) ? isLocalSpeaking : (activeSpeakers.some(s => s.toLowerCase() === key) || p.isSpeaking || existing.isSpeaking),
-          avatar: p.avatar && p.avatar !== "zap" ? p.avatar : existing.avatar,
-          cardBgColor: p.cardBgColor && p.cardBgColor !== "#465B73" ? p.cardBgColor : existing.cardBgColor,
-          userRole: p.userRole && p.userRole !== "user" ? p.userRole : existing.userRole,
-          joinedAt: resolvedJoinedAt,
-        });
+      const isLocal = isLocalParticipant(p);
+      const rawKey = isLocal
+        ? "__local_participant__"
+        : (p.identity || p.id || "").toLowerCase().trim();
+      if (!rawKey) continue;
+
+      // Find existing match by canonical key or cross-checking id/identity
+      let matchedKey = map.has(rawKey) ? rawKey : undefined;
+      if (!matchedKey && !isLocal) {
+        const pIdent = (p.identity || "").toLowerCase().trim();
+        const pId = (p.id || "").toLowerCase().trim();
+        for (const [k, existing] of Array.from(map.entries())) {
+          if (k === "__local_participant__") continue;
+          const eIdent = (existing.identity || "").toLowerCase().trim();
+          const eId = (existing.id || "").toLowerCase().trim();
+          if (
+            (pIdent && (pIdent === eIdent || pIdent === eId)) ||
+            (pId && (pId === eIdent || pId === eId))
+          ) {
+            matchedKey = k;
+            break;
+          }
+        }
+      }
+
+      const key = matchedKey || rawKey;
+      const existing = map.get(key);
+
+      // Stable arrival timestamp pinned in joinedAtMapRef to eliminate all seat shuffling
+      let stableJoinedAt: number;
+      if (joinedAtMapRef.current.has(key)) {
+        stableJoinedAt = joinedAtMapRef.current.get(key)!;
+      } else {
+        const parsedTime = typeof p.joinedAt === "number" && p.joinedAt > 0 ? p.joinedAt : Number(p.joinedAt);
+        stableJoinedAt = parsedTime && !isNaN(parsedTime) && parsedTime > 0
+          ? parsedTime
+          : (isLocal ? localJoinedAtRef.current : Date.now());
+        joinedAtMapRef.current.set(key, stableJoinedAt);
+      }
+
+      if (!existing) {
+        if (isLocal) {
+          map.set(key, {
+            ...p,
+            id: myId,
+            identity: myIdentity,
+            name: myDisplayName,
+            displayName: myDisplayName,
+            avatar: user?.avatar || guest?.avatar || p.avatar || "zap",
+            color: user?.color || guest?.color || p.color || "#6366F1",
+            cardBgColor: user?.cardBgColor || guest?.cardBgColor || p.cardBgColor || "#465B73",
+            userRole: myEffectiveRole,
+            isMuted: isMuted || isMutedByMod,
+            isMutedByMod,
+            isSpeaking: isLocalSpeaking,
+            joinedAt: localJoinedAtRef.current,
+          });
+        } else {
+          map.set(key, {
+            ...p,
+            joinedAt: stableJoinedAt,
+          });
+        }
+      } else {
+        if (isLocal) {
+          map.set(key, {
+            ...existing,
+            ...p,
+            id: myId,
+            identity: myIdentity,
+            name: myDisplayName,
+            displayName: myDisplayName,
+            avatar: user?.avatar || guest?.avatar || existing.avatar || p.avatar || "zap",
+            color: user?.color || guest?.color || existing.color || p.color || "#6366F1",
+            cardBgColor: user?.cardBgColor || guest?.cardBgColor || existing.cardBgColor || p.cardBgColor || "#465B73",
+            userRole: myEffectiveRole,
+            isMuted: isMuted || isMutedByMod,
+            isMutedByMod,
+            isSpeaking: isLocalSpeaking,
+            joinedAt: localJoinedAtRef.current,
+          });
+        } else {
+          map.set(key, {
+            ...existing,
+            ...p,
+            isMuted: p.isMuted !== undefined ? p.isMuted : existing.isMuted,
+            isMutedByMod: p.isMutedByMod ?? existing.isMutedByMod,
+            isSpeaking: activeSpeakers.some(s => s.toLowerCase() === key || s.toLowerCase() === (p.identity || "").toLowerCase()) || p.isSpeaking || existing.isSpeaking,
+            avatar: p.avatar && p.avatar !== "zap" ? p.avatar : existing.avatar,
+            cardBgColor: p.cardBgColor && p.cardBgColor !== "#465B73" ? p.cardBgColor : existing.cardBgColor,
+            userRole: p.userRole && p.userRole !== "user" ? p.userRole : existing.userRole,
+            joinedAt: stableJoinedAt,
+          });
+        }
       }
     }
 
     const deduped = Array.from(map.values()).filter((p) => !isDeparted(p));
 
-    // Deterministic first-come first-served sequential sort by immutable arrival time with stable tie-breaker
+    // Deterministic first-come first-served sequential sort by pinned immutable arrival time
     return deduped.sort((a, b) => {
       const timeA = typeof a.joinedAt === "number" ? a.joinedAt : Number(a.joinedAt) || 0;
       const timeB = typeof b.joinedAt === "number" ? b.joinedAt : Number(b.joinedAt) || 0;
       if (timeA !== timeB) return timeA - timeB;
-      const keyA = (a.identity || a.username || a.id || "").toLowerCase().trim();
-      const keyB = (b.identity || b.username || b.id || "").toLowerCase().trim();
+      const keyA = (a.identity || a.id || "").toLowerCase().trim();
+      const keyB = (b.identity || b.id || "").toLowerCase().trim();
       return keyA.localeCompare(keyB);
     });
   }, [
@@ -3980,7 +4059,7 @@ export function JunctionRoom({
     isLocalParticipant,
     isDeparted,
   ]);
-  const speakingParticipant = effectiveParticipants.find((p) => activeSpeakers.some((s) => s.toLowerCase() === p.identity?.toLowerCase())) || effectiveParticipants[0];
+  const speakingParticipant = effectiveParticipants.find((p) => activeSpeakers.some((s) => s.toLowerCase() === (p.identity || p.id || "").toLowerCase())) || effectiveParticipants[0];
   const SEAT_SLOTS = Array.from({ length: junction?.maxParticipants || (isPrivateRoom ? 2 : 10) });
 
   // Deterministic, compact sequential first-come first-served seating assignments.
@@ -3991,9 +4070,9 @@ export function JunctionRoom({
     const seats: (JunctionParticipant | null)[] = Array.from({ length: maxSeats }, () => null);
 
     const getPKey = (p: JunctionParticipant) =>
-      (p.identity || p.username || "").toLowerCase().trim() || (p.id || p.name || "").toLowerCase().trim();
+      (p.identity || p.id || "").toLowerCase().trim();
 
-    // 1. Filter out any departed participants & deterministically sort all active participants by arrival time (FCFS)
+    // 1. Filter out any departed participants & deterministically sort all active participants by pinned arrival time (FCFS)
     const valid = effectiveParticipants.filter((p) => !isDeparted(p));
     const sorted = [...valid].sort((a, b) => {
       const timeA = typeof a.joinedAt === "number" ? a.joinedAt : Number(a.joinedAt) || 0;

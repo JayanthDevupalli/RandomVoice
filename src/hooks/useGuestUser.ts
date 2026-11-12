@@ -92,13 +92,16 @@ export function useGuestUser() {
       const current = prev || readStoredGuest() || generateRandomGuest();
       const cleanName = updates.name !== undefined ? updates.name.trim() : current.name;
       const guestId = current.id || "guest_" + Math.random().toString(36).substring(2, 9);
+      const guestUsername = (updates.username && updates.username.startsWith("guest_"))
+        ? updates.username.trim()
+        : (current.username?.startsWith("guest_") ? current.username : guestId);
       const updated: GuestUser = {
         ...current,
         id: guestId,
         ...updates,
         name: cleanName,
         displayName: updates.displayName !== undefined ? updates.displayName.trim() : cleanName,
-        username: updates.username !== undefined ? updates.username.trim() : (current.username || guestId),
+        username: guestUsername,
       };
 
       try {
@@ -122,7 +125,9 @@ export function useGuestUser() {
       ...personaUpdates,
       name: cleanName,
       displayName: cleanName,
-      username: personaUpdates?.username?.trim() || current.username || guestId,
+      username: (personaUpdates?.username && personaUpdates.username.startsWith("guest_"))
+        ? personaUpdates.username.trim()
+        : (current.username?.startsWith("guest_") ? current.username : guestId),
       avatar: personaUpdates?.avatar || current.avatar || "zap",
       color: personaUpdates?.color || current.color || "#6366F1",
     };
