@@ -21,6 +21,7 @@ import {
   ExternalLink,
   ListMusic,
   Square,
+  Plus,
 } from "lucide-react";
 import { MusicTrack, RoomMusicState } from "@/lib/music-types";
 import { JunctionParticipant } from "@/lib/types";
@@ -402,182 +403,115 @@ export function MusicDeck({
       <div
         className={
           isExpanded
-            ? "relative z-30 w-full max-w-4xl mx-auto mt-3 sm:mt-4 mb-3 bg-[#0B0C12]/95 border border-indigo-500/25 rounded-3xl overflow-hidden shadow-[0_12px_45px_rgba(0,0,0,0.7)] block"
+            ? "relative z-30 w-full max-w-4xl mx-auto px-2 sm:px-4 mt-2 sm:mt-4 mb-2.5 sm:mb-3 block"
             : "w-0 h-0 overflow-hidden opacity-0 pointer-events-none absolute -z-50"
         }
       >
-        {/* Expanded Theatre Header */}
-        <div className="px-3.5 sm:px-4 py-2.5 bg-white/[0.02] border-b border-white/5 flex items-center justify-between gap-2 sm:gap-3">
-          <div className="flex items-center gap-2 min-w-0 flex-1">
-            <span className="text-sm shrink-0">🎧</span>
-            <div className="text-xs truncate">
+        <div className="bg-[#0B0C12]/95 border border-indigo-500/25 rounded-2xl sm:rounded-3xl overflow-hidden shadow-[0_12px_45px_rgba(0,0,0,0.7)] backdrop-blur-2xl">
+          {/* Expanded Theatre Header — Clean & Uncrowded */}
+          <div className="px-3 sm:px-4 py-2 sm:py-2.5 bg-white/[0.03] border-b border-white/5 flex items-center justify-between gap-2">
+            {/* Left: DJ Status Pill */}
+            <div className="flex items-center gap-2 min-w-0">
               {isAuxHolder ? (
-                <span className="text-indigo-400 font-semibold flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                  You are the DJ 🎧
-                </span>
+                <button
+                  type="button"
+                  onClick={onReleaseAux}
+                  className="px-2.5 py-1 rounded-full bg-indigo-500/20 hover:bg-rose-500/20 border border-indigo-500/35 hover:border-rose-500/40 text-indigo-300 hover:text-rose-300 font-bold text-xs flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer shrink-0 group/dj"
+                  title="You are the DJ — Tap to step down"
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                  <span>You (DJ)</span>
+                  <X size={12} className="text-indigo-400/70 group-hover/dj:text-rose-300 shrink-0" />
+                </button>
               ) : isAuxFree ? (
-                <span className="text-emerald-400 font-medium">No DJ — Tap to control music</span>
+                <button
+                  type="button"
+                  onClick={onClaimAux}
+                  className="px-2.5 py-1 rounded-full bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 text-xs font-bold flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer shadow-xs shrink-0"
+                  title="Become DJ to control music"
+                >
+                  <Sparkles size={12} className="shrink-0 text-emerald-400" />
+                  <span>Become DJ</span>
+                </button>
               ) : (
-                <span className="text-slate-300 font-medium">
-                  DJ: <span className="text-amber-300 font-semibold">{musicState.auxHolderName || "Room"}</span>
-                </span>
+                <div className="flex items-center gap-1.5 text-xs text-slate-300 truncate">
+                  <span className="text-slate-500 shrink-0 font-medium">DJ:</span>
+                  <span className="text-amber-300 font-semibold truncate max-w-[130px] sm:max-w-none">
+                    {musicState.auxHolderName || "Room"}
+                  </span>
+                </div>
               )}
-              <span className="text-slate-500 mx-1.5">•</span>
-              <span className="text-slate-400 truncate">{track.title}</span>
             </div>
-          </div>
 
-          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-            {/* Grab / Take / Drop DJ Quick Button */}
-            {isAuxFree ? (
-              <button
-                onClick={onClaimAux}
-                className="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 text-xs font-semibold flex items-center gap-1 transition-all active:scale-95 cursor-pointer shadow-xs shadow-emerald-500/20"
-                title="Become DJ"
-              >
-                <Sparkles size={11} />
-                Become DJ
-              </button>
-            ) : isAuxHolder ? (
-              <button
-                onClick={onReleaseAux}
-                className="px-2 py-0.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 text-xs font-semibold flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
-                title="Step Down as DJ"
-              >
-                Step Down
-              </button>
-            ) : canModerateAux ? (
-              <button
-                onClick={onClaimAux}
-                className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 text-xs font-semibold flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
-                title="Moderator Takeover: Become DJ"
-              >
-                <Sparkles size={11} />
-                Take DJ
-              </button>
-            ) : null}
+            {/* Right: Personal Volume & Minimize Stage (Only 2 small controls, never overflowing) */}
+            <div className="flex items-center gap-1.5 shrink-0">
+              {/* Personal Volume Dropdown */}
+              <div className="relative shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setIsVolumeSliderOpen(!isVolumeSliderOpen)}
+                  className="h-7.5 px-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer border border-white/5"
+                  title="My Music Volume"
+                >
+                  {isLocalMuted || localVolume === 0 ? (
+                    <VolumeX size={13} className="text-rose-400 shrink-0" />
+                  ) : (
+                    <Volume2 size={13} className="text-indigo-400 shrink-0" />
+                  )}
+                  <span className="text-[11px] font-mono text-slate-400">{isLocalMuted ? "0%" : `${localVolume}%`}</span>
+                </button>
 
-            {/* Personal Volume Dropdown */}
-            <div className="relative">
-              <button
-                onClick={() => setIsVolumeSliderOpen(!isVolumeSliderOpen)}
-                className="px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 text-xs flex items-center gap-1.5 transition-all"
-                title="My Music Volume"
-              >
-                {isLocalMuted || localVolume === 0 ? (
-                  <VolumeX size={14} className="text-rose-400" />
-                ) : (
-                  <Volume2 size={14} className="text-indigo-400" />
-                )}
-                <span className="text-[11px] font-medium">{isLocalMuted ? "0%" : `${localVolume}%`}</span>
-              </button>
-
-              {isVolumeSliderOpen && (
-                <>
-                  <div
-                    className="fixed inset-0 z-40"
-                    onClick={() => setIsVolumeSliderOpen(false)}
-                  />
-                  <div className="absolute right-0 top-full mt-2 z-50 p-3 bg-[#11131C] border border-white/10 rounded-2xl shadow-xl w-44 animate-in fade-in zoom-in-95">
-                    <div className="flex items-center justify-between text-[11px] mb-2 text-slate-300">
-                      <span>Personal Volume</span>
-                      <button
-                        onClick={toggleMute}
-                        className="text-[10px] text-indigo-400 hover:underline"
-                      >
-                        {isLocalMuted ? "Unmute" : "Mute"}
-                      </button>
-                    </div>
-                    <input
-                      type="range"
-                      min="0"
-                      max="100"
-                      value={isLocalMuted ? 0 : localVolume}
-                      onChange={(e) => handleVolumeChange(Number(e.target.value))}
-                      className="w-full accent-indigo-500 h-1.5 bg-white/10 rounded-lg cursor-pointer"
+                {isVolumeSliderOpen && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-40"
+                      onClick={() => setIsVolumeSliderOpen(false)}
                     />
-                  </div>
-                </>
-              )}
-            </div>
-
-            {/* Queue Modal Button */}
-            <button
-              onClick={() => onOpenMusicModal("queue")}
-              className="px-2.5 py-1 rounded-lg bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 border border-indigo-500/40 text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer"
-              title="View Song Queue"
-            >
-              <ListMusic size={13} />
-              <span>Queue{musicState.queue?.length ? ` (${musicState.queue.length})` : ""}</span>
-            </button>
-
-            {/* Change Track modal */}
-            <button
-              onClick={() => onOpenMusicModal("youtube")}
-              className="px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-semibold transition-all cursor-pointer"
-            >
-              Change Song
-            </button>
-
-            {/* End Music Button (for DJ, moderators, or when DJ is free) */}
-            {(isAuxHolder || canModerateAux || isAuxFree) && (
-              <button
-                onClick={onStopMusic}
-                className="px-2.5 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer shadow-xs"
-                title="End Music Player for Everyone"
-              >
-                <Square size={11} className="fill-current text-rose-400" />
-                <span>End Music</span>
-              </button>
-            )}
-
-            {/* Minimize Stage */}
-            <button
-              onClick={onToggleExpand}
-              className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white transition-all"
-              title="Minimize to Audio Bar"
-            >
-              <Minimize2 size={15} />
-            </button>
-          </div>
-        </div>
-
-        {/* Video Viewport: THE SINGLE PERMANENT HOST DIV */}
-        <div className="relative aspect-video w-full bg-black/90 flex items-center justify-center overflow-hidden">
-          <div id="yapclub_yt_player_host" className="w-full h-full" />
-        </div>
-
-        {/* Expanded Theatre Controls */}
-        <div className="px-3.5 sm:px-4 py-2.5 sm:py-3 bg-[#0E1017] border-t border-white/5 flex items-center justify-between gap-3 sm:gap-4">
-          <div className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1">
-            {canControlPlayback ? (
-              <button
-                onClick={handleTogglePlay}
-                className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-indigo-600 hover:bg-indigo-500 text-white flex items-center justify-center transition-all shadow-md shadow-indigo-600/30 active:scale-95 shrink-0"
-              >
-                {musicState.isPlaying ? <Pause size={16} /> : <Play size={16} className="ml-0.5" />}
-              </button>
-            ) : (
-              <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-white/5 flex items-center justify-center text-slate-400 shrink-0">
-                <Disc3 size={17} className={musicState.isPlaying ? "animate-spin [animation-duration:4s]" : ""} />
+                    <div className="absolute right-0 top-full mt-2 z-50 p-3 bg-[#11131C] border border-white/10 rounded-2xl shadow-xl w-48 animate-in fade-in zoom-in-95">
+                      <div className="flex items-center justify-between text-[11px] mb-2 text-slate-300">
+                        <span>Personal Volume</span>
+                        <button
+                          type="button"
+                          onClick={toggleMute}
+                          className="text-[10px] text-indigo-400 hover:underline"
+                        >
+                          {isLocalMuted ? "Unmute" : "Mute"}
+                        </button>
+                      </div>
+                      <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        value={isLocalMuted ? 0 : localVolume}
+                        onChange={(e) => handleVolumeChange(Number(e.target.value))}
+                        className="w-full accent-indigo-500 h-1.5 bg-white/10 rounded-lg cursor-pointer"
+                      />
+                    </div>
+                  </>
+                )}
               </div>
-            )}
 
-            <div className="min-w-0 flex-1">
-              <h4 className="text-xs font-semibold text-white truncate">
-                {track.title}
-              </h4>
-              <p className="text-[10px] sm:text-[11px] text-slate-400 truncate">
-                {track.artist || "Shared Media"}
-              </p>
+              {/* Minimize Stage */}
+              <button
+                type="button"
+                onClick={onToggleExpand}
+                className="w-7.5 h-7.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white flex items-center justify-center transition-all cursor-pointer shrink-0 border border-white/5"
+                title="Minimize to Audio Bar"
+              >
+                <Minimize2 size={13} />
+              </button>
             </div>
           </div>
 
-          {/* Scrub Bar (if not live stream) */}
+          {/* Video Viewport: THE SINGLE PERMANENT HOST DIV */}
+          <div className="relative aspect-video w-full bg-black/95 flex items-center justify-center overflow-hidden">
+            <div id="yapclub_yt_player_host" className="w-full h-full" />
+          </div>
+
+          {/* Scrub / Progress Bar (Interactive for DJ, visual sync for listeners) */}
           {!track.isLive && duration > 0 && (
-            <div className="flex-1 max-w-xs hidden sm:flex items-center gap-2">
-              <span className="text-[10px] text-slate-500 font-mono w-9 text-right shrink-0">
+            <div className="w-full px-3 sm:px-4 pt-2.5 pb-1 bg-[#0E1017] flex items-center gap-2">
+              <span className="text-[10px] text-slate-400 font-mono w-8 sm:w-9 text-right shrink-0">
                 {formatSeconds(currentTime)}
               </span>
               <input
@@ -591,23 +525,114 @@ export function MusicDeck({
                   isAuxHolder ? "cursor-pointer" : "cursor-default opacity-80"
                 }`}
               />
-              <span className="text-[10px] text-slate-500 font-mono w-9 shrink-0">
+              <span className="text-[10px] text-slate-400 font-mono w-8 sm:w-9 shrink-0">
                 {formatSeconds(duration)}
               </span>
             </div>
           )}
+
+          {/* Expanded Theatre Track Info Row */}
+          <div className="px-3 sm:px-4 py-2 sm:py-2.5 bg-[#0E1017] border-t border-white/5 flex items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2 sm:gap-2.5 min-w-0 flex-1">
+              {canControlPlayback ? (
+                <button
+                  type="button"
+                  onClick={handleTogglePlay}
+                  className="w-8 h-8 rounded-full bg-indigo-600 hover:bg-indigo-500 text-white flex items-center justify-center transition-all shadow-md shadow-indigo-600/30 active:scale-95 shrink-0 cursor-pointer"
+                  title={musicState.isPlaying ? "Pause" : "Play"}
+                >
+                  {musicState.isPlaying ? <Pause size={14} /> : <Play size={14} className="ml-0.5" />}
+                </button>
+              ) : (
+                <div className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center text-slate-400 shrink-0">
+                  <Disc3 size={16} className={musicState.isPlaying ? "animate-spin [animation-duration:4s] text-indigo-400" : ""} />
+                </div>
+              )}
+
+              <div className="min-w-0 flex-1">
+                <h4 className="text-xs sm:text-sm font-semibold text-white truncate" title={track.title}>
+                  {track.title}
+                </h4>
+                <p className="text-[10px] sm:text-xs text-slate-400 truncate">
+                  {track.artist || "Shared Media"}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-1.5 shrink-0">
+              <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-indigo-500/15 text-indigo-300 border border-indigo-500/25">
+                {track.isLive ? "LIVE" : "SYNC"}
+              </span>
+              {track.url && (
+                <a
+                  href={track.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="w-7 h-7 rounded-lg bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white flex items-center justify-center transition-all"
+                  title="Open on YouTube"
+                >
+                  <ExternalLink size={12} />
+                </a>
+              )}
+            </div>
+          </div>
+
+          {/* Stage Action Bar — Queue, Add Song, and End Music */}
+          <div className="px-3 sm:px-4 py-2 sm:py-2.5 bg-[#090A0E] border-t border-white/5 flex items-center gap-2">
+            {/* Queue Button */}
+            <button
+              type="button"
+              onClick={() => onOpenMusicModal("queue")}
+              className="flex-1 sm:flex-initial h-8 sm:h-9 px-3 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/35 text-indigo-200 border border-indigo-500/30 text-xs font-semibold transition-all flex items-center justify-center gap-1.5 active:scale-95 cursor-pointer"
+              title="View Song Queue"
+            >
+              <ListMusic size={14} className="text-indigo-400 shrink-0" />
+              <span>Queue</span>
+              {Boolean(musicState.queue?.length) && (
+                <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-indigo-500 text-white font-bold ml-0.5">
+                  {musicState.queue?.length}
+                </span>
+              )}
+            </button>
+
+            {/* Add / Change Song Button */}
+            <button
+              type="button"
+              onClick={() => onOpenMusicModal("youtube")}
+              className="flex-1 sm:flex-initial h-8 sm:h-9 px-3 rounded-xl bg-white/10 hover:bg-white/15 text-white border border-white/10 text-xs font-semibold transition-all flex items-center justify-center gap-1.5 active:scale-95 cursor-pointer"
+              title="Add YouTube track to queue or play now"
+            >
+              <Plus size={14} className="text-emerald-400 shrink-0" />
+              <span>{isAuxHolder ? "Change Song" : "+ Add Song"}</span>
+            </button>
+
+            {/* End Music Button */}
+            {(isAuxHolder || canModerateAux || isAuxFree) && (
+              <button
+                type="button"
+                onClick={onStopMusic}
+                className="h-8 sm:h-9 px-2.5 sm:px-3 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 hover:text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-all active:scale-95 cursor-pointer shrink-0"
+                title="Turn off music player for the room"
+              >
+                <Square size={11} className="fill-current text-rose-400 shrink-0" />
+                <span className="hidden xs:inline">End Music</span>
+              </button>
+            )}
+          </div>
+
+
         </div>
       </div>
 
       {/* ─── COMPACT MINI-BAR / ADAPTIVE AUDIO DECK ─── */}
       {/* Visible only when isExpanded is FALSE */}
       {!isExpanded && (
-        <div className="relative z-30 w-full max-w-7xl mx-auto px-3.5 sm:px-6 mt-3 sm:mt-4 mb-2.5">
-          <div className="relative z-30 bg-[#0E1017]/95 backdrop-blur-2xl border border-white/10 rounded-2xl sm:rounded-full px-2.5 py-1.5 sm:px-4 sm:py-2 shadow-[0_8px_30px_rgba(0,0,0,0.6)] flex items-center justify-between gap-2 sm:gap-3">
+        <div className="relative z-30 w-full max-w-7xl mx-auto px-2 sm:px-6 mt-2.5 sm:mt-4 mb-2">
+          <div className="relative z-30 bg-[#0E1017]/95 backdrop-blur-2xl border border-white/10 rounded-2xl sm:rounded-full px-2 py-1.5 sm:px-4 sm:py-2 shadow-[0_8px_30px_rgba(0,0,0,0.6)] flex items-center justify-between gap-1.5 sm:gap-3">
             {/* Track Info (Clickable to open Music Modal) */}
             <div
               onClick={() => onOpenMusicModal?.("youtube")}
-              className="flex items-center gap-2.5 min-w-0 flex-1 cursor-pointer group/track"
+              className="flex items-center gap-2 min-w-0 flex-1 cursor-pointer group/track"
               title="Click to view queue or add YouTube songs"
             >
               {/* Thumbnail / Animated Equalizer Bars */}
@@ -664,11 +689,14 @@ export function MusicDeck({
                   e.stopPropagation();
                   onOpenMusicModal("queue");
                 }}
-                className="px-2.5 py-1 rounded-full bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-500/35 text-indigo-300 text-[10px] font-semibold flex items-center gap-1 transition-all active:scale-95 cursor-pointer shrink-0"
+                className="px-2 py-0.5 sm:px-2.5 sm:py-1 rounded-full bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-500/35 text-indigo-300 text-[10px] font-semibold flex items-center gap-1 transition-all active:scale-95 cursor-pointer shrink-0"
                 title="View Song Queue"
               >
-                <ListMusic size={11} />
-                <span>Queue{musicState.queue?.length ? ` (${musicState.queue.length})` : ""}</span>
+                <ListMusic size={11} className="shrink-0" />
+                <span className="hidden xs:inline">Queue</span>
+                {Boolean(musicState.queue?.length) && (
+                  <span className="font-bold">({musicState.queue.length})</span>
+                )}
               </button>
 
               {/* Become DJ Quick Action (when DJ is free) */}
@@ -681,8 +709,9 @@ export function MusicDeck({
                   className="px-2 py-0.5 rounded-full bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 text-[10px] font-bold flex items-center gap-1 transition-all active:scale-95 cursor-pointer shrink-0 shadow-xs shadow-emerald-500/20"
                   title="Become DJ to control music"
                 >
-                  <Sparkles size={10} />
-                  <span>Become DJ</span>
+                  <Sparkles size={10} className="shrink-0 text-emerald-400" />
+                  <span className="hidden xs:inline">Become DJ</span>
+                  <span className="xs:hidden">DJ</span>
                 </button>
               )}
 

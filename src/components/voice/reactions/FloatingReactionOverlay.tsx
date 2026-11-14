@@ -31,32 +31,35 @@ const FloatingReactionItem = memo(function FloatingReactionItem({
   const animDuration = r.duration ? `${r.duration}s` : "5.8s";
 
   return (
-    // Layer 1: Continuous, uninterrupted vertical ascent (Y-axis only: zero stops, zero stutter)
+    // Layer 0: Static position anchor (anchors horizontal % and centers without transform collision)
     <div
-      style={{
-        left: `${r.x}%`,
-        animationDuration: animDuration,
-      }}
-      className="absolute bottom-20 sm:bottom-24 -translate-x-1/2 flex flex-col items-center pointer-events-none select-none animate-reaction-rise"
+      style={{ left: `${r.x}%` }}
+      className="absolute bottom-20 sm:bottom-24 -translate-x-1/2 pointer-events-none select-none z-10"
     >
-      {/* Layer 2: Fluid horizontal air-current drift */}
+      {/* Layer 1: Continuous uninterrupted vertical ascent (linear Y-axis translation & fade only) */}
       <div
         style={{ animationDuration: animDuration }}
-        className={`flex flex-col items-center pointer-events-none select-none ${swayClass}`}
+        className="flex flex-col items-center pointer-events-none select-none animate-reaction-rise"
       >
-        {/* Reaction Emoji */}
-        <div className="text-2xl sm:text-3xl select-none filter drop-shadow-[0_2px_8px_rgba(0,0,0,0.35)]">
-          {r.emoji}
-        </div>
+        {/* Layer 2: Gentle fluid horizontal air-current drift */}
+        <div
+          style={{ animationDuration: animDuration }}
+          className={`flex flex-col items-center pointer-events-none select-none ${swayClass}`}
+        >
+          {/* Reaction Emoji */}
+          <div className="text-2xl sm:text-3xl select-none filter drop-shadow-[0_2px_8px_rgba(0,0,0,0.35)]">
+            {r.emoji}
+          </div>
 
-        {/* Sender Name Pill Directly Below Emoji - Consistently visible throughout flight */}
-        {r.senderName && (
-          <span
-            className="mt-1 px-2 py-0.5 rounded-full text-[9px] sm:text-[10px] font-semibold text-slate-100 bg-black/70 backdrop-blur-md border border-white/15 shadow-sm max-w-[85px] sm:max-w-[105px] truncate tracking-wide pointer-events-none text-center"
-          >
-            {r.senderName}
-          </span>
-        )}
+          {/* Sender Name Pill Directly Below Emoji - Consistently visible throughout flight */}
+          {r.senderName && (
+            <span
+              className="mt-1 px-2 py-0.5 rounded-full text-[9px] sm:text-[10px] font-semibold text-slate-100 bg-black/70 backdrop-blur-md border border-white/15 shadow-sm max-w-[85px] sm:max-w-[105px] truncate tracking-wide pointer-events-none text-center"
+            >
+              {r.senderName}
+            </span>
+          )}
+        </div>
       </div>
     </div>
   );

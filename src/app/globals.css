@@ -146,132 +146,91 @@
 }
 
 /* ==========================================================================
-   Voice Room Floating Reactions - Calm, Gentle & Slow Floating Physics
-   Decoupled axes: continuous gentle vertical ascent (zero rocket launch),
-   independent horizontal sinusoidal sway, and calm 5.8s floating speed.
+   Voice Room Floating Reactions - 100% Smooth Continuous Flight (Zero Breaking)
+   Decoupled architecture: pure linear vertical ascent (constant unbroken speed),
+   gentle single-curve horizontal drift, and silky 5.8s floating physics.
    ========================================================================== */
 
-/* 1. Continuous Vertical Rise & Fade (Calm, 5.8s smooth floating ascent) */
+/* 1. Pure Continuous Vertical Rise & Fade (Uniform speed, zero braking/restarting) */
 @keyframes reactionRiseFloat {
   0% {
     opacity: 0;
-    transform: translateY(0) scale(0.65);
+    transform: translate3d(0, 0, 0);
   }
-  10% {
+  6% {
     opacity: 1;
-    transform: translateY(-35px) scale(1.05);
+    transform: translate3d(0, -27.6px, 0);
   }
-  20% {
-    transform: translateY(-80px) scale(1);
-  }
-  80% {
+  85% {
     opacity: 1;
+    transform: translate3d(0, -391px, 0);
   }
   100% {
     opacity: 0;
-    transform: translateY(-440px) scale(0.92);
+    transform: translate3d(0, -460px, 0);
   }
 }
 
 .animate-reaction-rise {
-  animation: reactionRiseFloat 5.8s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+  animation: reactionRiseFloat 5.8s linear forwards;
   will-change: transform, opacity;
 }
 
-/* 2. Horizontal Air-Current Drifts (Gentle micro-sways tailored for stream corridor) */
+/* 2. Gentle Horizontal Breeze Drift (Continuous single-curve trajectory, zero dead-stops) */
 @keyframes reactionSwayLeft {
   0% {
-    transform: translateX(0) rotate(0deg);
-  }
-  30% {
-    transform: translateX(-10px) rotate(-3deg);
-  }
-  65% {
-    transform: translateX(-4px) rotate(1deg);
+    transform: translate3d(0, 0, 0) rotate(0deg);
   }
   100% {
-    transform: translateX(-16px) rotate(-4deg);
+    transform: translate3d(-15px, 0, 0) rotate(-3.5deg);
   }
 }
 
 @keyframes reactionSwayRight {
   0% {
-    transform: translateX(0) rotate(0deg);
-  }
-  30% {
-    transform: translateX(10px) rotate(3deg);
-  }
-  65% {
-    transform: translateX(4px) rotate(-1deg);
+    transform: translate3d(0, 0, 0) rotate(0deg);
   }
   100% {
-    transform: translateX(16px) rotate(4deg);
+    transform: translate3d(15px, 0, 0) rotate(3.5deg);
   }
 }
 
 @keyframes reactionSwayWideLeft {
   0% {
-    transform: translateX(0) rotate(0deg);
-  }
-  35% {
-    transform: translateX(-18px) rotate(-4deg);
-  }
-  70% {
-    transform: translateX(-7px) rotate(2deg);
+    transform: translate3d(0, 0, 0) rotate(0deg);
   }
   100% {
-    transform: translateX(-24px) rotate(-6deg);
+    transform: translate3d(-24px, 0, 0) rotate(-5deg);
   }
 }
 
 @keyframes reactionSwayWideRight {
   0% {
-    transform: translateX(0) rotate(0deg);
-  }
-  35% {
-    transform: translateX(18px) rotate(4deg);
-  }
-  70% {
-    transform: translateX(7px) rotate(-2deg);
+    transform: translate3d(0, 0, 0) rotate(0deg);
   }
   100% {
-    transform: translateX(24px) rotate(6deg);
+    transform: translate3d(24px, 0, 0) rotate(5deg);
   }
 }
 
 @keyframes reactionSwayWave {
   0% {
-    transform: translateX(0) rotate(0deg);
-  }
-  25% {
-    transform: translateX(-12px) rotate(-3deg);
+    transform: translate3d(0, 0, 0) rotate(0deg);
   }
   50% {
-    transform: translateX(10px) rotate(3deg);
-  }
-  75% {
-    transform: translateX(-8px) rotate(-2deg);
+    transform: translate3d(-10px, 0, 0) rotate(-2.5deg);
   }
   100% {
-    transform: translateX(4px) rotate(1deg);
+    transform: translate3d(8px, 0, 0) rotate(2deg);
   }
 }
 
 @keyframes reactionSwayCenter {
   0% {
-    transform: translateX(0) rotate(0deg);
-  }
-  25% {
-    transform: translateX(6px) rotate(2deg);
-  }
-  50% {
-    transform: translateX(-6px) rotate(-2deg);
-  }
-  75% {
-    transform: translateX(4px) rotate(1deg);
+    transform: translate3d(0, 0, 0) rotate(0deg);
   }
   100% {
-    transform: translateX(0) rotate(0deg);
+    transform: translate3d(3px, 0, 0) rotate(1deg);
   }
 }
 
