@@ -1163,8 +1163,8 @@ export default function MessagesPage() {
         return;
       }
 
-      // Connection acceptance guard
-      if (activeConversation?.type !== "group" && (!targetRelationship || !targetRelationship.isAcceptedConnection)) {
+      // Connection acceptance guard (relaxed if chat history exists)
+      if (activeConversation?.type !== "group" && messages.length === 0 && (!targetRelationship || !targetRelationship.isAcceptedConnection)) {
         alert("Messaging is locked until the follow request is accepted by both users.");
         return;
       }
@@ -1645,8 +1645,8 @@ export default function MessagesPage() {
       return;
     }
 
-    // Connection acceptance guard
-    if (activeConversation?.type !== "group" && (!targetRelationship || !targetRelationship.isAcceptedConnection)) {
+    // Connection acceptance guard (relaxed if chat history exists)
+    if (activeConversation?.type !== "group" && messages.length === 0 && (!targetRelationship || !targetRelationship.isAcceptedConnection)) {
       alert("Messaging is locked until the follow request is accepted by both users.");
       return;
     }
@@ -1722,7 +1722,7 @@ export default function MessagesPage() {
       return;
     }
 
-    if (activeConversation?.type !== "group" && (!targetRelationship || !targetRelationship.isAcceptedConnection)) {
+    if (activeConversation?.type !== "group" && messages.length === 0 && (!targetRelationship || !targetRelationship.isAcceptedConnection)) {
       alert("Messaging is locked until the follow request is accepted by both users.");
       return;
     }
@@ -1881,7 +1881,7 @@ export default function MessagesPage() {
       return;
     }
 
-    if (activeConversation?.type !== "group" && (!targetRelationship || !targetRelationship.isAcceptedConnection)) {
+    if (activeConversation?.type !== "group" && messages.length === 0 && (!targetRelationship || !targetRelationship.isAcceptedConnection)) {
       alert("Messaging is locked until the follow request is accepted by both users.");
       return;
     }
@@ -1997,7 +1997,7 @@ export default function MessagesPage() {
   }
 
   return (
-    <div className="h-screen h-[100dvh] flex flex-col bg-background overflow-hidden fixed inset-0 sm:relative sm:inset-auto">
+    <div className="h-dvh max-h-dvh w-full flex flex-col bg-background overflow-hidden fixed inset-0 sm:relative sm:inset-auto">
       <Navbar className={activeConversationId ? "hidden sm:block" : "block"} />
 
       <main className="flex-1 max-w-7xl w-full mx-auto p-0 sm:p-4 flex gap-4 min-h-0 overflow-hidden">
@@ -2324,8 +2324,10 @@ export default function MessagesPage() {
               broadcastReadReceipt(lastMsgTime);
             }
           }}
-          className={`flex-1 flex flex-col bg-card border-0 sm:border border-white/5 sm:rounded-2xl overflow-hidden h-full min-h-0 ${
-            !activeConversationId ? 'hidden sm:flex items-center justify-center' : 'flex'
+          className={`bg-card border-0 sm:border border-white/5 sm:rounded-2xl overflow-hidden min-h-0 ${
+            !activeConversationId
+              ? 'hidden sm:flex flex-1 sm:h-full items-center justify-center'
+              : 'flex flex-1 flex-col fixed inset-0 z-30 sm:relative sm:inset-auto sm:z-auto sm:h-full h-dvh max-h-dvh w-full'
           }`}
         >
           {!activeConversationId ? (
@@ -2355,7 +2357,7 @@ export default function MessagesPage() {
                     : (customNickname || shownName || "Chat");
 
                 return (
-                  <div className="sticky top-0 z-30 h-14 sm:h-16 border-b border-white/5 flex items-center justify-between px-2.5 sm:px-6 shrink-0 bg-[#090A0F]/95 backdrop-blur-xl shadow-sm pt-[env(safe-area-inset-top,0px)]">
+                  <div className="h-14 sm:h-16 border-b border-white/5 flex items-center justify-between px-2.5 sm:px-6 shrink-0 bg-[#090A0F]/95 backdrop-blur-xl shadow-sm pt-[env(safe-area-inset-top,0px)]">
                     <div className="flex items-center gap-2 sm:gap-3 min-w-0">
                       {/* Back Button */}
                       <button
@@ -2472,17 +2474,17 @@ export default function MessagesPage() {
                               avatar: peerAvatar,
                             });
                           }}
-                          disabled={callState !== "idle" || isBlocked || isBlockedByOther || Boolean(targetRelationship && !targetRelationship.isAcceptedConnection)}
+                          disabled={callState !== "idle" || isBlocked || isBlockedByOther || Boolean(targetRelationship && !targetRelationship.isAcceptedConnection && messages.length === 0)}
                           className={`px-3 py-1.5 rounded-xl flex items-center gap-1.5 transition-all active:scale-95 text-xs font-semibold shadow-sm ${
                             callState !== "idle" && activeCall?.conversationId === activeConversationId
                               ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 animate-pulse"
-                              : isBlocked || isBlockedByOther || (targetRelationship && !targetRelationship.isAcceptedConnection)
+                              : isBlocked || isBlockedByOther || (targetRelationship && !targetRelationship.isAcceptedConnection && messages.length === 0)
                               ? "opacity-50 cursor-not-allowed bg-white/5 text-slate-500 border border-white/5"
                               : "text-slate-200 hover:text-white bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/30"
                           }`}
-                          title={isBlocked ? "Cannot call blocked contact" : isBlockedByOther ? "User is unavailable" : (targetRelationship && !targetRelationship.isAcceptedConnection) ? "Follow request must be accepted before calling" : "Start Voice Call"}
+                          title={isBlocked ? "Cannot call blocked contact" : isBlockedByOther ? "User is unavailable" : (targetRelationship && !targetRelationship.isAcceptedConnection && messages.length === 0) ? "Follow request must be accepted before calling" : "Start Voice Call"}
                         >
-                          <PhoneCall size={15} className={isBlocked || isBlockedByOther || (targetRelationship && !targetRelationship.isAcceptedConnection) ? "text-slate-500" : "text-indigo-400"} />
+                          <PhoneCall size={15} className={isBlocked || isBlockedByOther || (targetRelationship && !targetRelationship.isAcceptedConnection && messages.length === 0) ? "text-slate-500" : "text-indigo-400"} />
                           <span className="hidden sm:inline">Voice Call</span>
                         </button>
                       )}
@@ -3409,7 +3411,8 @@ export default function MessagesPage() {
                   );
                 }
 
-                if (!isGroup && otherUserId && (isRelationshipLoading || !targetRelationship || !targetRelationship.isAcceptedConnection)) {
+                const hasChatHistory = messages.length > 0;
+                if (!isGroup && otherUserId && !hasChatHistory && (isRelationshipLoading || !targetRelationship || !targetRelationship.isAcceptedConnection)) {
                   if (isRelationshipLoading && !targetRelationship) {
                     return (
                       <div className="p-3 sm:p-4 border-t border-white/5 bg-black/40 backdrop-blur-md flex items-center justify-center gap-2 text-slate-400 text-xs">
@@ -3502,7 +3505,11 @@ export default function MessagesPage() {
                 }
 
                 return (
-                  <form onSubmit={handleSendMessage} className="relative p-2 sm:p-4 pb-[max(0.65rem,env(safe-area-inset-bottom))] border-t border-white/5 bg-[#090A0F]/95 backdrop-blur-xl shrink-0">
+                  <form
+                    onSubmit={handleSendMessage}
+                    className="relative p-2 sm:p-4 border-t border-white/5 bg-[#090A0F]/95 backdrop-blur-xl shrink-0 w-full z-20"
+                    style={{ paddingBottom: "max(0.65rem, env(safe-area-inset-bottom, 0px))" }}
+                  >
                     {/* Hidden E2EE Image File Input */}
                     <input
                       ref={imageInputRef}
@@ -3652,7 +3659,7 @@ export default function MessagesPage() {
                         </div>
                       </div>
                     ) : (
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 w-full max-w-4xl mx-auto">
                         {/* Unified WhatsApp-style Message Input Capsule */}
                         <div className="relative flex-1 flex items-center min-w-0 bg-[#12131D]/90 hover:bg-[#151724] focus-within:bg-[#151724] border border-white/10 focus-within:border-indigo-500/50 focus-within:ring-2 focus-within:ring-indigo-500/20 rounded-full pl-1.5 pr-2 sm:pl-2 sm:pr-3 py-1 sm:py-1.5 transition-all shadow-inner">
                           
