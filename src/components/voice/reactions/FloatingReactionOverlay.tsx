@@ -28,7 +28,7 @@ const FloatingReactionItem = memo(function FloatingReactionItem({
     swayClass = "animate-reaction-sway-wave";
   }
 
-  const animDuration = r.duration ? `${r.duration}s` : "4.0s";
+  const animDuration = r.duration ? `${r.duration}s` : "5.8s";
 
   return (
     // Layer 1: Continuous, uninterrupted vertical ascent (Y-axis only: zero stops, zero stutter)

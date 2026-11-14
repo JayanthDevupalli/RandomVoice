@@ -2189,7 +2189,7 @@ export function JunctionRoom({
           "❤️";
         const now = Date.now();
         recentReactionPositionsRef.current = recentReactionPositionsRef.current.filter(
-          (p) => now - p.time < 1800
+          (p) => now - p.time < 3000
         );
         // Anchor to dedicated right-hand stream corridor (78% to 92%)
         const rawX = typeof payload.x === "number" ? payload.x : 84;
@@ -2214,7 +2214,7 @@ export function JunctionRoom({
         }
         resolvedSenderName = resolvedSenderName || "Friend";
 
-        const resolvedDuration = payload.duration || 4.0;
+        const resolvedDuration = payload.duration || 5.8;
         const resolvedReaction: VectorReaction = {
           ...payload,
           id: reactionId,
@@ -3801,9 +3801,9 @@ export function JunctionRoom({
     lastReactionTimeRef.current = now;
     lastReactionIdRef.current = item.id;
 
-    // Purge reaction positions older than 1800ms
+    // Purge reaction positions older than 3000ms
     recentReactionPositionsRef.current = recentReactionPositionsRef.current.filter(
-      (p) => now - p.time < 1800
+      (p) => now - p.time < 3000
     );
 
     // 2. Dedicated Right-Hand Stream Corridor (78% to 92%)
@@ -3835,8 +3835,8 @@ export function JunctionRoom({
     const sways: SwayType[] = ["center", "left", "right", "wave"];
     const sway = sways[Math.floor(Math.random() * sways.length)];
 
-    // 4. Calm, relaxed floating velocity (3.8s to 4.3s duration)
-    const duration = +(3.8 + Math.random() * 0.5).toFixed(2);
+    // 4. Calm, relaxed floating velocity (5.5s to 6.2s duration)
+    const duration = +(5.5 + Math.random() * 0.7).toFixed(2);
 
     // Resolve accurate sender name for local user
     const resolvedSenderName =
@@ -5229,7 +5229,11 @@ export function JunctionRoom({
                       </button>
                     </div>
                   ) : (
-                    <div className="flex flex-wrap items-center justify-center gap-3 sm:gap-4.5 w-full max-w-5xl mx-auto transition-all duration-300">
+                    <div className={`w-full max-w-5xl mx-auto transition-all duration-300 ${
+                      participantCount === 1
+                        ? "flex items-center justify-center"
+                        : "grid grid-cols-2 sm:flex sm:flex-wrap items-center justify-center gap-2 sm:gap-4.5"
+                    }`}>
                       {seatedParticipants.map((participant, index) => {
                         const isLocal = isLocalParticipant(participant);
                         const isParticipantMod = participant?.role === "moderator";
@@ -5264,10 +5268,14 @@ export function JunctionRoom({
                           <div
                             key={participant.identity || participant.username || participant.id || `seat-${index}`}
                             style={cardThemeStyle}
-                            className={`relative w-full min-w-0 rounded-2xl sm:rounded-[1.4rem] flex flex-col justify-between items-center text-center transition-all duration-300 border overflow-hidden backdrop-blur-xl group/card shadow-[0_12px_32px_-8px_rgba(0,0,0,0.6)] ${
+                            className={`relative min-w-0 rounded-2xl sm:rounded-[1.4rem] flex flex-col justify-between items-center text-center transition-all duration-300 border overflow-hidden backdrop-blur-xl group/card shadow-[0_12px_32px_-8px_rgba(0,0,0,0.6)] ${
                               participantCount === 1
                                 ? "p-3.5 sm:p-4.5 w-[220px] xs:w-[240px] sm:w-[260px] min-h-[195px] sm:min-h-[225px]"
-                                : "p-3 sm:p-4 w-[calc(50%-0.5rem)] xs:w-[190px] sm:w-[220px] md:w-[235px] max-w-[250px] min-h-[185px] sm:min-h-[215px]"
+                                : `p-2 sm:p-4 w-full sm:w-[220px] md:w-[235px] max-w-[250px] min-h-[170px] sm:min-h-[215px] ${
+                                    participantCount % 2 === 1 && index === participantCount - 1
+                                      ? "col-span-2 max-w-[180px] xs:max-w-[220px] justify-self-center"
+                                      : ""
+                                  }`
                             } ${
                               participantRole === "super_admin"
                                 ? "ring-1.5 ring-amber-400/80 shadow-[0_0_25px_rgba(245,158,11,0.25)]"
@@ -5428,7 +5436,7 @@ export function JunctionRoom({
                               }}
                             >
                               <div
-                                className="w-16 h-16 sm:w-20 sm:h-20 shrink-0 rounded-2xl sm:rounded-[1.4rem] overflow-hidden flex items-center justify-center transition-colors shadow-inner"
+                                className="w-14 h-14 xs:w-16 xs:h-16 sm:w-20 sm:h-20 shrink-0 rounded-2xl sm:rounded-[1.4rem] overflow-hidden flex items-center justify-center transition-colors shadow-inner"
                                 style={{
                                   backgroundColor: participant.color ? `${participant.color}22` : "rgba(0,0,0,0.45)",
                                   border: `1.5px solid ${participant.color ? `${participant.color}45` : "rgba(255,255,255,0.12)"}`,
@@ -5447,7 +5455,7 @@ export function JunctionRoom({
                                     const IconComponent = AVATAR_ICON_MAP[normalizedKey] || AVATAR_ICON_MAP[participantAvatar || ""] || Sparkles;
                                     return (
                                       <IconComponent
-                                        className="w-8 h-8 sm:w-10 sm:h-10 shrink-0 transition-transform duration-300 group-hover:scale-110 drop-shadow-md"
+                                        className="w-7 h-7 xs:w-8 xs:h-8 sm:w-10 sm:h-10 shrink-0 transition-transform duration-300 group-hover:scale-110 drop-shadow-md"
                                         style={{ color: speaking ? "#34D399" : (participant.color || "#6366F1") }}
                                       />
                                     );
@@ -5489,7 +5497,7 @@ export function JunctionRoom({
                               }}
                             >
                               <div className="flex items-center justify-center gap-1.5 max-w-full">
-                                <span className="font-bold text-xs sm:text-sm text-white tracking-tight truncate max-w-[120px] xs:max-w-[145px] sm:max-w-[175px] group-hover/name:underline decoration-white/40">
+                                <span className="font-bold text-xs sm:text-sm text-white tracking-tight truncate max-w-[105px] xs:max-w-[145px] sm:max-w-[175px] group-hover/name:underline decoration-white/40">
                                   {isLocal
                                     ? (isRegistered && user?.isRegistered ? (user?.displayName || user?.name) : (guest?.displayName || guest?.name || participant.name))
                                     : participant.name}
