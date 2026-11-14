@@ -19,6 +19,8 @@ import {
   ChevronUp,
   Sliders,
   ExternalLink,
+  ListMusic,
+  Square,
 } from "lucide-react";
 import { MusicTrack, RoomMusicState } from "@/lib/music-types";
 import { JunctionParticipant } from "@/lib/types";
@@ -32,13 +34,14 @@ interface MusicDeckProps {
   canModerateAux?: boolean;
   isExpanded: boolean;
   onToggleExpand: () => void;
-  onOpenMusicModal: () => void;
+  onOpenMusicModal: (tab?: "youtube" | "queue") => void;
   onTogglePlayback: (isPlaying: boolean, currentSeek: number) => void;
   onSeek: (seekTime: number) => void;
   onReleaseAux: () => void;
   onClaimAux: () => void;
   onStopMusic: () => void;
   onHeartbeatSync?: (liveSeek: number) => void;
+  onAutoAdvanceQueue?: () => void;
 }
 
 declare global {
@@ -63,6 +66,7 @@ export function MusicDeck({
   onClaimAux,
   onStopMusic,
   onHeartbeatSync,
+  onAutoAdvanceQueue,
 }: MusicDeckProps) {
   // Local volume control (0-100) and mute
   const [localVolume, setLocalVolume] = useState<number>(() => {
@@ -82,6 +86,8 @@ export function MusicDeck({
   onTogglePlaybackRef.current = onTogglePlayback;
   const onHeartbeatSyncRef = useRef(onHeartbeatSync);
   onHeartbeatSyncRef.current = onHeartbeatSync;
+  const onAutoAdvanceQueueRef = useRef(onAutoAdvanceQueue);
+  onAutoAdvanceQueueRef.current = onAutoAdvanceQueue;
   const [isPlayerReady, setIsPlayerReady] = useState(false);
   const [currentTime, setCurrentTime] = useState<number>(0);
   const [duration, setDuration] = useState<number>(0);
@@ -239,8 +245,12 @@ export function MusicDeck({
               const currentPos = target?.getCurrentTime?.() || 0;
 
               if (state === 0) {
-                // Track finished!
-                onTogglePlaybackRef.current(false, 0);
+                // Track finished! Auto-advance to next song in queue if available
+                if (onAutoAdvanceQueueRef.current) {
+                  onAutoAdvanceQueueRef.current();
+                } else {
+                  onTogglePlaybackRef.current(false, 0);
+                }
               } else if (state === 1 && !musicState.isPlaying) {
                 // AUX holder started playback via YouTube native controls
                 onTogglePlaybackRef.current(true, currentPos);
@@ -399,18 +409,18 @@ export function MusicDeck({
         {/* Expanded Theatre Header */}
         <div className="px-3.5 sm:px-4 py-2.5 bg-white/[0.02] border-b border-white/5 flex items-center justify-between gap-2 sm:gap-3">
           <div className="flex items-center gap-2 min-w-0 flex-1">
-            <span className="text-sm shrink-0">🔌</span>
+            <span className="text-sm shrink-0">🎧</span>
             <div className="text-xs truncate">
               {isAuxHolder ? (
                 <span className="text-indigo-400 font-semibold flex items-center gap-1.5">
                   <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                  You hold the AUX (DJ)
+                  You are the DJ 🎧
                 </span>
               ) : isAuxFree ? (
-                <span className="text-emerald-400 font-medium">AUX: Free (Grab AUX to DJ)</span>
+                <span className="text-emerald-400 font-medium">No DJ — Tap to control music</span>
               ) : (
                 <span className="text-slate-300 font-medium">
-                  AUX: <span className="text-amber-300 font-semibold">{musicState.auxHolderName || "Room"}</span>
+                  DJ: <span className="text-amber-300 font-semibold">{musicState.auxHolderName || "Room"}</span>
                 </span>
               )}
               <span className="text-slate-500 mx-1.5">•</span>
@@ -419,32 +429,32 @@ export function MusicDeck({
           </div>
 
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-            {/* Grab / Take / Drop AUX Quick Button */}
+            {/* Grab / Take / Drop DJ Quick Button */}
             {isAuxFree ? (
               <button
                 onClick={onClaimAux}
                 className="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 text-xs font-semibold flex items-center gap-1 transition-all active:scale-95 cursor-pointer shadow-xs shadow-emerald-500/20"
-                title="Grab AUX Cord"
+                title="Become DJ"
               >
                 <Sparkles size={11} />
-                Grab AUX
+                Become DJ
               </button>
             ) : isAuxHolder ? (
               <button
                 onClick={onReleaseAux}
                 className="px-2 py-0.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 text-xs font-semibold flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
-                title="Release AUX Cord"
+                title="Step Down as DJ"
               >
-                Drop AUX
+                Step Down
               </button>
             ) : canModerateAux ? (
               <button
                 onClick={onClaimAux}
                 className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 text-xs font-semibold flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
-                title="Moderator Override: Take AUX cord"
+                title="Moderator Takeover: Become DJ"
               >
                 <Sparkles size={11} />
-                Take AUX
+                Take DJ
               </button>
             ) : null}
 
@@ -492,13 +502,35 @@ export function MusicDeck({
               )}
             </div>
 
-            {/* Change Track / AUX modal */}
+            {/* Queue Modal Button */}
             <button
-              onClick={onOpenMusicModal}
-              className="px-2.5 py-1 rounded-lg bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 border border-indigo-500/40 text-xs font-semibold transition-all"
+              onClick={() => onOpenMusicModal("queue")}
+              className="px-2.5 py-1 rounded-lg bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 border border-indigo-500/40 text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer"
+              title="View Song Queue"
             >
-              Music
+              <ListMusic size={13} />
+              <span>Queue{musicState.queue?.length ? ` (${musicState.queue.length})` : ""}</span>
             </button>
+
+            {/* Change Track modal */}
+            <button
+              onClick={() => onOpenMusicModal("youtube")}
+              className="px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-semibold transition-all cursor-pointer"
+            >
+              Change Song
+            </button>
+
+            {/* End Music Button (for DJ, moderators, or when DJ is free) */}
+            {(isAuxHolder || canModerateAux || isAuxFree) && (
+              <button
+                onClick={onStopMusic}
+                className="px-2.5 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer shadow-xs"
+                title="End Music Player for Everyone"
+              >
+                <Square size={11} className="fill-current text-rose-400" />
+                <span>End Music</span>
+              </button>
+            )}
 
             {/* Minimize Stage */}
             <button
@@ -574,9 +606,9 @@ export function MusicDeck({
           <div className="relative z-30 bg-[#0E1017]/95 backdrop-blur-2xl border border-white/10 rounded-2xl sm:rounded-full px-2.5 py-1.5 sm:px-4 sm:py-2 shadow-[0_8px_30px_rgba(0,0,0,0.6)] flex items-center justify-between gap-2 sm:gap-3">
             {/* Track Info (Clickable to open Music Modal) */}
             <div
-              onClick={onOpenMusicModal}
+              onClick={() => onOpenMusicModal?.("youtube")}
               className="flex items-center gap-2.5 min-w-0 flex-1 cursor-pointer group/track"
-              title="Click to view stations or queue YouTube tracks"
+              title="Click to view queue or add YouTube songs"
             >
               {/* Thumbnail / Animated Equalizer Bars */}
               <div className="relative w-8 h-8 sm:w-9 sm:h-9 rounded-xl sm:rounded-full overflow-hidden shrink-0 bg-indigo-950/40 border border-indigo-500/30 flex items-center justify-center">
@@ -608,9 +640,9 @@ export function MusicDeck({
                   </span>
                 </div>
                 <div className="flex items-center gap-1.5 text-[10px] text-slate-400 mt-0.5 min-w-0">
-                  <span className="shrink-0 text-slate-500">AUX:</span>
+                  <span className="shrink-0 text-slate-500">DJ:</span>
                   <span className="text-amber-300 font-medium truncate max-w-[75px] xs:max-w-[120px] sm:max-w-none shrink-0">
-                    {isAuxHolder ? "You (DJ)" : isAuxFree ? "Free" : musicState.auxHolderName || "Room"}
+                    {isAuxHolder ? "You 🎧" : isAuxFree ? "Open" : musicState.auxHolderName || "Room"}
                   </span>
                   {!track.isLive && duration > 0 && (
                     <>
@@ -626,7 +658,20 @@ export function MusicDeck({
 
             {/* Right Controls */}
             <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
-              {/* Grab AUX Quick Action (when AUX is free) */}
+              {/* Queue Button */}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenMusicModal("queue");
+                }}
+                className="px-2.5 py-1 rounded-full bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-500/35 text-indigo-300 text-[10px] font-semibold flex items-center gap-1 transition-all active:scale-95 cursor-pointer shrink-0"
+                title="View Song Queue"
+              >
+                <ListMusic size={11} />
+                <span>Queue{musicState.queue?.length ? ` (${musicState.queue.length})` : ""}</span>
+              </button>
+
+              {/* Become DJ Quick Action (when DJ is free) */}
               {isAuxFree && (
                 <button
                   onClick={(e) => {
@@ -634,10 +679,10 @@ export function MusicDeck({
                     onClaimAux();
                   }}
                   className="px-2 py-0.5 rounded-full bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 text-[10px] font-bold flex items-center gap-1 transition-all active:scale-95 cursor-pointer shrink-0 shadow-xs shadow-emerald-500/20"
-                  title="Grab the AUX cord to control music"
+                  title="Become DJ to control music"
                 >
                   <Sparkles size={10} />
-                  <span>Grab AUX</span>
+                  <span>Become DJ</span>
                 </button>
               )}
 
@@ -709,11 +754,25 @@ export function MusicDeck({
                 <Maximize2 size={14} />
               </button>
 
-              {/* Browse Stations / Tracks Modal Button (Desktop/Tablet) */}
+              {/* End Music Button */}
+              {(isAuxHolder || canModerateAux || isAuxFree) && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onStopMusic();
+                  }}
+                  className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 hover:text-rose-200 transition-all flex items-center justify-center shrink-0 cursor-pointer"
+                  title="End Music (Turn Off Player)"
+                >
+                  <Square size={11} className="fill-current" />
+                </button>
+              )}
+
+              {/* Browse Tracks / Queue Modal Button (Desktop/Tablet) */}
               <button
-                onClick={onOpenMusicModal}
+                onClick={() => onOpenMusicModal?.("youtube")}
                 className="hidden sm:flex w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/30 text-indigo-300 hover:text-white items-center justify-center transition-all shrink-0 cursor-pointer"
-                title="Open Music Stations & Queue"
+                title="Open Music Modal & Queue"
               >
                 <Headphones size={13} />
               </button>

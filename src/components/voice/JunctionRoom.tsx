@@ -79,7 +79,7 @@ import {
 } from "lucide-react";
 import { MusicDeck } from "./music/MusicDeck";
 import { MusicModal } from "./music/MusicModal";
-import { RoomMusicState, MusicTrack } from "@/lib/music-types";
+import { RoomMusicState, MusicTrack, QueuedTrack } from "@/lib/music-types";
 import { RoleBadge, RoleAvatarDot } from "@/components/ui/RoleBadge";
 import {
   VectorReaction,
@@ -656,11 +656,18 @@ export function JunctionRoom({
     isPlaying: false,
     seekTime: 0,
     lastSyncTime: Date.now(),
+    queue: [],
   });
   const musicStateRef = useRef(musicState);
   musicStateRef.current = musicState;
   const [isMusicModalOpen, setIsMusicModalOpen] = useState(false);
+  const [musicModalInitialTab, setMusicModalInitialTab] = useState<"youtube" | "queue">("youtube");
   const [isMusicExpanded, setIsMusicExpanded] = useState(false);
+
+  const handleOpenMusicModal = useCallback((tab: "youtube" | "queue" = "youtube") => {
+    setMusicModalInitialTab(tab);
+    setIsMusicModalOpen(true);
+  }, []);
 
   // Floating Minimized Draggable Pill State & Handlers
   const [minimizedPillPos, setMinimizedPillPos] = useState<{ x: number; y: number } | null>(null);
@@ -1500,6 +1507,7 @@ export function JunctionRoom({
       isPlaying: true,
       seekTime: 0,
       lastSyncTime: Date.now(),
+      queue: musicStateRef.current.queue || [],
     };
     setMusicState(update);
     broadcastRoomUpdate({
@@ -1553,7 +1561,11 @@ export function JunctionRoom({
     const currentHolder = musicStateRef.current.auxHolderIdentity;
     const hasModClearance = isCurrentModerator || isStaff;
     const isHolder = Boolean(currentHolder && isLocalIdentity(currentHolder));
-    if (!isHolder && !hasModClearance) {
+    const holderInRoom = isAuxHolderInRoom();
+    const isDJFree = !currentHolder || !holderInRoom;
+
+    // Allowed if current user is the DJ, OR if there is no active DJ, OR if user has mod clearance
+    if (!isHolder && !isDJFree && !hasModClearance) {
       return;
     }
 
@@ -1566,6 +1578,7 @@ export function JunctionRoom({
       isPlaying: false,
       seekTime: 0,
       lastSyncTime: Date.now(),
+      queue: musicStateRef.current.queue || [],
     };
     setMusicState(update);
     broadcastRoomUpdate({
@@ -1573,7 +1586,7 @@ export function JunctionRoom({
       payload: { senderIdentity: myIdentity },
     });
     setIsMusicExpanded(false);
-  }, [myIdentity, broadcastRoomUpdate, isLocalIdentity, isCurrentModerator, isStaff]);
+  }, [myIdentity, broadcastRoomUpdate, isLocalIdentity, isAuxHolderInRoom, isCurrentModerator, isStaff]);
 
   const handleHeartbeatSync = useCallback((liveSeek: number) => {
     const currentHolder = musicStateRef.current.auxHolderIdentity;
@@ -1592,8 +1605,154 @@ export function JunctionRoom({
         seekTime: liveSeek,
         timestamp: Date.now(),
         senderIdentity: myIdentity,
+        isPlaying: musicStateRef.current.isPlaying,
       },
     });
+  }, [myIdentity, isLocalIdentity, broadcastRoomUpdate]);
+
+  const handleAddToQueue = useCallback((track: MusicTrack) => {
+    const currentHolder = musicStateRef.current.auxHolderIdentity;
+    const isDJ = Boolean(currentHolder && isLocalIdentity(currentHolder));
+    const currentQueue = musicStateRef.current.queue || [];
+
+    // Rule: Non-DJ participants can only keep 2 songs in the queue at a time!
+    if (!isDJ) {
+      const userCount = currentQueue.filter(
+        (q) => q.addedByIdentity?.toLowerCase().trim() === myIdentity.toLowerCase().trim()
+      ).length;
+      if (userCount >= 2) {
+        console.warn("Queue limit reached: Non-DJ participants can only keep 2 songs in queue at a time.");
+        return;
+      }
+    }
+
+    const queuedTrack: QueuedTrack = {
+      ...track,
+      queueId: `queue_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      addedByIdentity: myIdentity,
+      addedByName: myDisplayName,
+      addedAt: Date.now(),
+    };
+
+    const updatedQueue = [...currentQueue, queuedTrack];
+    setMusicState((prev) => ({
+      ...prev,
+      queue: updatedQueue,
+    }));
+    broadcastRoomUpdate({
+      type: "music_queue_add",
+      payload: { track: queuedTrack },
+    });
+  }, [myIdentity, myDisplayName, isLocalIdentity, broadcastRoomUpdate]);
+
+  const handleRemoveFromQueue = useCallback((queueId: string) => {
+    const currentQueue = musicStateRef.current.queue || [];
+    const targetTrack = currentQueue.find((q) => q.queueId === queueId);
+    if (!targetTrack) return;
+
+    const currentHolder = musicStateRef.current.auxHolderIdentity;
+    const isDJ = Boolean(currentHolder && isLocalIdentity(currentHolder));
+    const isOwner = targetTrack.addedByIdentity?.toLowerCase().trim() === myIdentity.toLowerCase().trim();
+    const hasModClearance = isCurrentModerator || isStaff;
+
+    if (!isDJ && !isOwner && !hasModClearance) {
+      return;
+    }
+
+    const updatedQueue = currentQueue.filter((q) => q.queueId !== queueId);
+    setMusicState((prev) => ({
+      ...prev,
+      queue: updatedQueue,
+    }));
+    broadcastRoomUpdate({
+      type: "music_queue_remove",
+      payload: { queueId, senderIdentity: myIdentity },
+    });
+  }, [myIdentity, isLocalIdentity, isCurrentModerator, isStaff, broadcastRoomUpdate]);
+
+  const handlePlayQueuedTrack = useCallback((queueId: string) => {
+    const currentHolder = musicStateRef.current.auxHolderIdentity;
+    const isDJ = Boolean(currentHolder && isLocalIdentity(currentHolder));
+    const hasModClearance = isCurrentModerator || isStaff;
+    const holderInRoom = isAuxHolderInRoom();
+    const isDJFree = !currentHolder || !holderInRoom;
+
+    if (!isDJ && !isDJFree && !hasModClearance) {
+      return;
+    }
+
+    const currentQueue = musicStateRef.current.queue || [];
+    const targetTrack = currentQueue.find((q) => q.queueId === queueId);
+    if (!targetTrack) return;
+
+    // Removes track from queue so the submitting user's slot is cleared
+    const updatedQueue = currentQueue.filter((q) => q.queueId !== queueId);
+    const activeHolderId = isDJ ? currentHolder : myIdentity;
+    const activeHolderName = isDJ ? musicStateRef.current.auxHolderName : myDisplayName;
+
+    const updatedMusicState: RoomMusicState = {
+      isActive: true,
+      auxHolderIdentity: activeHolderId,
+      auxHolderName: activeHolderName,
+      auxStartedAt: musicStateRef.current.auxStartedAt || Date.now(),
+      currentTrack: targetTrack,
+      isPlaying: true,
+      seekTime: 0,
+      lastSyncTime: Date.now(),
+      queue: updatedQueue,
+    };
+
+    setMusicState(updatedMusicState);
+    broadcastRoomUpdate({
+      type: "music_queue_play",
+      payload: {
+        queueId,
+        track: targetTrack,
+        senderIdentity: myIdentity,
+      },
+    });
+  }, [myIdentity, myDisplayName, isLocalIdentity, isAuxHolderInRoom, isCurrentModerator, isStaff, broadcastRoomUpdate]);
+
+  const handleAutoAdvanceQueue = useCallback(() => {
+    const currentHolder = musicStateRef.current.auxHolderIdentity;
+    const isDJ = Boolean(currentHolder && isLocalIdentity(currentHolder));
+    if (!isDJ) return;
+
+    const currentQueue = musicStateRef.current.queue || [];
+    if (currentQueue.length > 0) {
+      const nextTrack = currentQueue[0];
+      const remainingQueue = currentQueue.slice(1);
+
+      const update: RoomMusicState = {
+        ...musicStateRef.current,
+        isActive: true,
+        currentTrack: nextTrack,
+        isPlaying: true,
+        seekTime: 0,
+        lastSyncTime: Date.now(),
+        queue: remainingQueue,
+      };
+
+      setMusicState(update);
+      broadcastRoomUpdate({
+        type: "music_queue_play",
+        payload: {
+          queueId: nextTrack.queueId,
+          track: nextTrack,
+          senderIdentity: myIdentity,
+        },
+      });
+    } else {
+      setMusicState((prev) => ({
+        ...prev,
+        isPlaying: false,
+        seekTime: 0,
+      }));
+      broadcastRoomUpdate({
+        type: "music_playback_toggle",
+        payload: { isPlaying: false, seekTime: 0, timestamp: Date.now(), senderIdentity: myIdentity },
+      });
+    }
   }, [myIdentity, isLocalIdentity, broadcastRoomUpdate]);
 
   // Profile Preview Modal State
@@ -2348,13 +2507,14 @@ export function JunctionRoom({
               );
             });
 
-        setMusicState({
+        setMusicState((prev) => ({
           ...payload,
+          queue: Array.isArray(payload.queue) ? payload.queue : (prev.queue || []),
           auxHolderIdentity: isHolderPresent ? payload.auxHolderIdentity : null,
           auxHolderName: isHolderPresent ? payload.auxHolderName : null,
           auxStartedAt: isHolderPresent ? payload.auxStartedAt : null,
           lastSyncTime: payload.lastSyncTime || Date.now(),
-        });
+        }));
       } else if (type === "music_sync_heartbeat" && payload) {
         const currentHolder = musicStateRef.current.auxHolderIdentity;
         // Verify heartbeat is from AUX holder
@@ -2432,12 +2592,45 @@ export function JunctionRoom({
             lastSyncTime: payload.timestamp || Date.now(),
           }));
         }
+      } else if (type === "music_queue_add" && payload?.track) {
+        setMusicState((prev) => {
+          const currentQueue = prev.queue || [];
+          if (currentQueue.some((q) => q.queueId === payload.track.queueId)) {
+            return prev;
+          }
+          return {
+            ...prev,
+            queue: [...currentQueue, payload.track],
+          };
+        });
+      } else if (type === "music_queue_remove" && payload?.queueId) {
+        setMusicState((prev) => ({
+          ...prev,
+          queue: (prev.queue || []).filter((q) => q.queueId !== payload.queueId),
+        }));
+      } else if (type === "music_queue_play" && payload?.track) {
+        setMusicState((prev) => ({
+          ...prev,
+          isActive: true,
+          currentTrack: payload.track,
+          isPlaying: true,
+          seekTime: 0,
+          lastSyncTime: Date.now(),
+          queue: (prev.queue || []).filter((q) => q.queueId !== payload.queueId),
+        }));
+      } else if (type === "music_queue_clear") {
+        setMusicState((prev) => ({
+          ...prev,
+          queue: [],
+        }));
       } else if (type === "music_stop") {
         const currentHolder = musicStateRef.current.auxHolderIdentity;
-        if (currentHolder && payload?.senderIdentity && currentHolder.toLowerCase().trim() !== payload.senderIdentity.toLowerCase().trim()) {
-          console.warn("Ignored stop from non-AUX holder");
+        const holderInRoom = isAuxHolderInRoom();
+        const isDJFree = !currentHolder || !holderInRoom;
+        if (currentHolder && !isDJFree && payload?.senderIdentity && currentHolder.toLowerCase().trim() !== payload.senderIdentity.toLowerCase().trim()) {
+          console.warn("Ignored stop from non-DJ participant");
         } else {
-          setMusicState({
+          setMusicState((prev) => ({
             isActive: false,
             auxHolderIdentity: null,
             auxHolderName: null,
@@ -2446,7 +2639,8 @@ export function JunctionRoom({
             isPlaying: false,
             seekTime: 0,
             lastSyncTime: Date.now(),
-          });
+            queue: prev.queue || [],
+          }));
           setIsMusicExpanded(false);
         }
       }
@@ -4060,15 +4254,11 @@ export function JunctionRoom({
     isDeparted,
   ]);
   const speakingParticipant = effectiveParticipants.find((p) => activeSpeakers.some((s) => s.toLowerCase() === (p.identity || p.id || "").toLowerCase())) || effectiveParticipants[0];
-  const SEAT_SLOTS = Array.from({ length: junction?.maxParticipants || (isPrivateRoom ? 2 : 10) });
 
-  // Deterministic, compact sequential first-come first-served seating assignments.
-  // Active participants ALWAYS fill seats #1, #2, #3, ... compactly without empty gaps.
-  // When a user exits, all subsequent participants seamlessly shift forward into the vacant seats.
-  const seatedParticipants: (JunctionParticipant | null)[] = useMemo(() => {
+  // Only active participants are displayed on the stage.
+  // Open / vacant seat slots are removed; the stage dynamically adapts to the exact participant count.
+  const seatedParticipants: JunctionParticipant[] = useMemo(() => {
     const maxSeats = junction?.maxParticipants || (isPrivateRoom ? 2 : 10);
-    const seats: (JunctionParticipant | null)[] = Array.from({ length: maxSeats }, () => null);
-
     const getPKey = (p: JunctionParticipant) =>
       (p.identity || p.id || "").toLowerCase().trim();
 
@@ -4081,12 +4271,7 @@ export function JunctionRoom({
       return getPKey(a).localeCompare(getPKey(b));
     });
 
-    // 2. Compactly allocate seats from #1 (index 0) upwards without any empty gaps
-    for (let i = 0; i < Math.min(sorted.length, maxSeats); i++) {
-      seats[i] = sorted[i];
-    }
-
-    return seats;
+    return sorted.slice(0, maxSeats);
   }, [effectiveParticipants, junction?.maxParticipants, isPrivateRoom, isDeparted]);
 
   // Kicked / Banned / Ended Modal (Rendered strictly AFTER all hooks to adhere to React Rules of Hooks)
@@ -4779,12 +4964,12 @@ export function JunctionRoom({
                   {/* Music Mode Trigger Button */}
                   <button
                     type="button"
-                    onClick={() => setIsMusicModalOpen(true)}
+                    onClick={() => handleOpenMusicModal("youtube")}
                     className={`w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95 relative ${musicState.isActive
                       ? "bg-indigo-600 text-white border border-indigo-400/50 shadow-[0_0_15px_rgba(99,102,241,0.5)]"
                       : "bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10"
                       }`}
-                    title={musicState.isActive ? `Music: ${musicState.currentTrack?.title || "Playing"}` : "Music & Media (AUX Cord)"}
+                    title={musicState.isActive ? `DJ Music: ${musicState.currentTrack?.title || "Playing"}` : "DJ & Music"}
                   >
                     <Headphones size={15} className={musicState.isPlaying ? "text-white animate-pulse" : "text-indigo-400"} />
                     {musicState.isActive && (
@@ -4853,15 +5038,15 @@ export function JunctionRoom({
                       </button>
                     )}
 
-                    {/* Music AUX button */}
+                    {/* Music DJ button */}
                     <button
                       type="button"
-                      onClick={() => setIsMusicModalOpen(true)}
+                      onClick={() => handleOpenMusicModal("youtube")}
                       className={`w-8 h-8 rounded-full flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95 relative ${musicState.isActive
                         ? "bg-indigo-600 text-white border border-indigo-400/50 shadow-[0_0_15px_rgba(99,102,241,0.5)]"
                         : "bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10"
                         }`}
-                      title="Music & Media (AUX Cord)"
+                      title="DJ & Music"
                     >
                       <Headphones size={13} className={musicState.isPlaying ? "text-white animate-pulse" : "text-indigo-400"} />
                       {musicState.isActive && (
@@ -4996,7 +5181,7 @@ export function JunctionRoom({
               </div>
             </div>
 
-            {/* Synchronized Music & Media Stage (The AUX Cord) */}
+            {/* Synchronized Music & Media Stage (DJ Deck) */}
             <div className="relative z-30">
               <MusicDeck
                 musicState={musicState}
@@ -5006,418 +5191,353 @@ export function JunctionRoom({
                 canModerateAux={isCurrentModerator || isStaff}
                 isExpanded={isMusicExpanded}
                 onToggleExpand={() => setIsMusicExpanded((prev) => !prev)}
-                onOpenMusicModal={() => setIsMusicModalOpen(true)}
+                onOpenMusicModal={handleOpenMusicModal}
                 onTogglePlayback={handleToggleMusicPlayback}
                 onSeek={handleSeekMusic}
                 onReleaseAux={handleReleaseAux}
                 onClaimAux={handleClaimAux}
                 onStopMusic={handleStopMusic}
                 onHeartbeatSync={handleHeartbeatSync}
+                onAutoAdvanceQueue={handleAutoAdvanceQueue}
               />
             </div>
 
-            {/* Dynamic Seat Stage Grid */}
-            <div className={`relative z-10 w-full mx-auto px-2.5 sm:px-6 my-auto py-2 sm:py-4 ${SEAT_SLOTS.length <= 2 ? "max-w-2xl" :
-              SEAT_SLOTS.length <= 4 ? "max-w-3xl" :
-                SEAT_SLOTS.length <= 6 ? "max-w-4xl" :
-                  SEAT_SLOTS.length <= 8 ? "max-w-5xl" :
-                    "max-w-6xl"
-              }`}>
-              <div className={`grid gap-2.5 sm:gap-4 justify-center mx-auto ${SEAT_SLOTS.length <= 2 ? "grid-cols-1 sm:grid-cols-2" :
-                SEAT_SLOTS.length <= 4 ? "grid-cols-2 sm:grid-cols-2" :
-                  SEAT_SLOTS.length <= 6 ? "grid-cols-2 sm:grid-cols-3" :
-                    SEAT_SLOTS.length <= 8 ? "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4" :
-                      SEAT_SLOTS.length <= 10 ? "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5" :
-                        "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6"
-                }`}>
-                {SEAT_SLOTS.map((_, index) => {
-                  const participant = seatedParticipants[index];
-                  const isLocal = isLocalParticipant(participant);
-                  const isParticipantMod = participant?.role === "moderator";
-                  const participantRole = isLocal
-                    ? myPlatformRole
-                    : (participant?.userRole || "user");
-                  if (participant) {
-                    const speaking = isLocal ? isLocalSpeaking : activeSpeakers.some((s) => s.toLowerCase() === participant.identity?.toLowerCase());
-                    const muted = isLocal ? (isMuted || isMutedByMod) : (participant.isMuted || participant.isMutedByMod);
-                    const activeCardBg = (isLocal && user?.cardBgColor && user.cardBgColor !== "#465B73")
-                      ? user.cardBgColor
-                      : (participant.cardBgColor || participant.color);
-                    const cardThemeStyle = getCardThemeStyle(activeCardBg);
-                    const participantAvatar = (isLocal && user?.avatar)
-                      ? user.avatar
-                      : (participant.avatar || "zap");
-
-                    const isParticipantAuxHolder = Boolean(
-                      musicState.isActive &&
-                      musicState.auxHolderIdentity && (
-                        (participant.identity && participant.identity.toLowerCase().trim() === musicState.auxHolderIdentity.toLowerCase().trim()) ||
-                        (participant.username && participant.username.toLowerCase().trim() === musicState.auxHolderIdentity.toLowerCase().trim()) ||
-                        (participant.name && participant.name.toLowerCase().trim() === musicState.auxHolderIdentity.toLowerCase().trim())
-                      )
-                    );
-                    const isListeningToMusic = Boolean(
-                      musicState.isActive &&
-                      musicState.isPlaying &&
-                      !(isLocal && isDeafened)
-                    );
-
-                    return (
-                      <div
-                        key={participant.identity || participant.username || participant.id || `seat-${index}`}
-                        style={cardThemeStyle}
-                        className={`relative w-full min-w-0 p-3 sm:p-4 rounded-2xl sm:rounded-[1.4rem] flex flex-col justify-between items-center text-center transition-all duration-300 border overflow-hidden backdrop-blur-xl group/card shadow-[0_12px_32px_-8px_rgba(0,0,0,0.6)] ${SEAT_SLOTS.length <= 2
-                          ? "min-h-[190px] sm:min-h-[285px]"
-                          : SEAT_SLOTS.length <= 4
-                            ? "min-h-[180px] sm:min-h-[265px]"
-                            : SEAT_SLOTS.length <= 8
-                              ? "min-h-[155px] sm:min-h-[225px]"
-                              : "min-h-[140px] sm:min-h-[200px]"
-                          } ${participantRole === "super_admin"
-                            ? "ring-1.5 ring-amber-400/80 shadow-[0_0_25px_rgba(245,158,11,0.25)]"
-                            : participantRole === "admin"
-                              ? "ring-1.5 ring-rose-400/80 shadow-[0_0_25px_rgba(244,63,94,0.25)]"
-                              : participantRole === "manager"
-                                ? "ring-1.5 ring-cyan-400/80 shadow-[0_0_25px_rgba(6,182,212,0.25)]"
-                                : speaking
-                                  ? "ring-2 ring-emerald-400/90 shadow-[0_0_25px_rgba(52,211,153,0.35)]"
-                                  : "border-white/10 hover:border-white/20"
-                          }`}
+            {/* Dynamic Adaptive Voice Stage */}
+            {(() => {
+              const participantCount = seatedParticipants.length;
+              return (
+                <div className="relative z-10 w-full mx-auto px-2.5 sm:px-6 my-auto py-2 sm:py-4 transition-all duration-300 flex items-center justify-center">
+                  {participantCount === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-12 px-4 text-center my-auto animate-fadeIn">
+                      <div className="w-16 h-16 rounded-2xl bg-white/[0.04] border border-white/10 flex items-center justify-center mb-3 shadow-inner">
+                        <Users className="w-8 h-8 text-slate-500" />
+                      </div>
+                      <p className="text-sm font-semibold text-slate-300">No participants in the room</p>
+                      <p className="text-xs text-slate-500 mt-1 max-w-xs">
+                        Invite friends to start chatting, or wait for others to join.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          handleCopyLink();
+                          setIsInviteModalOpen(true);
+                        }}
+                        className="mt-4 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-2 transition-all shadow-lg shadow-indigo-600/30 active:scale-95 cursor-pointer"
                       >
-                        {/* Ambient Card Backlight Glow */}
-                        <div
-                          className="absolute -top-10 -right-10 w-32 h-32 rounded-full blur-2xl opacity-30 pointer-events-none"
-                          style={{ backgroundColor: activeCardBg.includes("gradient") ? "#6366F1" : activeCardBg }}
-                        />
-
-                        {/* Top Hairline Light Reflection */}
-                        <div className="absolute inset-x-0 top-0 h-[1px] bg-gradient-to-r from-transparent via-white/25 to-transparent pointer-events-none" />
-
-                        {/* Top Card Header */}
-                        <div className="w-full flex items-center justify-between gap-1 z-10 min-h-[22px]">
-                          <div className="flex items-center gap-1 shrink-0">
-                            <div className="px-2 py-0.5 rounded-full bg-black/40 backdrop-blur-md border border-white/10 text-[9px] sm:text-[10px] font-mono font-medium text-slate-300 shadow-xs flex items-center gap-1.5 shrink-0">
-                              <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
-                              <span>#{index + 1}</span>
-                            </div>
-
-                            {/* Small Icon on Top of User Card when Listening to Music */}
-                            {isListeningToMusic && (
-                              isParticipantAuxHolder ? (
-                                <span
-                                  className="h-5 px-1.5 rounded-full bg-indigo-500/25 border border-indigo-400/40 text-indigo-300 text-[9px] font-bold flex items-center gap-1 shadow-xs backdrop-blur-md shrink-0 animate-pulse"
-                                  title={`AUX DJ — Playing: ${musicState.currentTrack?.title || "Music"}`}
-                                >
-                                  <Headphones size={10} className="text-indigo-400" />
-                                  <span className="text-[8px] font-black uppercase text-indigo-200">AUX</span>
-                                </span>
-                              ) : (
-                                <span
-                                  className="w-5 h-5 rounded-full bg-indigo-500/20 border border-indigo-400/30 text-indigo-300 flex items-center justify-center shadow-xs backdrop-blur-md shrink-0"
-                                  title={`Listening to ${musicState.currentTrack?.title || "Music"}`}
-                                >
-                                  <Headphones size={10} className="text-indigo-300 animate-pulse" />
-                                </span>
-                              )
-                            )}
-                            {!isLocal && (() => {
-                              const pIdent = participant.identity || "";
-                              const pName = participant.name || "";
-                              const vol = participantVolumes[pIdent] ?? participantVolumes[pIdent.toLowerCase()] ?? (pName ? participantVolumes[pName] ?? participantVolumes[pName.toLowerCase()] : undefined) ?? 100;
-                              if (vol === 0) {
-                                return (
-                                  <span
-                                    className="px-1.5 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[8px] sm:text-[9px] font-bold flex items-center gap-0.5 backdrop-blur-md"
-                                    title="You muted this user"
-                                  >
-                                    <VolumeX size={9} />
-                                  </span>
-                                );
-                              }
-                              return null;
-                            })()}
-                          </div>
-
-                          <div className="flex items-center gap-1.5 shrink-0 justify-end">
-                            {isPrivateRoom && isParticipantHost(participant) && (
-                              <span className="w-5 h-5 rounded-full bg-amber-500/20 border border-amber-400/40 text-amber-300 flex items-center justify-center shadow-xs backdrop-blur-md shrink-0" title="Room Host">
-                                <Shield size={11} className="fill-amber-400/40 text-amber-400" />
-                              </span>
-                            )}
-                            {isLocal ? (
-                              <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/35 text-[8px] sm:text-[9px] font-extrabold tracking-wider shrink-0 backdrop-blur-md shadow-xs uppercase">
-                                YOU
-                              </span>
-                            ) : (
-                              /* Action Trigger for Remote Participants */
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  if (isLocal) return;
-                                  if (menuAnchor?.participantIdentity === participant.identity) {
-                                    setMenuAnchor(null);
-                                    setActiveModMenuParticipant(null);
-                                    return;
-                                  }
-                                  const rect = e.currentTarget.getBoundingClientRect();
-                                  const screenW = window.innerWidth;
-                                  const screenH = window.innerHeight;
-
-                                  const DROPDOWN_WIDTH = 216;
-                                  const PADDING = 10;
-
-                                  // Preferred: align right edge of dropdown with the button's right edge
-                                  let calculatedLeft = rect.right - DROPDOWN_WIDTH;
-
-                                  // If aligning to right edge would push dropdown off the left screen edge:
-                                  if (calculatedLeft < PADDING) {
-                                    calculatedLeft = rect.left;
-                                  }
-
-                                  // Strictly clamp within viewport bounds so it never bleeds off either edge
-                                  calculatedLeft = Math.max(PADDING, Math.min(calculatedLeft, screenW - DROPDOWN_WIDTH - PADDING));
-
-                                  // Vertical placement:
-                                  const spaceBelow = screenH - rect.bottom;
-                                  const spaceAbove = rect.top;
-                                  const isUpward = spaceBelow < 340 && spaceAbove > spaceBelow;
-
-                                  setMenuAnchor({
-                                    top: isUpward ? undefined : Math.round(rect.bottom + 6),
-                                    bottom: isUpward ? Math.round(screenH - rect.top + 6) : undefined,
-                                    left: Math.round(calculatedLeft),
-                                    participantIdentity: participant.identity,
-                                  });
-                                  setActiveModMenuParticipant(participant.identity);
-                                }}
-                                className={`p-1 sm:p-1.5 rounded-lg border backdrop-blur-md transition-all active:scale-95 cursor-pointer shrink-0 touch-manipulation ${menuAnchor?.participantIdentity === participant.identity
-                                  ? "bg-indigo-600 text-white border-indigo-400 shadow-md"
-                                  : "text-slate-400 hover:text-white bg-black/30 hover:bg-black/50 border-white/10"
-                                  }`}
-                                title={`Participant Actions for ${participant.name}`}
-                              >
-                                <MoreVertical size={13} className="sm:w-3.5 sm:h-3.5" />
-                              </button>
-                            )}
-                          </div>
-                        </div>
-
-                        {/* Center Squircle Avatar */}
-                        <div
-                          className={`relative my-1.5 sm:my-3 cursor-pointer transition-all duration-300 hover:scale-105 active:scale-95 group rounded-2xl sm:rounded-[1.4rem] ${speaking
-                            ? "ring-2.5 ring-emerald-400 ring-offset-2 ring-offset-[#0E1017] shadow-[0_0_24px_rgba(52,211,153,0.45)] animate-pulse"
-                            : "ring-1.5 ring-white/15 shadow-xl hover:ring-white/30"
-                            }`}
-                          onClick={() => {
-                            const effectiveAvatar = isLocal
-                              ? (user?.avatar || guest?.avatar || participant.avatar || "zap")
-                              : (participant.avatar || "zap");
-                            const effectiveName = isLocal
-                              ? (user?.displayName || user?.name || guest?.displayName || guest?.name || participant.name)
-                              : participant.name;
-                            const effectiveColor = isLocal
-                              ? (user?.color || guest?.color || participant.color || "#6366F1")
-                              : (participant.color || "#6366F1");
-                            const effectiveRole = isLocal
-                              ? myPlatformRole
-                              : (participant.userRole || "user");
-                            setPreviewParticipant({
-                              ...participant,
-                              avatar: effectiveAvatar,
-                              name: effectiveName,
-                              color: effectiveColor,
-                              userRole: effectiveRole,
-                            });
-                          }}
-                        >
-                          <div
-                            className="w-16 h-16 sm:w-20 sm:h-20 rounded-2xl sm:rounded-[1.4rem] overflow-hidden flex items-center justify-center transition-colors shadow-inner"
-                            style={{
-                              backgroundColor: participant.color ? `${participant.color}22` : "rgba(0,0,0,0.45)",
-                              border: `1.5px solid ${participant.color ? `${participant.color}45` : "rgba(255,255,255,0.12)"}`,
-                              boxShadow: participant.color ? `0 4px 18px ${participant.color}18` : undefined,
-                            }}
-                          >
-                            {participantAvatar?.includes("http") ? (
-                              <img
-                                src={participantAvatar}
-                                alt={participant.name}
-                                className="w-full h-full object-cover rounded-2xl sm:rounded-[1.4rem]"
-                              />
-                            ) : (
-                              (() => {
-                                const normalizedKey = participantAvatar?.toLowerCase().replace(/[^a-z0-9]/g, "") || "zap";
-                                const IconComponent = AVATAR_ICON_MAP[normalizedKey] || AVATAR_ICON_MAP[participantAvatar || ""] || Sparkles;
-                                return (
-                                  <IconComponent
-                                    className="w-8 h-8 sm:w-10 sm:h-10 transition-transform duration-300 group-hover:scale-110 drop-shadow-md"
-                                    style={{ color: speaking ? "#34D399" : (participant.color || "#6366F1") }}
-                                  />
-                                );
-                              })()
-                            )}
-                          </div>
-
-                          {/* Mic Mute Indicator */}
-                          {muted && (
-                            <div className="absolute -bottom-1 -right-1 w-5 h-5 sm:w-5.5 sm:h-5.5 rounded-lg bg-gradient-to-br from-rose-500 to-rose-600 border-2 border-[#0E1017] text-white flex items-center justify-center shadow-md">
-                              <MicOff size={11} />
-                            </div>
-                          )}
-                        </div>
-
-                        {/* Name & Audio Wave Status */}
-                        <div
-                          className="w-full flex flex-col items-center gap-1 z-10 px-1 cursor-pointer group/name"
-                          onClick={() => {
-                            const effectiveAvatar = isLocal
-                              ? (user?.avatar || guest?.avatar || participant.avatar || "zap")
-                              : (participant.avatar || "zap");
-                            const effectiveName = isLocal
-                              ? (isRegistered && user?.isRegistered ? (user?.displayName || user?.name) : (guest?.displayName || guest?.name || participant.name))
-                              : participant.name;
-                            const effectiveColor = isLocal
-                              ? (user?.color || guest?.color || participant.color || "#6366F1")
-                              : (participant.color || "#6366F1");
-                            const effectiveRole = isLocal
-                              ? myPlatformRole
-                              : (participant.userRole || "user");
-                            setPreviewParticipant({
-                              ...participant,
-                              avatar: effectiveAvatar,
-                              name: effectiveName,
-                              color: effectiveColor,
-                              userRole: effectiveRole,
-                            });
-                          }}
-                        >
-                          <div className="flex items-center justify-center gap-1.5 max-w-full">
-                            <span className="font-bold text-xs sm:text-sm text-white tracking-tight truncate max-w-[120px] xs:max-w-[145px] sm:max-w-[175px] group-hover/name:underline decoration-white/40">
-                              {isLocal
-                                ? (isRegistered && user?.isRegistered ? (user?.displayName || user?.name) : (guest?.displayName || guest?.name || participant.name))
-                                : participant.name}
-                            </span>
-                            {participantRole !== "user" && (
-                              <RoleBadge role={participantRole} size="xs" showLabel={false} />
-                            )}
-                          </div>
-
-                          {/* Fixed Height Soundwave Bar or Status Pill */}
-                          <div className="h-5 flex items-center justify-center mt-0.5">
-                            {speaking ? (
-                              <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/30 backdrop-blur-md shadow-xs">
-                                <div className="flex items-center gap-0.5 h-2">
-                                  <span className="w-0.5 bg-emerald-300 rounded-full soundwave-bar-1" />
-                                  <span className="w-0.5 bg-emerald-300 rounded-full soundwave-bar-2" />
-                                  <span className="w-0.5 bg-emerald-300 rounded-full soundwave-bar-3" />
-                                  <span className="w-0.5 bg-emerald-300 rounded-full soundwave-bar-4" />
-                                </div>
-                                <span className="text-[8px] sm:text-[9px] text-emerald-300 font-bold uppercase tracking-wider leading-none">
-                                  Speaking
-                                </span>
-                              </div>
-                            ) : participant.isMutedByMod ? (
-                              <span className="px-2 py-0.5 rounded-full bg-rose-500/15 border border-rose-500/30 text-[9px] text-rose-300 font-semibold backdrop-blur-md">
-                                Mod Muted
-                              </span>
-                            ) : muted ? (
-                              <span className="px-2 py-0.5 rounded-full bg-black/40 border border-white/10 text-[9px] text-slate-400 font-medium backdrop-blur-md flex items-center gap-1">
-                                <MicOff size={9} className="text-rose-400" />
-                                <span>Muted</span>
-                              </span>
-                            ) : (
-                              <span className="px-2 py-0.5 rounded-full bg-black/40 border border-white/10 text-[9px] text-slate-300/80 font-medium backdrop-blur-md flex items-center gap-1">
-                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400/80 animate-pulse" />
-                                <span>Listening</span>
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  }
-
-                  // Vacant Seat Slot
-                  return (
-                    <div
-                      key={`vacant-${index}`}
-                      onClick={() => {
-                        if (junction?.isLocked) {
-                          setModNoticeToast(
-                            isHost
-                              ? "🔒 Room is locked. Unlock via the Lock button in the top header to invite."
-                              : "🔒 This room is locked by the host."
-                          );
-                          setTimeout(() => setModNoticeToast(null), 3000);
-                          return;
-                        }
-                        handleCopyLink();
-                        setIsInviteModalOpen(true);
-                      }}
-                      className={`relative w-full min-w-0 p-3 sm:p-4 rounded-2xl sm:rounded-[1.4rem] border border-dashed backdrop-blur-xl flex flex-col justify-between items-center text-center group cursor-pointer transition-all duration-300 active:scale-98 shadow-md overflow-hidden ${junction?.isLocked
-                          ? "border-amber-500/25 bg-amber-950/[0.08] hover:border-amber-400/40 hover:shadow-[0_8px_30px_rgba(245,158,11,0.12)]"
-                          : "border-white/15 hover:border-indigo-400/50 bg-gradient-to-b from-white/[0.04] to-white/[0.015] hover:from-indigo-600/[0.08] hover:to-purple-600/[0.03] hover:shadow-[0_8px_30px_rgba(99,102,241,0.18)]"
-                        } ${SEAT_SLOTS.length <= 2
-                          ? "min-h-[190px] sm:min-h-[285px]"
-                          : SEAT_SLOTS.length <= 4
-                            ? "min-h-[180px] sm:min-h-[265px]"
-                            : SEAT_SLOTS.length <= 8
-                              ? "min-h-[155px] sm:min-h-[225px]"
-                              : "min-h-[140px] sm:min-h-[200px]"
-                        }`}
-                    >
-                      <div className="absolute inset-x-0 top-0 h-[1px] bg-gradient-to-r from-transparent via-white/20 to-transparent pointer-events-none" />
-
-                      {/* Top Header */}
-                      <div className="w-full flex items-center justify-between z-10 min-h-[24px]">
-                        <span className="px-2 py-0.5 rounded-full bg-black/40 border border-white/10 text-[9px] sm:text-[10px] font-mono font-medium text-slate-400">
-                          #{index + 1}
-                        </span>
-                        {junction?.isLocked ? (
-                          <span className="px-2 py-0.5 rounded-full bg-amber-500/20 border border-amber-400/35 text-[8px] sm:text-[9px] font-mono font-bold tracking-wider text-amber-300 uppercase flex items-center gap-1 shadow-xs">
-                            <Lock size={9} />
-                            <span>Locked</span>
-                          </span>
-                        ) : (
-                          <span className="px-2 py-0.5 rounded-full bg-white/[0.05] border border-white/10 text-[8px] sm:text-[9px] font-mono font-semibold tracking-wider text-slate-400 group-hover:text-indigo-300 group-hover:border-indigo-400/30 transition-colors uppercase">
-                            Available
-                          </span>
-                        )}
-                      </div>
-
-                      {/* Center Icon */}
-                      <div className="relative my-2 sm:my-3">
-                        <div className={`w-16 h-16 sm:w-20 sm:h-20 rounded-2xl sm:rounded-[1.3rem] border border-dashed flex items-center justify-center transition-all duration-300 shadow-inner group-hover:scale-105 ${junction?.isLocked
-                            ? "border-amber-500/30 bg-amber-500/10 text-amber-300"
-                            : "border-white/20 group-hover:border-indigo-400/60 bg-white/[0.02] group-hover:bg-indigo-500/10 text-slate-400 group-hover:text-indigo-300"
-                          }`}>
-                          {junction?.isLocked ? (
-                            <Lock className="w-6 h-6 sm:w-8 sm:h-8 transition-transform duration-300 group-hover:scale-110" />
-                          ) : (
-                            <UserPlus className="w-6 h-6 sm:w-8 sm:h-8 transition-transform duration-300 group-hover:scale-110" />
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Bottom Prompt */}
-                      <div className="flex flex-col items-center gap-0.5 z-10">
-                        <span className={`text-xs sm:text-sm font-semibold transition-colors flex items-center gap-1 ${junction?.isLocked ? "text-amber-200/90" : "text-slate-300 group-hover:text-white"
-                          }`}>
-                          <span>{junction?.isLocked ? "Room Locked" : "Open Seat"}</span>
-                          {!junction?.isLocked && (
-                            <span className="text-[10px] text-indigo-400 opacity-0 group-hover:opacity-100 transition-all transform group-hover:translate-x-0.5">→</span>
-                          )}
-                        </span>
-                        <span className="text-[9px] sm:text-[10px] text-slate-500 group-hover:text-slate-400 transition-colors font-medium">
-                          {junction?.isLocked ? "New joins blocked" : "Tap to invite friend"}
-                        </span>
-                      </div>
+                        <UserPlus size={14} />
+                        <span>Invite Friends</span>
+                      </button>
                     </div>
-                  );
-                })}
-              </div>
-            </div>
+                  ) : (
+                    <div className="flex flex-wrap items-center justify-center gap-3 sm:gap-4.5 w-full max-w-5xl mx-auto transition-all duration-300">
+                      {seatedParticipants.map((participant, index) => {
+                        const isLocal = isLocalParticipant(participant);
+                        const isParticipantMod = participant?.role === "moderator";
+                        const participantRole = isLocal
+                          ? myPlatformRole
+                          : (participant?.userRole || "user");
+                        const speaking = isLocal ? isLocalSpeaking : activeSpeakers.some((s) => s.toLowerCase() === participant.identity?.toLowerCase());
+                        const muted = isLocal ? (isMuted || isMutedByMod) : (participant.isMuted || participant.isMutedByMod);
+                        const activeCardBg = (isLocal && user?.cardBgColor && user.cardBgColor !== "#465B73")
+                          ? user.cardBgColor
+                          : (participant.cardBgColor || participant.color);
+                        const cardThemeStyle = getCardThemeStyle(activeCardBg);
+                        const participantAvatar = (isLocal && user?.avatar)
+                          ? user.avatar
+                          : (participant.avatar || "zap");
+
+                        const isParticipantAuxHolder = Boolean(
+                          musicState.isActive &&
+                          musicState.auxHolderIdentity && (
+                            (participant.identity && participant.identity.toLowerCase().trim() === musicState.auxHolderIdentity.toLowerCase().trim()) ||
+                            (participant.username && participant.username.toLowerCase().trim() === musicState.auxHolderIdentity.toLowerCase().trim()) ||
+                            (participant.name && participant.name.toLowerCase().trim() === musicState.auxHolderIdentity.toLowerCase().trim())
+                          )
+                        );
+                        const isListeningToMusic = Boolean(
+                          musicState.isActive &&
+                          musicState.isPlaying &&
+                          !(isLocal && isDeafened)
+                        );
+
+                        return (
+                          <div
+                            key={participant.identity || participant.username || participant.id || `seat-${index}`}
+                            style={cardThemeStyle}
+                            className={`relative w-full min-w-0 rounded-2xl sm:rounded-[1.4rem] flex flex-col justify-between items-center text-center transition-all duration-300 border overflow-hidden backdrop-blur-xl group/card shadow-[0_12px_32px_-8px_rgba(0,0,0,0.6)] ${
+                              participantCount === 1
+                                ? "p-3.5 sm:p-4.5 w-[220px] xs:w-[240px] sm:w-[260px] min-h-[195px] sm:min-h-[225px]"
+                                : "p-3 sm:p-4 w-[calc(50%-0.5rem)] xs:w-[190px] sm:w-[220px] md:w-[235px] max-w-[250px] min-h-[185px] sm:min-h-[215px]"
+                            } ${
+                              participantRole === "super_admin"
+                                ? "ring-1.5 ring-amber-400/80 shadow-[0_0_25px_rgba(245,158,11,0.25)]"
+                                : participantRole === "admin"
+                                  ? "ring-1.5 ring-rose-400/80 shadow-[0_0_25px_rgba(244,63,94,0.25)]"
+                                  : participantRole === "manager"
+                                    ? "ring-1.5 ring-cyan-400/80 shadow-[0_0_25px_rgba(6,182,212,0.25)]"
+                                    : speaking
+                                      ? "ring-2 ring-emerald-400/90 shadow-[0_0_25px_rgba(52,211,153,0.35)]"
+                                      : "border-white/10 hover:border-white/20"
+                            }`}
+                          >
+                            {/* Ambient Card Backlight Glow */}
+                            <div
+                              className="absolute -top-10 -right-10 w-32 h-32 rounded-full blur-2xl opacity-30 pointer-events-none"
+                              style={{ backgroundColor: activeCardBg.includes("gradient") ? "#6366F1" : activeCardBg }}
+                            />
+
+                            {/* Top Hairline Light Reflection */}
+                            <div className="absolute inset-x-0 top-0 h-[1px] bg-gradient-to-r from-transparent via-white/25 to-transparent pointer-events-none" />
+
+                            {/* Top Card Header */}
+                            <div className="w-full flex items-center justify-between gap-1 z-10 min-h-[22px]">
+                              <div className="flex items-center gap-1 shrink-0">
+                                <div className="px-2 py-0.5 rounded-full bg-black/40 backdrop-blur-md border border-white/10 text-[9px] sm:text-[10px] font-mono font-medium text-slate-300 shadow-xs flex items-center gap-1.5 shrink-0">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
+                                  <span>#{index + 1}</span>
+                                </div>
+
+                                {/* Small Icon on Top of User Card when Listening to Music */}
+                                {isListeningToMusic && (
+                                  isParticipantAuxHolder ? (
+                                    <span
+                                      className="h-5 px-1.5 rounded-full bg-indigo-500/25 border border-indigo-400/40 text-indigo-300 text-[9px] font-bold flex items-center gap-1 shadow-xs backdrop-blur-md shrink-0 animate-pulse"
+                                      title={`AUX DJ — Playing: ${musicState.currentTrack?.title || "Music"}`}
+                                    >
+                                      <Headphones size={10} className="text-indigo-400" />
+                                      <span className="text-[8px] font-black uppercase text-indigo-200">AUX</span>
+                                    </span>
+                                  ) : (
+                                    <span
+                                      className="w-5 h-5 rounded-full bg-indigo-500/20 border border-indigo-400/30 text-indigo-300 flex items-center justify-center shadow-xs backdrop-blur-md shrink-0"
+                                      title={`Listening to ${musicState.currentTrack?.title || "Music"}`}
+                                    >
+                                      <Headphones size={10} className="text-indigo-300 animate-pulse" />
+                                    </span>
+                                  )
+                                )}
+                                {!isLocal && (() => {
+                                  const pIdent = participant.identity || "";
+                                  const pName = participant.name || "";
+                                  const vol = participantVolumes[pIdent] ?? participantVolumes[pIdent.toLowerCase()] ?? (pName ? participantVolumes[pName] ?? participantVolumes[pName.toLowerCase()] : undefined) ?? 100;
+                                  if (vol === 0) {
+                                    return (
+                                      <span
+                                        className="px-1.5 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[8px] sm:text-[9px] font-bold flex items-center gap-0.5 backdrop-blur-md"
+                                        title="You muted this user"
+                                      >
+                                        <VolumeX size={9} />
+                                      </span>
+                                    );
+                                  }
+                                  return null;
+                                })()}
+                              </div>
+
+                              <div className="flex items-center gap-1.5 shrink-0 justify-end">
+                                {isPrivateRoom && isParticipantHost(participant) && (
+                                  <span className="w-5 h-5 rounded-full bg-amber-500/20 border border-amber-400/40 text-amber-300 flex items-center justify-center shadow-xs backdrop-blur-md shrink-0" title="Room Host">
+                                    <Shield size={11} className="fill-amber-400/40 text-amber-400" />
+                                  </span>
+                                )}
+                                {isLocal ? (
+                                  <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/35 text-[8px] sm:text-[9px] font-extrabold tracking-wider shrink-0 backdrop-blur-md shadow-xs uppercase">
+                                    YOU
+                                  </span>
+                                ) : (
+                                  /* Action Trigger for Remote Participants */
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (isLocal) return;
+                                      if (menuAnchor?.participantIdentity === participant.identity) {
+                                        setMenuAnchor(null);
+                                        setActiveModMenuParticipant(null);
+                                        return;
+                                      }
+                                      const rect = e.currentTarget.getBoundingClientRect();
+                                      const screenW = window.innerWidth;
+                                      const screenH = window.innerHeight;
+
+                                      const DROPDOWN_WIDTH = 216;
+                                      const PADDING = 10;
+
+                                      // Preferred: align right edge of dropdown with the button's right edge
+                                      let calculatedLeft = rect.right - DROPDOWN_WIDTH;
+
+                                      // If aligning to right edge would push dropdown off the left screen edge:
+                                      if (calculatedLeft < PADDING) {
+                                        calculatedLeft = rect.left;
+                                      }
+
+                                      // Strictly clamp within viewport bounds so it never bleeds off either edge
+                                      calculatedLeft = Math.max(PADDING, Math.min(calculatedLeft, screenW - DROPDOWN_WIDTH - PADDING));
+
+                                      // Vertical placement:
+                                      const spaceBelow = screenH - rect.bottom;
+                                      const spaceAbove = rect.top;
+                                      const isUpward = spaceBelow < 340 && spaceAbove > spaceBelow;
+
+                                      setMenuAnchor({
+                                        top: isUpward ? undefined : Math.round(rect.bottom + 6),
+                                        bottom: isUpward ? Math.round(screenH - rect.top + 6) : undefined,
+                                        left: Math.round(calculatedLeft),
+                                        participantIdentity: participant.identity,
+                                      });
+                                      setActiveModMenuParticipant(participant.identity);
+                                    }}
+                                    className={`p-1 sm:p-1.5 rounded-lg border backdrop-blur-md transition-all active:scale-95 cursor-pointer shrink-0 touch-manipulation ${menuAnchor?.participantIdentity === participant.identity
+                                      ? "bg-indigo-600 text-white border-indigo-400 shadow-md"
+                                      : "text-slate-400 hover:text-white bg-black/30 hover:bg-black/50 border-white/10"
+                                      }`}
+                                    title={`Participant Actions for ${participant.name}`}
+                                  >
+                                    <MoreVertical size={13} className="sm:w-3.5 sm:h-3.5" />
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Center Squircle Avatar */}
+                            <div
+                              className={`relative shrink-0 my-1.5 sm:my-3 cursor-pointer transition-all duration-300 hover:scale-105 active:scale-95 group rounded-2xl sm:rounded-[1.4rem] ${speaking
+                                ? "ring-2.5 ring-emerald-400 ring-offset-2 ring-offset-[#0E1017] shadow-[0_0_24px_rgba(52,211,153,0.45)] animate-pulse"
+                                : "ring-1.5 ring-white/15 shadow-xl hover:ring-white/30"
+                                }`}
+                              onClick={() => {
+                                const effectiveAvatar = isLocal
+                                  ? (user?.avatar || guest?.avatar || participant.avatar || "zap")
+                                  : (participant.avatar || "zap");
+                                const effectiveName = isLocal
+                                  ? (user?.displayName || user?.name || guest?.displayName || guest?.name || participant.name)
+                                  : participant.name;
+                                const effectiveColor = isLocal
+                                  ? (user?.color || guest?.color || participant.color || "#6366F1")
+                                  : (participant.color || "#6366F1");
+                                const effectiveRole = isLocal
+                                  ? myPlatformRole
+                                  : (participant.userRole || "user");
+                                setPreviewParticipant({
+                                  ...participant,
+                                  avatar: effectiveAvatar,
+                                  name: effectiveName,
+                                  color: effectiveColor,
+                                  userRole: effectiveRole,
+                                });
+                              }}
+                            >
+                              <div
+                                className="w-16 h-16 sm:w-20 sm:h-20 shrink-0 rounded-2xl sm:rounded-[1.4rem] overflow-hidden flex items-center justify-center transition-colors shadow-inner"
+                                style={{
+                                  backgroundColor: participant.color ? `${participant.color}22` : "rgba(0,0,0,0.45)",
+                                  border: `1.5px solid ${participant.color ? `${participant.color}45` : "rgba(255,255,255,0.12)"}`,
+                                  boxShadow: participant.color ? `0 4px 18px ${participant.color}18` : undefined,
+                                }}
+                              >
+                                {participantAvatar?.includes("http") ? (
+                                  <img
+                                    src={participantAvatar}
+                                    alt={participant.name}
+                                    className="w-full h-full object-cover rounded-2xl sm:rounded-[1.4rem] aspect-square"
+                                  />
+                                ) : (
+                                  (() => {
+                                    const normalizedKey = participantAvatar?.toLowerCase().replace(/[^a-z0-9]/g, "") || "zap";
+                                    const IconComponent = AVATAR_ICON_MAP[normalizedKey] || AVATAR_ICON_MAP[participantAvatar || ""] || Sparkles;
+                                    return (
+                                      <IconComponent
+                                        className="w-8 h-8 sm:w-10 sm:h-10 shrink-0 transition-transform duration-300 group-hover:scale-110 drop-shadow-md"
+                                        style={{ color: speaking ? "#34D399" : (participant.color || "#6366F1") }}
+                                      />
+                                    );
+                                  })()
+                                )}
+                              </div>
+
+                              {/* Mic Mute Indicator */}
+                              {muted && (
+                                <div className="absolute -bottom-1 -right-1 w-5 h-5 sm:w-5.5 sm:h-5.5 rounded-lg bg-gradient-to-br from-rose-500 to-rose-600 border-2 border-[#0E1017] text-white flex items-center justify-center shadow-md shrink-0">
+                                  <MicOff size={11} />
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Name & Audio Wave Status */}
+                            <div
+                              className="w-full flex flex-col items-center gap-1 z-10 px-1 cursor-pointer group/name"
+                              onClick={() => {
+                                const effectiveAvatar = isLocal
+                                  ? (user?.avatar || guest?.avatar || participant.avatar || "zap")
+                                  : (participant.avatar || "zap");
+                                const effectiveName = isLocal
+                                  ? (isRegistered && user?.isRegistered ? (user?.displayName || user?.name) : (guest?.displayName || guest?.name || participant.name))
+                                  : participant.name;
+                                const effectiveColor = isLocal
+                                  ? (user?.color || guest?.color || participant.color || "#6366F1")
+                                  : (participant.color || "#6366F1");
+                                const effectiveRole = isLocal
+                                  ? myPlatformRole
+                                  : (participant.userRole || "user");
+                                setPreviewParticipant({
+                                  ...participant,
+                                  avatar: effectiveAvatar,
+                                  name: effectiveName,
+                                  color: effectiveColor,
+                                  userRole: effectiveRole,
+                                });
+                              }}
+                            >
+                              <div className="flex items-center justify-center gap-1.5 max-w-full">
+                                <span className="font-bold text-xs sm:text-sm text-white tracking-tight truncate max-w-[120px] xs:max-w-[145px] sm:max-w-[175px] group-hover/name:underline decoration-white/40">
+                                  {isLocal
+                                    ? (isRegistered && user?.isRegistered ? (user?.displayName || user?.name) : (guest?.displayName || guest?.name || participant.name))
+                                    : participant.name}
+                                </span>
+                                {participantRole !== "user" && (
+                                  <RoleBadge role={participantRole} size="xs" showLabel={false} />
+                                )}
+                              </div>
+
+                              {/* Fixed Height Soundwave Bar or Status Pill */}
+                              <div className="h-5 flex items-center justify-center mt-0.5">
+                                {speaking ? (
+                                  <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/30 backdrop-blur-md shadow-xs">
+                                    <div className="flex items-center gap-0.5 h-2">
+                                      <span className="w-0.5 bg-emerald-300 rounded-full soundwave-bar-1" />
+                                      <span className="w-0.5 bg-emerald-300 rounded-full soundwave-bar-2" />
+                                      <span className="w-0.5 bg-emerald-300 rounded-full soundwave-bar-3" />
+                                      <span className="w-0.5 bg-emerald-300 rounded-full soundwave-bar-4" />
+                                    </div>
+                                    <span className="text-[8px] sm:text-[9px] text-emerald-300 font-bold uppercase tracking-wider leading-none">
+                                      Speaking
+                                    </span>
+                                  </div>
+                                ) : participant.isMutedByMod ? (
+                                  <span className="px-2 py-0.5 rounded-full bg-rose-500/15 border border-rose-500/30 text-[9px] text-rose-300 font-semibold backdrop-blur-md">
+                                    Mod Muted
+                                  </span>
+                                ) : muted ? (
+                                  <span className="px-2 py-0.5 rounded-full bg-black/40 border border-white/10 text-[9px] text-slate-400 font-medium backdrop-blur-md flex items-center gap-1">
+                                    <MicOff size={9} className="text-rose-400" />
+                                    <span>Muted</span>
+                                  </span>
+                                ) : (
+                                  <span className="px-2 py-0.5 rounded-full bg-black/40 border border-white/10 text-[9px] text-slate-300/80 font-medium backdrop-blur-md flex items-center gap-1">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400/80 animate-pulse" />
+                                    <span>Listening</span>
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </div>
 
           {/* Slide-out In-Room Whisper Chat Drawer / Right Sidebar */}
@@ -6985,6 +7105,10 @@ export function JunctionRoom({
         onPassAux={handlePassAux}
         onSelectTrack={handleSelectMusicTrack}
         onStopMusic={handleStopMusic}
+        onAddToQueue={handleAddToQueue}
+        onRemoveFromQueue={handleRemoveFromQueue}
+        onPlayQueuedTrack={handlePlayQueuedTrack}
+        initialTab={musicModalInitialTab}
       />
     </>
   );
