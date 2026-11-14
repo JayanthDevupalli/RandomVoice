@@ -31,9 +31,20 @@ export interface NicknameUpdateData {
   action: "set" | "cleared";
 }
 
+export interface ChatImageItem {
+  id: string;
+  ciphertext?: string;
+  iv?: string;
+  mimeType?: string;
+  width?: number;
+  height?: number;
+  url?: string;
+}
+
 export interface ParsedMessage {
-  type: "text" | "voice" | "room_invite" | "gif" | "nickname_update";
+  type: "text" | "voice" | "room_invite" | "gif" | "nickname_update" | "images";
   text?: string;
+  images?: ChatImageItem[];
   audioUrl?: string;
   duration?: number;
   gifUrl?: string;
@@ -47,6 +58,7 @@ export interface ParsedMessage {
     isVoice?: boolean;
     isGif?: boolean;
     gifUrl?: string;
+    isImages?: boolean;
   } | null;
   isEdited?: boolean;
   reactions?: MessageReaction[];
@@ -127,6 +139,16 @@ export function parseMessageContent(raw: string): ParsedMessage {
           type: "room_invite",
           roomInvite: invite,
           text: parsed.text || `🎙️ Joined "${invite.junctionName}"! Tap to join the hangout.`,
+          replyTo: parsed.replyTo || null,
+          reactions,
+        };
+      }
+
+      if (parsed.type === "images" && Array.isArray(parsed.images)) {
+        return {
+          type: "images",
+          images: parsed.images,
+          text: parsed.text || "",
           replyTo: parsed.replyTo || null,
           reactions,
         };
@@ -294,6 +316,19 @@ export function serializeGifMessage(
     type: "gif",
     gifUrl,
     gifTitle,
+    replyTo: replyTo || null,
+  });
+}
+
+export function serializeImagesMessage(
+  images: ChatImageItem[],
+  caption?: string,
+  replyTo?: ParsedMessage["replyTo"]
+): string {
+  return JSON.stringify({
+    type: "images",
+    images,
+    text: caption ? caption.trim() : undefined,
     replyTo: replyTo || null,
   });
 }

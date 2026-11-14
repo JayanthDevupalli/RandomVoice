@@ -30,7 +30,8 @@ import {
   UserPlus,
   Info,
   Smile,
-  Tag
+  Tag,
+  Image as ImageIcon
 } from "lucide-react";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import { useRouter } from "next/navigation";
@@ -45,6 +46,8 @@ import {
   serializeVoiceMessage,
   serializeGifMessage,
   serializeNicknameMessage,
+  serializeImagesMessage,
+  ChatImageItem,
   getSenderColor,
   getProfileDisplayName,
   isSameDay,
@@ -62,6 +65,8 @@ import { MediaLightbox } from "@/components/chat/MediaLightbox";
 import { GroupInfoModal } from "@/components/chat/GroupInfoModal";
 import { AddGroupMemberModal } from "@/components/chat/AddGroupMemberModal";
 import { MessageInfoModal } from "@/components/chat/MessageInfoModal";
+import { WhatsAppImageCluster } from "@/components/chat/WhatsAppImageCluster";
+import { compressImage, encryptImage } from "@/lib/e2ee-service";
 
 function formatGroupSubtitle(
   members: Array<{ id: string; username: string; name?: string; displayName?: string; social_links?: any }>,
@@ -163,6 +168,7 @@ export default function MessagesPage() {
     isVoice?: boolean;
     isGif?: boolean;
     gifUrl?: string;
+    isImages?: boolean;
   } | null>(null);
 
   const [editingMessage, setEditingMessage] = useState<{
@@ -208,6 +214,14 @@ export default function MessagesPage() {
   const [isGifPickerOpen, setIsGifPickerOpen] = useState(false);
   const [expandedMediaUrl, setExpandedMediaUrl] = useState<string | null>(null);
   const [expandedMediaTitle, setExpandedMediaTitle] = useState<string>("GIF");
+  const [lightboxImages, setLightboxImages] = useState<Array<{ url: string; caption?: string; title?: string }>>([]);
+  const [lightboxIndex, setLightboxIndex] = useState(0);
+  const [isLightboxOpen, setIsLightboxOpen] = useState(false);
+
+  // --- Feature: End-to-End Encrypted Photo Sharing (WhatsApp Style) ---
+  const [stagedImages, setStagedImages] = useState<Array<{ id: string; file: File; previewUrl: string; width?: number; height?: number }>>([]);
+  const [isEncryptingImages, setIsEncryptingImages] = useState(false);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   const [activeActionMsgId, setActiveActionMsgId] = useState<string | null>(null);
   const [activeReactionPickerMsgId, setActiveReactionPickerMsgId] = useState<string | null>(null);
 
@@ -242,18 +256,46 @@ export default function MessagesPage() {
     }
   };
 
-  // Auto-scroll to bottom of chat
-  const scrollToBottom = (behavior: ScrollBehavior = "smooth") => {
-    messagesEndRef.current?.scrollIntoView({ behavior });
-  };
+  // Auto-scroll to bottom of chat (contained within chat container, NEVER scrolls window/document)
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
+    if (chatContainerRef.current) {
+      const container = chatContainerRef.current;
+      if (behavior === "smooth") {
+        container.scrollTo({
+          top: container.scrollHeight,
+          behavior: "smooth",
+        });
+      } else {
+        container.scrollTop = container.scrollHeight;
+      }
+    }
+  }, []);
 
+  // When switching conversations, pin window scroll to 0 and scroll messages to bottom
   useEffect(() => {
+    if (activeConversationId) {
+      if (typeof window !== "undefined") {
+        window.scrollTo(0, 0);
+        document.documentElement.scrollTop = 0;
+        document.body.scrollTop = 0;
+      }
+      setShowScrollToBottom(false);
+      setUnreadNewMsgs(0);
+      requestAnimationFrame(() => {
+        scrollToBottom("auto");
+      });
+    }
+  }, [activeConversationId, scrollToBottom]);
+
+  // When messages update in the active chat
+  useEffect(() => {
+    if (!activeConversationId) return;
     if (showScrollToBottom) {
       setUnreadNewMsgs(prev => prev + 1);
     } else {
       scrollToBottom("auto");
     }
-  }, [messages.length, activeConversationId]);
+  }, [messages.length, activeConversationId, showScrollToBottom, scrollToBottom]);
 
   // Support direct linking via ?id=
   useEffect(() => {
@@ -483,7 +525,19 @@ export default function MessagesPage() {
       } catch (err) {}
     }
 
-    // 2. Persist to profiles.social_links so peers can read the receipt reliably
+    // 2. Persist to conversation_members table for instant RLS-compliant realtime DB sync
+    supabase
+      .from("conversation_members")
+      .update({ last_read_at: safeReadTime })
+      .eq("conversation_id", activeConversationId)
+      .eq("user_id", user.id)
+      .then(({ error }) => {
+        if (error) {
+          console.warn("Failed to update conversation_members.last_read_at:", error.message);
+        }
+      });
+
+    // 3. Persist to profiles.social_links as resilient secondary fallback
     Promise.resolve(
       supabase
         .from("profiles")
@@ -559,7 +613,13 @@ export default function MessagesPage() {
 
   // Load active group members for header subtitle, online indicators & member management
   const loadActiveGroupMembers = useCallback(async () => {
-    if (!activeConversationId || activeConversation?.type !== "group") {
+    if (!activeConversationId) {
+      setActiveGroupMembers([]);
+      setGroupMembersReadMap({});
+      return;
+    }
+    // If conversation is already loaded and is confirmed NOT a group, return early
+    if (activeConversation && activeConversation.type !== "group") {
       setActiveGroupMembers([]);
       setGroupMembersReadMap({});
       return;
@@ -570,6 +630,7 @@ export default function MessagesPage() {
         .select(`
           user_id,
           role,
+          last_read_at,
           profiles (
             id,
             username,
@@ -585,15 +646,10 @@ export default function MessagesPage() {
         // Fallback flat query if join fails
         const { data: flatMembers } = await supabase
           .from("conversation_members")
-          .select("user_id, role")
+          .select("user_id, role, last_read_at")
           .eq("conversation_id", activeConversationId);
 
         if (flatMembers && flatMembers.length > 0) {
-          flatMembers.forEach((m: any) => {
-            if (m.user_id && m.last_read_at) {
-              initialReadMap[m.user_id] = m.last_read_at;
-            }
-          });
           const uids = flatMembers.map((m: any) => m.user_id);
           const { data: profs } = await supabase
             .from("profiles")
@@ -601,6 +657,17 @@ export default function MessagesPage() {
             .in("id", uids);
 
           const pMap = new Map((profs || []).map((p: any) => [p.id, p]));
+          flatMembers.forEach((m: any) => {
+            const p = pMap.get(m.user_id);
+            const readFromSocial = (p?.social_links as any)?.last_read_map?.[activeConversationId];
+            const readIso = [m.last_read_at, readFromSocial]
+              .filter(Boolean)
+              .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
+            if (readIso && m.user_id) {
+              initialReadMap[m.user_id] = readIso;
+            }
+          });
+
           const formatted = flatMembers.map((m: any) => {
             const p = pMap.get(m.user_id);
             const dName = getProfileDisplayName(p, p?.username || "Unknown");
@@ -622,8 +689,13 @@ export default function MessagesPage() {
 
       if (data) {
         data.forEach((d: any) => {
-          if (d.user_id && d.last_read_at) {
-            initialReadMap[d.user_id] = d.last_read_at;
+          const profile = Array.isArray(d.profiles) ? d.profiles[0] : d.profiles;
+          const readFromSocial = (profile?.social_links as any)?.last_read_map?.[activeConversationId];
+          const readIso = [d.last_read_at, readFromSocial]
+            .filter(Boolean)
+            .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
+          if (readIso && d.user_id) {
+            initialReadMap[d.user_id] = readIso;
           }
         });
         const membersList = data.map((d: any) => {
@@ -648,13 +720,42 @@ export default function MessagesPage() {
   }, [activeConversationId, activeConversation?.type]);
 
   useEffect(() => {
-    if (activeConversationId && activeConversation?.type === "group") {
+    if (activeConversationId && (!activeConversation || activeConversation.type === "group")) {
       loadActiveGroupMembers();
     } else {
       setActiveGroupMembers([]);
       setGroupMembersReadMap({});
     }
   }, [activeConversationId, activeConversation?.type, loadActiveGroupMembers]);
+
+  // Map of each member's latest message time in this conversation (proves user was active up to this time)
+  const memberLatestMsgTimeMap = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const msg of messages) {
+      if (msg.sender_id && msg.created_at) {
+        const time = new Date(msg.created_at).getTime();
+        if (!map[msg.sender_id] || time > map[msg.sender_id]) {
+          map[msg.sender_id] = time;
+        }
+      }
+    }
+    return map;
+  }, [messages]);
+
+  // Comprehensive check whether a group member has read a message
+  const isMemberRead = useCallback(
+    (memberId: string, msgTime: number) => {
+      // 1. From groupMembersReadMap (realtime presence, postgres change, social_links, conversation_members)
+      const readIso = groupMembersReadMap[memberId];
+      const readTime = readIso ? new Date(readIso).getTime() : 0;
+      // 2. From messages sent by this member in this chat (if they sent a message at or after msgTime, they've seen it)
+      const latestMsgTime = memberLatestMsgTimeMap[memberId] || 0;
+      const effectiveReadTime = Math.max(readTime, latestMsgTime);
+      // 3-second buffer for client-server clock skew
+      return effectiveReadTime > 0 && effectiveReadTime >= msgTime - 3000;
+    },
+    [groupMembersReadMap, memberLatestMsgTimeMap]
+  );
 
   // Check relationship status for 1-on-1 direct conversations to ensure connection is accepted
   useEffect(() => {
@@ -1100,7 +1201,7 @@ export default function MessagesPage() {
   // --- Message Actions: Edit, Delete, Reply, Scroll ---
   const startEditingMessage = (msgId: string, currentContent: string) => {
     const parsed = parseMessageContent(currentContent);
-    if (parsed.type === "voice") return;
+    if (parsed.type === "voice" || parsed.type === "images" || parsed.type === "gif" || parsed.type === "room_invite") return;
     setEditingMessage({
       id: msgId,
       text: parsed.text || "",
@@ -1245,10 +1346,17 @@ export default function MessagesPage() {
   );
 
   const scrollToMessage = (msgId?: string) => {
-    if (!msgId) return;
+    if (!msgId || !chatContainerRef.current) return;
     const elem = document.getElementById(`msg-${msgId}`);
     if (elem) {
-      elem.scrollIntoView({ behavior: "smooth", block: "center" });
+      const container = chatContainerRef.current;
+      const containerRect = container.getBoundingClientRect();
+      const elemRect = elem.getBoundingClientRect();
+      const relativeTop = elemRect.top - containerRect.top + container.scrollTop;
+      container.scrollTo({
+        top: relativeTop - container.clientHeight / 2 + elem.clientHeight / 2,
+        behavior: "smooth",
+      });
       elem.classList.add("ring-2", "ring-indigo-500", "ring-offset-2", "ring-offset-background");
       setTimeout(() => {
         elem.classList.remove("ring-2", "ring-indigo-500", "ring-offset-2", "ring-offset-background");
@@ -1511,7 +1619,14 @@ export default function MessagesPage() {
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputMessage.trim() || !activeConversationId || !user) return;
+    if (!activeConversationId || !user) return;
+
+    if (stagedImages.length > 0) {
+      await handleSendImages();
+      return;
+    }
+
+    if (!inputMessage.trim()) return;
 
     if (editingMessage) {
       await saveEditedMessage();
@@ -1667,6 +1782,212 @@ export default function MessagesPage() {
     }
   };
 
+  // --- Lightbox & Image Handlers (WhatsApp Style with E2EE) ---
+  const openSingleMediaLightbox = (url: string, title: string = "Media") => {
+    setLightboxImages([{ url, title }]);
+    setLightboxIndex(0);
+    setIsLightboxOpen(true);
+  };
+
+  const openClusterLightbox = (
+    images: Array<{ url: string; caption?: string; title?: string }>,
+    initialIndex: number
+  ) => {
+    setLightboxImages(images);
+    setLightboxIndex(initialIndex);
+    setIsLightboxOpen(true);
+  };
+
+  const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    const newItems: Array<{ id: string; file: File; previewUrl: string }> = [];
+
+    Array.from(files).forEach((file) => {
+      if (!file.type.startsWith("image/")) {
+        alert(`"${file.name}" is not an image.`);
+        return;
+      }
+      if (file.size > 25 * 1024 * 1024) {
+        alert(`"${file.name}" exceeds the 25MB limit.`);
+        return;
+      }
+      newItems.push({
+        id: `staged-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        file,
+        previewUrl: URL.createObjectURL(file),
+      });
+    });
+
+    if (newItems.length > 0) {
+      setStagedImages((prev) => [...prev, ...newItems]);
+    }
+
+    e.target.value = "";
+  };
+
+  const handleRemoveStagedImage = (id: string) => {
+    setStagedImages((prev) => {
+      const target = prev.find((item) => item.id === id);
+      if (target?.previewUrl) {
+        URL.revokeObjectURL(target.previewUrl);
+      }
+      return prev.filter((item) => item.id !== id);
+    });
+  };
+
+  const handleClearStagedImages = () => {
+    stagedImages.forEach((item) => {
+      if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+    });
+    setStagedImages([]);
+  };
+
+  const handlePaste = (e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items || items.length === 0) return;
+
+    const imageFiles: File[] = [];
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.startsWith("image/")) {
+        const file = items[i].getAsFile();
+        if (file) imageFiles.push(file);
+      }
+    }
+
+    if (imageFiles.length > 0) {
+      e.preventDefault();
+      const newItems = imageFiles.map((file) => ({
+        id: `staged-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        file,
+        previewUrl: URL.createObjectURL(file),
+      }));
+      setStagedImages((prev) => [...prev, ...newItems]);
+    }
+  };
+
+  const handleSendImages = async () => {
+    if (!activeConversationId || !user || stagedImages.length === 0 || isEncryptingImages) return;
+
+    if (user?.isBanned) {
+      alert("Your account is currently suspended. Messaging is disabled.");
+      return;
+    }
+
+    const targetUserId = activeConversation?.other_user?.id;
+    if (targetUserId && (blockedUsers.includes(targetUserId) || blockedMeUsers.includes(targetUserId))) {
+      alert("Cannot send messages in this conversation.");
+      return;
+    }
+
+    if (activeConversation?.type !== "group" && (!targetRelationship || !targetRelationship.isAcceptedConnection)) {
+      alert("Messaging is locked until the follow request is accepted by both users.");
+      return;
+    }
+
+    setIsEncryptingImages(true);
+    const caption = inputMessage.trim();
+    const currentReplyTo = replyingTo;
+    const currentStaged = [...stagedImages];
+
+    // Reset input fields immediately
+    setInputMessage("");
+    setReplyingTo(null);
+    setStagedImages([]);
+
+    const tempId = `temp-img-${Date.now()}`;
+    const nowIso = new Date().toISOString();
+
+    // Optimistic image cluster for instant local viewing
+    const optimisticImages: ChatImageItem[] = currentStaged.map((staged) => ({
+      id: staged.id,
+      url: staged.previewUrl,
+    }));
+
+    const optimisticContent = serializeImagesMessage(optimisticImages, caption, currentReplyTo);
+
+    const optimisticMsg = {
+      id: tempId,
+      conversation_id: activeConversationId,
+      sender_id: user.id,
+      content: optimisticContent,
+      created_at: nowIso,
+      profiles: {
+        username: user.username,
+        avatar: user.avatar,
+        social_links: { display_name: user.name || user.displayName },
+      },
+    };
+
+    setMessages((prev) => [...prev, optimisticMsg]);
+
+    try {
+      // Compress and Encrypt each image on client using Web Crypto AES-256-GCM
+      const encryptedItems: ChatImageItem[] = await Promise.all(
+        currentStaged.map(async (staged) => {
+          const compressed = await compressImage(staged.file, 1600, 0.82);
+          const encrypted = await encryptImage(
+            compressed.blob,
+            activeConversationId,
+            compressed.width,
+            compressed.height
+          );
+          return {
+            id: staged.id,
+            ciphertext: encrypted.ciphertext,
+            iv: encrypted.iv,
+            mimeType: encrypted.mimeType,
+            width: encrypted.width,
+            height: encrypted.height,
+          };
+        })
+      );
+
+      const serializedContent = serializeImagesMessage(encryptedItems, caption, currentReplyTo);
+
+      const { data, error } = await supabase
+        .from("messages")
+        .insert({
+          conversation_id: activeConversationId,
+          sender_id: user.id,
+          content: serializedContent,
+        })
+        .select(`
+          id,
+          content,
+          created_at,
+          sender_id,
+          profiles (
+            username,
+            avatar,
+            social_links
+          )
+        `)
+        .single();
+
+      if (!error && data) {
+        const profile = Array.isArray(data.profiles) ? data.profiles[0] : data.profiles;
+        setMessages((prev) =>
+          prev.map((m) => (m.id === tempId ? { ...data, profiles: profile } : m))
+        );
+
+        await supabase
+          .from("conversations")
+          .update({ last_message_at: nowIso })
+          .eq("id", activeConversationId);
+
+        markAsRead(activeConversationId);
+      }
+    } catch (err) {
+      console.error("Error compressing/encrypting and sending images:", err);
+      alert("Failed to send encrypted images. Please try again.");
+      setMessages((prev) => prev.filter((m) => m.id !== tempId));
+    } finally {
+      setIsEncryptingImages(false);
+    }
+  };
+
   if (!isLoaded || !isRegistered || !user) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
@@ -1676,7 +1997,7 @@ export default function MessagesPage() {
   }
 
   return (
-    <div className="h-screen h-[100dvh] flex flex-col bg-background overflow-hidden">
+    <div className="h-screen h-[100dvh] flex flex-col bg-background overflow-hidden fixed inset-0 sm:relative sm:inset-auto">
       <Navbar className={activeConversationId ? "hidden sm:block" : "block"} />
 
       <main className="flex-1 max-w-7xl w-full mx-auto p-0 sm:p-4 flex gap-4 min-h-0 overflow-hidden">
@@ -1919,8 +2240,15 @@ export default function MessagesPage() {
                   <button 
                     key={conv.id}
                     onClick={() => {
+                      if (typeof window !== "undefined") {
+                        window.scrollTo(0, 0);
+                        document.documentElement.scrollTop = 0;
+                        document.body.scrollTop = 0;
+                        window.history.replaceState(null, "", `/messages?id=${conv.id}`);
+                      }
                       setActiveConversationId(conv.id);
                       markAsRead(conv.id, conv.last_message_at);
+                      broadcastReadReceipt(conv.last_message_at);
                     }}
                     className={`w-full p-4 flex items-center gap-3.5 text-left transition-all active:bg-white/10 ${
                       isSelected 
@@ -1991,7 +2319,9 @@ export default function MessagesPage() {
         <div 
           onClick={() => {
             if (activeConversationId) {
-              markAsRead(activeConversationId, messages[messages.length - 1]?.created_at);
+              const lastMsgTime = messages[messages.length - 1]?.created_at;
+              markAsRead(activeConversationId, lastMsgTime);
+              broadcastReadReceipt(lastMsgTime);
             }
           }}
           className={`flex-1 flex flex-col bg-card border-0 sm:border border-white/5 sm:rounded-2xl overflow-hidden h-full min-h-0 ${
@@ -2025,11 +2355,16 @@ export default function MessagesPage() {
                     : (customNickname || shownName || "Chat");
 
                 return (
-                  <div className="relative z-30 h-14 sm:h-16 border-b border-white/5 flex items-center justify-between px-2.5 sm:px-6 shrink-0 bg-[#090A0F]/95 backdrop-blur-xl shadow-sm pt-[env(safe-area-inset-top,0px)]">
+                  <div className="sticky top-0 z-30 h-14 sm:h-16 border-b border-white/5 flex items-center justify-between px-2.5 sm:px-6 shrink-0 bg-[#090A0F]/95 backdrop-blur-xl shadow-sm pt-[env(safe-area-inset-top,0px)]">
                     <div className="flex items-center gap-2 sm:gap-3 min-w-0">
                       {/* Back Button */}
                       <button
-                        onClick={() => setActiveConversationId(null)}
+                        onClick={() => {
+                          setActiveConversationId(null);
+                          if (typeof window !== "undefined") {
+                            window.history.replaceState(null, "", "/messages");
+                          }
+                        }}
                         className="p-2 -ml-1 rounded-full text-slate-300 hover:text-white active:bg-white/10 active:scale-95 transition-all cursor-pointer"
                         title="Back to conversations"
                         aria-label="Back to conversations"
@@ -2263,11 +2598,11 @@ export default function MessagesPage() {
               })()}
 
               {/* Chat Messages */}
-              <div className="relative flex-1 min-h-0 flex flex-col">
+              <div className="relative flex-1 min-h-0 flex flex-col overflow-hidden">
                 <div 
                   ref={chatContainerRef}
                   onScroll={handleChatScroll}
-                  className="flex-1 min-h-0 overflow-y-auto px-2.5 py-3 sm:px-6 sm:py-5 flex flex-col gap-1 sm:gap-2"
+                  className="flex-1 min-h-0 overflow-y-auto px-2.5 py-3 sm:px-6 sm:py-5 flex flex-col gap-1 sm:gap-2 overscroll-contain"
                 >
                   {messages.length === 0 ? (
                     <div className="my-auto text-center py-10">
@@ -2426,10 +2761,19 @@ export default function MessagesPage() {
                                   setReplyingTo({
                                     id: msg.id,
                                     sender: senderDisplayName,
-                                    text: parsed.type === "voice" ? "Voice Note" : parsed.type === "gif" ? "GIF" : parsed.type === "room_invite" ? "Voice Hangout Invite" : parsed.text || "",
+                                    text: parsed.type === "voice"
+                                      ? "Voice Note"
+                                      : parsed.type === "gif"
+                                      ? "GIF"
+                                      : parsed.type === "images"
+                                      ? `📷 Photo${(parsed.images?.length || 1) > 1 ? `s (${parsed.images?.length})` : ""}`
+                                      : parsed.type === "room_invite"
+                                      ? "Voice Hangout Invite"
+                                      : parsed.text || "",
                                     isVoice: parsed.type === "voice",
                                     isGif: parsed.type === "gif",
                                     gifUrl: parsed.gifUrl,
+                                    isImages: parsed.type === "images",
                                   });
                                 }}
                                 className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
@@ -2439,7 +2783,7 @@ export default function MessagesPage() {
                                 <Reply size={13} />
                               </button>
 
-                              {parsed.type !== "voice" && parsed.type !== "room_invite" && parsed.type !== "gif" && (
+                              {parsed.type !== "voice" && parsed.type !== "room_invite" && parsed.type !== "gif" && parsed.type !== "images" && (
                                 <button
                                   type="button"
                                   onClick={(e) => {
@@ -2507,6 +2851,7 @@ export default function MessagesPage() {
                             {/* Message Bubble Container */}
                             {(() => {
                               const isGif = parsed.type === "gif" && !!parsed.gifUrl;
+                              const isImages = parsed.type === "images" && Boolean(parsed.images && parsed.images.length > 0);
                               const msgTime = new Date(msg.created_at).getTime();
                               const otherReadTime = otherUserLastReadAt ? new Date(otherUserLastReadAt).getTime() : 0;
                               const effectiveOtherReadTime = Math.max(otherReadTime, otherUserLatestMsgTime);
@@ -2516,7 +2861,7 @@ export default function MessagesPage() {
                                 <div 
                                   onClick={() => setActiveActionMsgId(prev => prev === msg.id ? null : msg.id)}
                                   className={`w-fit rounded-2xl shadow-md break-words min-w-[64px] max-w-full overflow-hidden cursor-pointer transition-all ${
-                                    isGif 
+                                    isGif || isImages
                                       ? isMe
                                         ? 'p-1 bg-gradient-to-r from-indigo-600 to-indigo-500 text-white rounded-tr-xs'
                                         : 'p-1 bg-[#1e202c] text-slate-100 border border-white/5 rounded-tl-xs backdrop-blur-sm'
@@ -2555,13 +2900,83 @@ export default function MessagesPage() {
                                         <span className="truncate">{parsed.replyTo.sender}</span>
                                       </div>
                                       <p className="line-clamp-2 text-[11px] opacity-80 break-words w-full overflow-hidden text-ellipsis">
-                                        {parsed.replyTo.isVoice ? "🎵 Voice Note" : parsed.replyTo.isGif ? "🖼️ GIF" : parsed.replyTo.text}
+                                        {parsed.replyTo.isVoice ? "🎵 Voice Note" : parsed.replyTo.isGif ? "🖼️ GIF" : parsed.replyTo.isImages ? "📷 Photo" : parsed.replyTo.text}
                                       </p>
                                     </div>
                                   )}
 
-                                  {/* Voice Note, Room Invite, GIF, or Text */}
-                                  {parsed.type === "room_invite" && parsed.roomInvite ? (
+                                  {/* WhatsApp E2EE Image Cluster, Room Invite, Voice Note, GIF, or Text */}
+                                  {isImages ? (
+                                    <WhatsAppImageCluster
+                                      images={parsed.images!}
+                                      conversationId={activeConversationId}
+                                      caption={parsed.text}
+                                      isMe={isMe}
+                                      onOpenLightbox={openClusterLightbox}
+                                      timestamp={new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                      readStatusNode={
+                                        <>
+                                          {isMe && activeConversation?.type !== "group" && (
+                                            <span className="inline-flex items-center gap-0.5 ml-0.5">
+                                              {isMsgSeen ? (
+                                                <span className="text-sky-400 font-bold flex items-center" title="Seen">
+                                                  <CheckCheck size={12} className="stroke-[2.5]" />
+                                                </span>
+                                              ) : isMsgDelivered ? (
+                                                <span className="text-indigo-200/80 flex items-center" title="Delivered">
+                                                  <CheckCheck size={12} className="stroke-[1.8]" />
+                                                </span>
+                                              ) : (
+                                                <span className="text-indigo-200/60 flex items-center" title="Sent">
+                                                  <Check size={11} className="stroke-[2]" />
+                                                </span>
+                                              )}
+                                            </span>
+                                          )}
+                                          {isMe && activeConversation?.type === "group" && (() => {
+                                            const otherMembers = activeGroupMembers.filter((m) => m.id !== user.id);
+                                            const totalRecipients = otherMembers.length;
+                                            if (totalRecipients === 0) return null;
+                                            const readCount = otherMembers.filter((m) => isMemberRead(m.id, msgTime)).length;
+                                            const isAllSeen = readCount === totalRecipients;
+
+                                            return (
+                                              <span
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  setMessageInfoTarget({ message: msg, parsedMessage: parsed });
+                                                }}
+                                                className={`inline-flex items-center gap-1 ml-1 px-1.5 py-0.5 rounded cursor-pointer pointer-events-auto hover:opacity-90 transition-all font-semibold ${
+                                                  isAllSeen
+                                                    ? "text-sky-400"
+                                                    : readCount > 0
+                                                    ? "text-sky-300"
+                                                    : "text-slate-300"
+                                                }`}
+                                                title="Click to view message info"
+                                              >
+                                                {isAllSeen ? (
+                                                  <>
+                                                    <CheckCheck size={11} className="stroke-[2.5] text-sky-400" />
+                                                    <span>All</span>
+                                                  </>
+                                                ) : readCount > 0 ? (
+                                                  <>
+                                                    <CheckCheck size={11} className="stroke-[2] text-sky-400" />
+                                                    <span>{readCount}/{totalRecipients}</span>
+                                                  </>
+                                                ) : (
+                                                  <>
+                                                    <Check size={10} className="stroke-[2]" />
+                                                  </>
+                                                )}
+                                              </span>
+                                            );
+                                          })()}
+                                        </>
+                                      }
+                                    />
+                                  ) : parsed.type === "room_invite" && parsed.roomInvite ? (
                                     <RoomInviteCard invite={parsed.roomInvite} isMe={isMe} />
                                   ) : parsed.type === "voice" ? (
                                     <VoiceNotePlayer
@@ -2608,10 +3023,7 @@ export default function MessagesPage() {
                                           const otherMembers = activeGroupMembers.filter((m) => m.id !== user.id);
                                           const totalRecipients = otherMembers.length;
                                           if (totalRecipients === 0) return null;
-                                          const readCount = otherMembers.filter((m) => {
-                                            const r = groupMembersReadMap[m.id];
-                                            return r && new Date(r).getTime() >= msgTime;
-                                          }).length;
+                                          const readCount = otherMembers.filter((m) => isMemberRead(m.id, msgTime)).length;
                                           const isAllSeen = readCount === totalRecipients;
 
                                           return (
@@ -2686,10 +3098,7 @@ export default function MessagesPage() {
                                           const otherMembers = activeGroupMembers.filter((m) => m.id !== user.id);
                                           const totalRecipients = otherMembers.length;
                                           if (totalRecipients === 0) return null;
-                                          const readCount = otherMembers.filter((m) => {
-                                            const r = groupMembersReadMap[m.id];
-                                            return r && new Date(r).getTime() >= msgTime;
-                                          }).length;
+                                          const readCount = otherMembers.filter((m) => isMemberRead(m.id, msgTime)).length;
                                           const isAllSeen = readCount === totalRecipients;
 
                                           return (
@@ -2765,10 +3174,7 @@ export default function MessagesPage() {
                                         const otherMembers = activeGroupMembers.filter((m) => m.id !== user.id);
                                         const totalRecipients = otherMembers.length;
                                         if (totalRecipients === 0) return null;
-                                        const readCount = otherMembers.filter((m) => {
-                                          const r = groupMembersReadMap[m.id];
-                                          return r && new Date(r).getTime() >= msgTime;
-                                        }).length;
+                                        const readCount = otherMembers.filter((m) => isMemberRead(m.id, msgTime)).length;
                                         const isAllSeen = readCount === totalRecipients;
 
                                         return (
@@ -2852,10 +3258,19 @@ export default function MessagesPage() {
                                   setReplyingTo({
                                     id: msg.id,
                                     sender: senderDisplayName,
-                                    text: parsed.type === "voice" ? "Voice Note" : parsed.type === "gif" ? "GIF" : parsed.type === "room_invite" ? "Voice Hangout Invite" : parsed.text || "",
+                                    text: parsed.type === "voice"
+                                      ? "Voice Note"
+                                      : parsed.type === "gif"
+                                      ? "GIF"
+                                      : parsed.type === "images"
+                                      ? `📷 Photo${(parsed.images?.length || 1) > 1 ? `s (${parsed.images?.length})` : ""}`
+                                      : parsed.type === "room_invite"
+                                      ? "Voice Hangout Invite"
+                                      : parsed.text || "",
                                     isVoice: parsed.type === "voice",
                                     isGif: parsed.type === "gif",
                                     gifUrl: parsed.gifUrl,
+                                    isImages: parsed.type === "images",
                                   });
                                 }}
                                 className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 active:scale-95 transition-all cursor-pointer"
@@ -3088,12 +3503,78 @@ export default function MessagesPage() {
 
                 return (
                   <form onSubmit={handleSendMessage} className="relative p-2 sm:p-4 pb-[max(0.65rem,env(safe-area-inset-bottom))] border-t border-white/5 bg-[#090A0F]/95 backdrop-blur-xl shrink-0">
+                    {/* Hidden E2EE Image File Input */}
+                    <input
+                      ref={imageInputRef}
+                      type="file"
+                      multiple
+                      accept="image/*"
+                      onChange={handleImageSelect}
+                      className="hidden"
+                    />
+
                     {/* GIF Picker Popover / Mobile Drawer */}
                     <GifPicker
                       isOpen={isGifPickerOpen}
                       onClose={() => setIsGifPickerOpen(false)}
                       onSelectGif={handleSendGif}
                     />
+
+                    {/* Staged Images Preview Tray (WhatsApp Style) */}
+                    {stagedImages.length > 0 && (
+                      <div className="mb-2 p-2.5 rounded-2xl bg-[#12131D]/95 border border-white/10 backdrop-blur-xl animate-in fade-in slide-in-from-bottom-2 duration-150">
+                        <div className="flex items-center justify-between pb-2 mb-2 border-b border-white/5 text-xs">
+                          <div className="flex items-center gap-1.5 text-slate-300 font-semibold">
+                            <ImageIcon size={14} className="text-indigo-400" />
+                            <span>{stagedImages.length} photo{stagedImages.length > 1 ? "s" : ""} staged</span>
+                            <span className="flex items-center gap-1 text-[10px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full font-medium ml-1">
+                              <Lock size={9} />
+                              <span>End-to-End Encrypted</span>
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={handleClearStagedImages}
+                            className="text-[11px] text-slate-400 hover:text-rose-400 transition-colors cursor-pointer"
+                          >
+                            Clear all
+                          </button>
+                        </div>
+
+                        <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-0.5">
+                          {stagedImages.map((staged, idx) => (
+                            <div
+                              key={staged.id}
+                              className="relative w-16 h-16 sm:w-20 sm:h-20 rounded-xl overflow-hidden shrink-0 border border-white/10 group shadow-md"
+                            >
+                              <img src={staged.previewUrl} alt="" className="w-full h-full object-cover" />
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveStagedImage(staged.id)}
+                                className="absolute top-1 right-1 p-1 rounded-full bg-black/70 hover:bg-rose-600 text-white transition-colors cursor-pointer shadow-md"
+                                title="Remove photo"
+                              >
+                                <X size={11} />
+                              </button>
+                              <span className="absolute bottom-1 left-1 px-1 py-0.2 rounded bg-black/60 text-[9px] text-white/80 font-mono">
+                                #{idx + 1}
+                              </span>
+                            </div>
+                          ))}
+
+                          {/* Add more photos button */}
+                          <button
+                            type="button"
+                            onClick={() => imageInputRef.current?.click()}
+                            className="w-16 h-16 sm:w-20 sm:h-20 rounded-xl border-2 border-dashed border-white/20 hover:border-indigo-400/60 bg-white/[0.02] hover:bg-white/5 flex flex-col items-center justify-center gap-1 text-slate-400 hover:text-white transition-all shrink-0 cursor-pointer"
+                            title="Add more photos"
+                          >
+                            <Plus size={18} className="text-indigo-400" />
+                            <span className="text-[10px] font-semibold">Add</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
 
                     {/* Replying Banner */}
                     {replyingTo && (
@@ -3103,7 +3584,7 @@ export default function MessagesPage() {
                           <div className="min-w-0">
                             <span className="font-semibold text-indigo-300">Replying to {replyingTo.sender}: </span>
                             <span className="text-slate-300 truncate inline-block max-w-[180px] sm:max-w-md align-bottom">
-                              {replyingTo.isVoice ? "🎵 Voice Note" : replyingTo.isGif ? "🖼️ GIF" : replyingTo.text}
+                              {replyingTo.isVoice ? "🎵 Voice Note" : replyingTo.isGif ? "🖼️ GIF" : replyingTo.isImages ? "📷 Photo" : replyingTo.text}
                             </span>
                           </div>
                         </div>
@@ -3171,59 +3652,123 @@ export default function MessagesPage() {
                         </div>
                       </div>
                     ) : (
-                      <div className="flex items-center gap-1.5 sm:gap-2">
-                        {/* GIF Picker Button on Left */}
-                        <button
-                          type="button"
-                          onClick={() => setIsGifPickerOpen(!isGifPickerOpen)}
-                          className={`w-9 h-9 sm:w-10 sm:h-10 flex items-center justify-center rounded-full transition-all shrink-0 cursor-pointer ${
-                            isGifPickerOpen
-                              ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
-                              : "text-slate-400 hover:text-white hover:bg-white/10 active:scale-95"
-                          }`}
-                          title="Send GIF"
-                          aria-label="Send GIF"
-                        >
-                          <span className="text-[10px] font-black tracking-wider border border-current px-1 py-0.5 rounded leading-none">
-                            GIF
-                          </span>
-                        </button>
+                      <div className="flex items-center gap-2">
+                        {/* Unified WhatsApp-style Message Input Capsule */}
+                        <div className="relative flex-1 flex items-center min-w-0 bg-[#12131D]/90 hover:bg-[#151724] focus-within:bg-[#151724] border border-white/10 focus-within:border-indigo-500/50 focus-within:ring-2 focus-within:ring-indigo-500/20 rounded-full pl-1.5 pr-2 sm:pl-2 sm:pr-3 py-1 sm:py-1.5 transition-all shadow-inner">
+                          
+                          {/* Media Buttons: Photos & GIF */}
+                          <div className="flex items-center gap-1 shrink-0">
+                            {/* Attach Photos Button (E2EE) */}
+                            <button
+                              type="button"
+                              onClick={() => imageInputRef.current?.click()}
+                              className={`relative w-8 h-8 sm:w-8.5 sm:h-8.5 flex items-center justify-center rounded-full transition-all cursor-pointer ${
+                                stagedImages.length > 0
+                                  ? "bg-indigo-600 text-white shadow-sm shadow-indigo-600/40 ring-1 ring-indigo-400/50"
+                                  : "text-slate-400 hover:text-white hover:bg-white/10 active:scale-95"
+                              }`}
+                              title="Attach photos (End-to-End Encrypted)"
+                              aria-label="Attach photos"
+                            >
+                              <ImageIcon size={18} />
+                              {stagedImages.length > 0 && (
+                                <span className="absolute -top-0.5 -right-0.5 w-4 h-4 rounded-full bg-emerald-500 text-[9px] font-bold text-white flex items-center justify-center border border-[#12131D] shadow-sm">
+                                  {stagedImages.length}
+                                </span>
+                              )}
+                            </button>
 
-                        {/* Message Text Input */}
-                        <div className="relative flex-1 min-w-0">
+                            {/* Sleek GIF Badge Button */}
+                            <button
+                              type="button"
+                              onClick={() => setIsGifPickerOpen(!isGifPickerOpen)}
+                              className={`h-7 px-2.5 rounded-full font-black text-[11px] tracking-wider uppercase transition-all flex items-center justify-center cursor-pointer ${
+                                isGifPickerOpen
+                                  ? "bg-indigo-600 text-white shadow-sm shadow-indigo-600/40 ring-1 ring-indigo-400"
+                                  : "bg-white/[0.08] hover:bg-white/[0.16] text-slate-300 hover:text-white border border-white/10 hover:border-indigo-400/40 active:scale-95"
+                              }`}
+                              title="Search & Send GIFs"
+                              aria-label="Send GIF"
+                            >
+                              GIF
+                            </button>
+
+                            {/* Vertical Divider */}
+                            <div className="w-[1px] h-4 bg-white/10 mx-1 shrink-0" />
+                          </div>
+
+                          {/* Seamless Message Text Input */}
                           <input
                             ref={textInputRef}
                             type="text"
                             value={inputMessage}
                             onChange={handleInputChange}
-                            placeholder={editingMessage ? "Edit message..." : "Type a message..."}
-                            className="w-full px-4 py-2.5 sm:py-3 bg-white/5 border border-white/10 rounded-full text-base sm:text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-500/50 transition-colors shadow-inner"
+                            onPaste={handlePaste}
+                            placeholder={
+                              stagedImages.length > 0
+                                ? "Add a caption..."
+                                : editingMessage
+                                ? "Edit message..."
+                                : "Type a message..."
+                            }
+                            className="flex-1 bg-transparent border-0 text-white placeholder:text-slate-500 text-sm sm:text-[14.5px] px-2 py-1.5 focus:outline-none focus:ring-0 min-w-0"
                           />
+
+                          {/* Clear text button if user typed text */}
+                          {inputMessage && (
+                            <button
+                              type="button"
+                              onClick={() => setInputMessage("")}
+                              className="p-1 rounded-full text-slate-500 hover:text-slate-300 transition-colors shrink-0 mr-1"
+                              title="Clear text"
+                            >
+                              <X size={14} />
+                            </button>
+                          )}
                         </div>
 
-                        {/* Voice Note Record Button (When not typing & not editing) */}
-                        {!inputMessage.trim() && !editingMessage && (
-                          <button
-                            type="button"
-                            onClick={startVoiceRecording}
-                            className="w-9 h-9 sm:w-10 sm:h-10 flex items-center justify-center rounded-full bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white active:scale-95 transition-all shrink-0 cursor-pointer border border-white/10"
-                            title="Record voice note"
-                            aria-label="Record voice note"
-                          >
-                            <Mic size={18} />
-                          </button>
-                        )}
-
-                        {/* Send / Save Button (Active when typing or editing) */}
-                        {(inputMessage.trim() || editingMessage) && (
-                          <button
-                            type="submit"
-                            className="w-9 h-9 sm:w-10 sm:h-10 flex items-center justify-center bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white rounded-full transition-all shadow-md shadow-indigo-600/30 shrink-0 cursor-pointer animate-in zoom-in-75 duration-150"
-                            aria-label={editingMessage ? "Save Edit" : "Send Message"}
-                          >
-                            {editingMessage ? <Check size={18} /> : <Send size={16} />}
-                          </button>
-                        )}
+                        {/* Floating Action Button (FAB) on the Right: Voice Note or Send */}
+                        <div className="shrink-0">
+                          {!inputMessage.trim() && !editingMessage && stagedImages.length === 0 ? (
+                            <button
+                              type="button"
+                              onClick={startVoiceRecording}
+                              className="w-10 h-10 sm:w-11 sm:h-11 flex items-center justify-center rounded-full bg-white/[0.08] hover:bg-white/[0.14] text-slate-300 hover:text-white border border-white/10 active:scale-95 transition-all shadow-md shadow-black/20 cursor-pointer"
+                              title="Record voice note"
+                              aria-label="Record voice note"
+                            >
+                              <Mic size={19} />
+                            </button>
+                          ) : (
+                            <button
+                              type="submit"
+                              disabled={isEncryptingImages}
+                              className={`flex items-center justify-center rounded-full bg-gradient-to-tr from-indigo-600 via-indigo-500 to-violet-500 hover:from-indigo-500 hover:to-violet-400 active:scale-95 text-white transition-all shadow-lg shadow-indigo-600/35 cursor-pointer animate-in zoom-in-75 duration-150 ${
+                                stagedImages.length > 0
+                                  ? "px-3.5 h-10 sm:h-11 gap-1.5 font-bold text-xs"
+                                  : "w-10 h-10 sm:w-11 sm:h-11"
+                              }`}
+                              aria-label={editingMessage ? "Save Edit" : "Send Message"}
+                              title={editingMessage ? "Save Edit" : stagedImages.length > 0 ? "Send Encrypted Photos" : "Send Message"}
+                            >
+                              {isEncryptingImages ? (
+                                <>
+                                  <Loader2 size={16} className="animate-spin" />
+                                  <span className="hidden xs:inline text-xs font-semibold">Encrypting...</span>
+                                </>
+                              ) : stagedImages.length > 0 ? (
+                                <>
+                                  <Send size={14} />
+                                  <span>Send ({stagedImages.length})</span>
+                                </>
+                              ) : editingMessage ? (
+                                <Check size={18} className="stroke-[2.5]" />
+                              ) : (
+                                <Send size={17} className="translate-x-[1px]" />
+                              )}
+                            </button>
+                          )}
+                        </div>
                       </div>
                     )}
                   </form>
@@ -3468,28 +4013,39 @@ export default function MessagesPage() {
           onClose={() => setMessageInfoTarget(null)}
           message={messageInfoTarget.message}
           parsedMessage={messageInfoTarget.parsedMessage}
+          currentUserId={user?.id}
           readMembers={(() => {
             if (!messageInfoTarget) return [];
             const msgTime = new Date(messageInfoTarget.message.created_at).getTime();
             if (activeConversation?.type === "group") {
-              const otherMembers = activeGroupMembers.filter((m) => m.id !== user?.id);
-              return otherMembers
+              const senderId = messageInfoTarget.message.sender_id;
+              const recipients = activeGroupMembers.filter((m) => m.id !== senderId);
+              return recipients
                 .filter((m) => {
-                  const readIso = groupMembersReadMap[m.id];
-                  return readIso && new Date(readIso).getTime() >= msgTime;
+                  if (m.id === user?.id) return true;
+                  return isMemberRead(m.id, msgTime);
                 })
-                .map((m) => ({
-                  id: m.id,
-                  username: m.username,
-                  name: m.name,
-                  displayName: m.displayName || m.name || m.username,
-                  avatar: m.avatar,
-                  readAt: groupMembersReadMap[m.id],
-                }));
+                .map((m) => {
+                  const readIso = groupMembersReadMap[m.id];
+                  const latestMsgTime = memberLatestMsgTimeMap[m.id] || 0;
+                  const effectiveReadTime = Math.max(
+                    readIso ? new Date(readIso).getTime() : 0,
+                    latestMsgTime,
+                    m.id === user?.id ? Date.now() : 0
+                  );
+                  return {
+                    id: m.id,
+                    username: m.username,
+                    name: m.name,
+                    displayName: m.displayName || m.name || m.username,
+                    avatar: m.avatar,
+                    readAt: effectiveReadTime > 0 ? new Date(effectiveReadTime).toISOString() : (readIso || new Date().toISOString()),
+                  };
+                });
             } else if (activeConversation?.other_user) {
               const otherReadTime = otherUserLastReadAt ? new Date(otherUserLastReadAt).getTime() : 0;
               const effectiveOtherReadTime = Math.max(otherReadTime, otherUserLatestMsgTime);
-              if (effectiveOtherReadTime > 0 && effectiveOtherReadTime >= msgTime) {
+              if (effectiveOtherReadTime > 0 && effectiveOtherReadTime >= msgTime - 3000) {
                 return [
                   {
                     id: activeConversation.other_user.id,
@@ -3508,11 +4064,12 @@ export default function MessagesPage() {
             if (!messageInfoTarget) return [];
             const msgTime = new Date(messageInfoTarget.message.created_at).getTime();
             if (activeConversation?.type === "group") {
-              const otherMembers = activeGroupMembers.filter((m) => m.id !== user?.id);
-              return otherMembers
+              const senderId = messageInfoTarget.message.sender_id;
+              const recipients = activeGroupMembers.filter((m) => m.id !== senderId);
+              return recipients
                 .filter((m) => {
-                  const readIso = groupMembersReadMap[m.id];
-                  return !readIso || new Date(readIso).getTime() < msgTime;
+                  if (m.id === user?.id) return false;
+                  return !isMemberRead(m.id, msgTime);
                 })
                 .map((m) => ({
                   id: m.id,
@@ -3524,7 +4081,7 @@ export default function MessagesPage() {
             } else if (activeConversation?.other_user) {
               const otherReadTime = otherUserLastReadAt ? new Date(otherUserLastReadAt).getTime() : 0;
               const effectiveOtherReadTime = Math.max(otherReadTime, otherUserLatestMsgTime);
-              if (effectiveOtherReadTime === 0 || effectiveOtherReadTime < msgTime) {
+              if (effectiveOtherReadTime === 0 || effectiveOtherReadTime < msgTime - 3000) {
                 return [
                   {
                     id: activeConversation.other_user.id,
@@ -3543,11 +4100,23 @@ export default function MessagesPage() {
       )}
 
       {/* Fullscreen Media Lightbox for GIFs and Photos */}
-      <MediaLightbox
-        mediaUrl={expandedMediaUrl}
-        onClose={() => setExpandedMediaUrl(null)}
-        title={expandedMediaTitle}
-      />
+      {isLightboxOpen && (
+        <MediaLightbox
+          images={lightboxImages}
+          initialIndex={lightboxIndex}
+          onClose={() => {
+            setIsLightboxOpen(false);
+            setLightboxImages([]);
+          }}
+        />
+      )}
+      {expandedMediaUrl && !isLightboxOpen && (
+        <MediaLightbox
+          mediaUrl={expandedMediaUrl}
+          onClose={() => setExpandedMediaUrl(null)}
+          title={expandedMediaTitle}
+        />
+      )}
     </div>
   );
 }

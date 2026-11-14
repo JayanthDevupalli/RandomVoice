@@ -30,6 +30,7 @@ interface MessageInfoModalProps {
   readMembers: GroupMemberReadInfo[];
   unreadMembers: GroupMemberReadInfo[];
   onlineUserIds: Set<string>;
+  currentUserId?: string;
 }
 
 export function MessageInfoModal({
@@ -40,6 +41,7 @@ export function MessageInfoModal({
   readMembers,
   unreadMembers,
   onlineUserIds,
+  currentUserId,
 }: MessageInfoModalProps) {
   const [mounted, setMounted] = useState(false);
 
@@ -51,6 +53,7 @@ export function MessageInfoModal({
 
   const totalRecipients = readMembers.length + unreadMembers.length;
   const isAllSeen = totalRecipients > 0 && readMembers.length === totalRecipients;
+  const isMe = currentUserId ? message.sender_id === currentUserId : true;
 
   const formatReadTime = (isoString?: string) => {
     if (!isoString) return "";
@@ -98,14 +101,18 @@ export function MessageInfoModal({
           {/* Message Preview Bubble Card */}
           <div className="p-3.5 rounded-2xl bg-black/30 border border-white/5 space-y-2">
             <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400">
-              Your Message
+              {isMe ? "Your Message" : "Message"}
             </span>
-            <div className="p-3 rounded-xl bg-gradient-to-r from-indigo-600/90 to-indigo-500/90 text-white text-xs leading-relaxed shadow-sm break-words">
+            <div className={`p-3 rounded-xl text-xs leading-relaxed shadow-sm break-words ${
+              isMe 
+                ? "bg-gradient-to-r from-indigo-600/90 to-indigo-500/90 text-white" 
+                : "bg-white/10 text-slate-100 border border-white/5"
+            }`}>
               {parsedMessage?.type === "voice" ? (
                 <VoiceNotePlayer
                   audioUrl={parsedMessage.audioUrl || ""}
                   duration={parsedMessage.duration}
-                  isMe={true}
+                  isMe={isMe}
                 />
               ) : parsedMessage?.type === "gif" && parsedMessage.gifUrl ? (
                 <div className="max-w-[180px] rounded-lg overflow-hidden">
@@ -116,7 +123,7 @@ export function MessageInfoModal({
                   />
                 </div>
               ) : parsedMessage?.type === "room_invite" && parsedMessage.roomInvite ? (
-                <RoomInviteCard invite={parsedMessage.roomInvite} isMe={true} />
+                <RoomInviteCard invite={parsedMessage.roomInvite} isMe={isMe} />
               ) : (
                 <p className="whitespace-pre-wrap">{parsedMessage?.text || message.content}</p>
               )}
@@ -189,7 +196,7 @@ export function MessageInfoModal({
                       <div className="text-right shrink-0">
                         <span className="text-[10px] text-sky-300 font-mono flex items-center gap-1 justify-end">
                           <CheckCheck size={11} className="stroke-[2.5] text-sky-400" />
-                          <span>{formatReadTime(member.readAt)}</span>
+                          <span>{formatReadTime(member.readAt) || "Recently"}</span>
                         </span>
                       </div>
                     </div>
