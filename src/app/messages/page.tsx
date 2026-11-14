@@ -150,11 +150,13 @@ export default function MessagesPage() {
   const [blockedUsers, setBlockedUsers] = useState<string[]>([]); // Users current user has blocked
   const [blockedMeUsers, setBlockedMeUsers] = useState<string[]>([]); // Users who have blocked current user
 
-  // --- Feature 4: Delete & Clear Chat ---
+  // --- Feature 4: Delete & Clear Chat (Clear for me only) ---
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isClearChatModalOpen, setIsClearChatModalOpen] = useState(false);
   const [isClearingChat, setIsClearingChat] = useState(false);
+  const [clearedChatsMap, setClearedChatsMap] = useState<Record<string, string>>({});
+  const clearedChatsMapRef = useRef<Record<string, string>>({});
 
   // --- Dropdown Menu in Header ---
   const [isHeaderMenuOpen, setIsHeaderMenuOpen] = useState(false);
@@ -174,6 +176,7 @@ export default function MessagesPage() {
   const [editingMessage, setEditingMessage] = useState<{
     id: string;
     text: string;
+    createdAt?: string;
     replyTo?: any;
     reactions?: MessageReaction[];
   } | null>(null);
@@ -314,6 +317,40 @@ export default function MessagesPage() {
       router.push("/junctions"); // Guests can't use DMs
     }
   }, [isLoaded, isRegistered, router]);
+
+  // Load user's private cleared chats map (stored in profiles.social_links.cleared_chats_map & localStorage)
+  useEffect(() => {
+    if (!user?.id) return;
+    const storageKey = `yapclub_cleared_chats_${user.id}`;
+    let localMap: Record<string, string> = {};
+    if (typeof window !== "undefined") {
+      try {
+        const stored = localStorage.getItem(storageKey);
+        if (stored) localMap = JSON.parse(stored);
+      } catch {}
+    }
+
+    clearedChatsMapRef.current = localMap;
+    setClearedChatsMap(localMap);
+
+    Promise.resolve(
+      supabase
+        .from("profiles")
+        .select("social_links")
+        .eq("id", user.id)
+        .maybeSingle()
+    ).then(({ data }) => {
+      const remoteMap = (data?.social_links as any)?.cleared_chats_map || {};
+      const merged = { ...remoteMap, ...localMap };
+      clearedChatsMapRef.current = merged;
+      setClearedChatsMap(merged);
+      if (typeof window !== "undefined") {
+        try {
+          localStorage.setItem(storageKey, JSON.stringify(merged));
+        } catch {}
+      }
+    }).catch(() => {});
+  }, [user?.id]);
 
   useEffect(() => {
     if (!user || !isRegistered) return;
@@ -463,11 +500,29 @@ export default function MessagesPage() {
       }
 
       if (data) {
-        const formattedMessages = data.map(m => {
+        // Filter out any messages sent before this user cleared this chat
+        const clearedIso =
+          clearedChatsMapRef.current[activeConversationId] ||
+          (() => {
+            if (typeof window !== "undefined" && user?.id) {
+              try {
+                const raw = localStorage.getItem(`yapclub_cleared_chats_${user.id}`);
+                if (raw) return JSON.parse(raw)[activeConversationId];
+              } catch {}
+            }
+            return null;
+          })();
+
+        const clearedMs = clearedIso ? new Date(clearedIso).getTime() : 0;
+        const visibleRows = clearedMs
+          ? data.filter((m) => new Date(m.created_at).getTime() > clearedMs)
+          : data;
+
+        const formattedMessages = visibleRows.map((m) => {
           const profile = Array.isArray(m.profiles) ? m.profiles[0] : m.profiles;
           return {
             ...m,
-            profiles: profile
+            profiles: profile,
           };
         });
         setMessages(formattedMessages);
@@ -1000,52 +1055,54 @@ export default function MessagesPage() {
     }
   };
 
-  // Clear chat (empties all messages in active conversation without removing the chat)
+  // Clear chat (clears messages for the current user only; other participants remain completely unaffected)
   const handleClearChat = async () => {
     if (!activeConversationId || !user?.id) return;
     setIsClearingChat(true);
+    const nowIso = new Date().toISOString();
     try {
-      // 1. Optimistic clear
+      // 1. Update local state and ref
+      const updatedMap = { ...clearedChatsMapRef.current, [activeConversationId]: nowIso };
+      clearedChatsMapRef.current = updatedMap;
+      setClearedChatsMap(updatedMap);
+
+      // 2. Clear current messages view for THIS user only
       setMessages([]);
       setReplyingTo(null);
       setEditingMessage(null);
 
-      // 2. Clear last message in conversation sidebar
-      setConversations((prev) =>
-        prev.map((c) =>
-          c.id === activeConversationId
-            ? { ...c, last_message: undefined, unread_count: 0 }
-            : c
-        )
-      );
+      // 3. Update read receipts so unread badge is cleared
+      markAsRead(activeConversationId, nowIso);
+      broadcastReadReceipt(nowIso);
 
-      // 3. Delete messages from database via API
-      const { data: { session } } = await supabase.auth.getSession();
-      await fetch(`/api/messages?conversationId=${activeConversationId}&userId=${user.id}`, {
-        method: "DELETE",
-        headers: {
-          ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
-        },
-      });
-
-      // Direct fallback
-      await supabase.from("messages").delete().eq("conversation_id", activeConversationId);
-
-      // 4. Broadcast to peers in conversation
-      if (presenceChannelRef.current) {
+      // 4. Persist to localStorage for instant persistence across reloads on this device
+      if (typeof window !== "undefined") {
         try {
-          presenceChannelRef.current.send({
-            type: "broadcast",
-            event: "chat_cleared",
-            payload: { conversation_id: activeConversationId },
-          });
-        } catch (e) {}
+          localStorage.setItem(`yapclub_cleared_chats_${user.id}`, JSON.stringify(updatedMap));
+        } catch {}
       }
+
+      // 5. Persist to profiles.social_links so it persists across incognito/devices for THIS user only
+      Promise.resolve(
+        supabase
+          .from("profiles")
+          .select("social_links")
+          .eq("id", user.id)
+          .maybeSingle()
+      ).then(({ data }) => {
+        const links = data?.social_links || {};
+        const remoteMap = links.cleared_chats_map || {};
+        remoteMap[activeConversationId] = nowIso;
+        return supabase
+          .from("profiles")
+          .update({ social_links: { ...links, cleared_chats_map: remoteMap } })
+          .eq("id", user.id);
+      }).catch(() => {});
 
       setIsClearChatModalOpen(false);
       setIsHeaderMenuOpen(false);
     } catch (err) {
-      console.error("Error clearing chat:", err);
+      console.error("Error clearing chat for current user:", err);
     } finally {
       setIsClearingChat(false);
     }
@@ -1186,12 +1243,20 @@ export default function MessagesPage() {
   };
 
   // --- Message Actions: Edit, Delete, Reply, Scroll ---
-  const startEditingMessage = (msgId: string, currentContent: string) => {
+  const startEditingMessage = (msgId: string, currentContent: string, createdAt?: string) => {
+    if (createdAt) {
+      const ageMs = Date.now() - new Date(createdAt).getTime();
+      if (ageMs > 5 * 60 * 1000) {
+        alert("Messages can only be edited within 5 minutes of sending.");
+        return;
+      }
+    }
     const parsed = parseMessageContent(currentContent);
     if (parsed.type === "voice" || parsed.type === "images" || parsed.type === "gif" || parsed.type === "room_invite") return;
     setEditingMessage({
       id: msgId,
       text: parsed.text || "",
+      createdAt,
       replyTo: parsed.replyTo,
       reactions: parsed.reactions,
     });
@@ -1209,6 +1274,17 @@ export default function MessagesPage() {
 
   const saveEditedMessage = async () => {
     if (!editingMessage || !inputMessage.trim() || !user) return;
+    const targetMsg = messages.find((m) => m.id === editingMessage.id);
+    const msgCreatedAt = editingMessage.createdAt || targetMsg?.created_at;
+    if (msgCreatedAt) {
+      const ageMs = Date.now() - new Date(msgCreatedAt).getTime();
+      if (ageMs > 5 * 60 * 1000) {
+        alert("Messages can only be edited within 5 minutes of sending.");
+        cancelEditing();
+        return;
+      }
+    }
+
     const newContent = serializeTextMessage(
       inputMessage.trim(),
       editingMessage.replyTo,
@@ -1484,20 +1560,6 @@ export default function MessagesPage() {
           })
         );
       })
-      .on("broadcast", { event: "chat_cleared" }, (payload: any) => {
-        if (payload?.payload?.conversation_id === activeConversationId) {
-          setMessages([]);
-          setReplyingTo(null);
-          setEditingMessage(null);
-          setConversations((prev) =>
-            prev.map((c) =>
-              c.id === activeConversationId
-                ? { ...c, last_message: undefined, unread_count: 0 }
-                : c
-            )
-          );
-        }
-      })
       .on("broadcast", { event: "block_status_changed" }, (payload: any) => {
         const { blocker_id, blocked_id, is_blocked } = payload?.payload || {};
         if (blocked_id === user.id) {
@@ -1617,16 +1679,18 @@ export default function MessagesPage() {
 
   // Close header 3-dots menu on outside click
   useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
+    const handleClickOutside = (e: MouseEvent | TouchEvent) => {
       if (headerMenuRef.current && !headerMenuRef.current.contains(e.target as Node)) {
         setIsHeaderMenuOpen(false);
       }
     };
     if (isHeaderMenuOpen) {
       document.addEventListener("mousedown", handleClickOutside);
+      document.addEventListener("touchstart", handleClickOutside);
     }
     return () => {
       document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("touchstart", handleClickOutside);
     };
   }, [isHeaderMenuOpen]);
 
@@ -2384,7 +2448,7 @@ export default function MessagesPage() {
                     : (customNickname || shownName || "Chat");
 
                 return (
-                  <div className="h-14 sm:h-16 border-b border-white/5 flex items-center justify-between px-2.5 sm:px-6 shrink-0 bg-[#090A0F]/95 backdrop-blur-xl shadow-sm pt-[env(safe-area-inset-top,0px)]">
+                  <div className="relative z-40 h-14 sm:h-16 border-b border-white/5 flex items-center justify-between px-2.5 sm:px-6 shrink-0 bg-[#090A0F]/95 backdrop-blur-xl shadow-sm pt-[env(safe-area-inset-top,0px)]">
                     <div className="flex items-center gap-2 sm:gap-3 min-w-0">
                       {/* Back Button */}
                       <button
@@ -2517,9 +2581,13 @@ export default function MessagesPage() {
                       )}
 
                       {/* Chat Actions Dropdown Menu */}
-                      <div className="relative" ref={headerMenuRef}>
+                      <div className="relative z-50" ref={headerMenuRef}>
                         <button
-                          onClick={() => setIsHeaderMenuOpen(!isHeaderMenuOpen)}
+                          onClick={() => {
+                            setIsHeaderMenuOpen((prev) => !prev);
+                            setActiveActionMsgId(null);
+                            setActiveReactionPickerMsgId(null);
+                          }}
                           className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/10 active:scale-95 transition-all"
                           title="Chat Options"
                           aria-label="Chat Options"
@@ -2528,97 +2596,104 @@ export default function MessagesPage() {
                         </button>
 
                       {isHeaderMenuOpen && (
-                        <div className="absolute right-0 top-full mt-2 w-48 rounded-2xl bg-[#12131A] border border-white/10 shadow-2xl py-1.5 z-50 animate-in fade-in zoom-in-95 duration-150 backdrop-blur-2xl">
-                          {isGroup && (
-                            <>
-                              <button
-                                onClick={() => {
-                                  setIsGroupInfoOpen(true);
-                                  setIsHeaderMenuOpen(false);
-                                }}
-                                className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/5 transition-colors text-left"
-                              >
-                                <Users size={15} className="text-indigo-400" />
-                                <span>Group Info</span>
-                              </button>
+                        <>
+                          {/* Invisible backdrop to dismiss menu on tap anywhere */}
+                          <div
+                            className="fixed inset-0 z-40 bg-transparent"
+                            onClick={() => setIsHeaderMenuOpen(false)}
+                          />
+                          <div className="absolute right-0 top-full mt-2 w-52 rounded-2xl bg-[#12131A] border border-white/15 shadow-2xl py-1.5 z-50 animate-in fade-in zoom-in-95 duration-150 backdrop-blur-2xl ring-1 ring-black/50">
+                            {isGroup && (
+                              <>
+                                <button
+                                  onClick={() => {
+                                    setIsGroupInfoOpen(true);
+                                    setIsHeaderMenuOpen(false);
+                                  }}
+                                  className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/5 transition-colors text-left cursor-pointer"
+                                >
+                                  <Users size={15} className="text-indigo-400" />
+                                  <span>Group Info</span>
+                                </button>
 
-                              <button
-                                onClick={() => {
-                                  setIsAddGroupMemberOpen(true);
-                                  setIsHeaderMenuOpen(false);
-                                }}
-                                className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/5 transition-colors text-left"
-                              >
-                                <UserPlus size={15} className="text-indigo-400" />
-                                <span>Add Participants</span>
-                              </button>
+                                <button
+                                  onClick={() => {
+                                    setIsAddGroupMemberOpen(true);
+                                    setIsHeaderMenuOpen(false);
+                                  }}
+                                  className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/5 transition-colors text-left cursor-pointer"
+                                >
+                                  <UserPlus size={15} className="text-indigo-400" />
+                                  <span>Add Participants</span>
+                                </button>
 
-                              <div className="h-px bg-white/5 my-1" />
-                            </>
-                          )}
-                          {!isGroup && otherUserId && (
-                            <>
-                              <button
-                                onClick={() => {
-                                  setNicknameTargetUserId(otherUserId);
-                                  setNicknameTargetName(shownName || "Friend");
-                                  setNicknameInput(customNickname || "");
-                                  setIsNicknameModalOpen(true);
-                                  setIsHeaderMenuOpen(false);
-                                }}
-                                className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/5 transition-colors text-left"
-                              >
-                                <Edit3 size={15} className="text-indigo-400" />
-                                <span>{customNickname ? "Edit Nickname" : "Set Nickname"}</span>
-                              </button>
+                                <div className="h-px bg-white/5 my-1" />
+                              </>
+                            )}
+                            {!isGroup && otherUserId && (
+                              <>
+                                <button
+                                  onClick={() => {
+                                    setNicknameTargetUserId(otherUserId);
+                                    setNicknameTargetName(shownName || "Friend");
+                                    setNicknameInput(customNickname || "");
+                                    setIsNicknameModalOpen(true);
+                                    setIsHeaderMenuOpen(false);
+                                  }}
+                                  className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/5 transition-colors text-left cursor-pointer"
+                                >
+                                  <Edit3 size={15} className="text-indigo-400" />
+                                  <span>{customNickname ? "Edit Nickname" : "Set Nickname"}</span>
+                                </button>
 
-                              <button
-                                onClick={() => handleToggleBlock(otherUserId)}
-                                className={`w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold transition-colors text-left ${
-                                  isBlocked 
-                                    ? "text-emerald-400 hover:bg-emerald-500/10" 
-                                    : "text-amber-400 hover:bg-amber-500/10"
-                                }`}
-                              >
-                                {isBlocked ? (
-                                  <>
-                                    <ShieldCheck size={15} />
-                                    <span>Unblock Contact</span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <ShieldAlert size={15} />
-                                    <span>Block Contact</span>
-                                  </>
-                                )}
-                              </button>
+                                <button
+                                  onClick={() => handleToggleBlock(otherUserId)}
+                                  className={`w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold transition-colors text-left cursor-pointer ${
+                                    isBlocked 
+                                      ? "text-emerald-400 hover:bg-emerald-500/10" 
+                                      : "text-amber-400 hover:bg-amber-500/10"
+                                  }`}
+                                >
+                                  {isBlocked ? (
+                                    <>
+                                      <ShieldCheck size={15} />
+                                      <span>Unblock Contact</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <ShieldAlert size={15} />
+                                      <span>Block Contact</span>
+                                    </>
+                                  )}
+                                </button>
 
-                              <div className="my-1 border-t border-white/5" />
-                            </>
-                          )}
+                                <div className="my-1 border-t border-white/5" />
+                              </>
+                            )}
 
-                          <button
-                            onClick={() => {
-                              setIsClearChatModalOpen(true);
-                              setIsHeaderMenuOpen(false);
-                            }}
-                            className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/5 transition-colors text-left"
-                          >
-                            <Eraser size={15} className="text-amber-400" />
-                            <span>Clear Chat</span>
-                          </button>
+                            <button
+                              onClick={() => {
+                                setIsClearChatModalOpen(true);
+                                setIsHeaderMenuOpen(false);
+                              }}
+                              className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/5 transition-colors text-left cursor-pointer"
+                            >
+                              <Eraser size={15} className="text-amber-400" />
+                              <span>Clear Chat</span>
+                            </button>
 
-                          <button
-                            onClick={() => {
-                              setIsDeleteModalOpen(true);
-                              setIsHeaderMenuOpen(false);
-                            }}
-                            className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-rose-400 hover:bg-rose-500/10 transition-colors text-left"
-                          >
-                            <Trash2 size={15} />
-                            <span>Delete Chat</span>
-                          </button>
-                        </div>
+                            <button
+                              onClick={() => {
+                                setIsDeleteModalOpen(true);
+                                setIsHeaderMenuOpen(false);
+                              }}
+                              className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-rose-400 hover:bg-rose-500/10 transition-colors text-left cursor-pointer"
+                            >
+                              <Trash2 size={15} />
+                              <span>Delete Chat</span>
+                            </button>
+                          </div>
+                        </>
                       )}
                       </div>
                     </div>
@@ -2812,21 +2887,26 @@ export default function MessagesPage() {
                                 <Reply size={13} />
                               </button>
 
-                              {parsed.type !== "voice" && parsed.type !== "room_invite" && parsed.type !== "gif" && parsed.type !== "images" && (
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setActiveActionMsgId(null);
-                                    startEditingMessage(msg.id, msg.content);
-                                  }}
-                                  className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
-                                  title="Edit message"
-                                  aria-label="Edit message"
-                                >
-                                  <Edit3 size={13} />
-                                </button>
-                              )}
+                              {parsed.type !== "voice" && parsed.type !== "room_invite" && parsed.type !== "gif" && parsed.type !== "images" && (() => {
+                                const ageMs = Date.now() - new Date(msg.created_at).getTime();
+                                const isWithin5Minutes = ageMs <= 5 * 60 * 1000;
+                                if (!isWithin5Minutes) return null;
+                                return (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setActiveActionMsgId(null);
+                                      startEditingMessage(msg.id, msg.content, msg.created_at);
+                                    }}
+                                    className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+                                    title="Edit message (available for 5 min)"
+                                    aria-label="Edit message"
+                                  >
+                                    <Edit3 size={13} />
+                                  </button>
+                                );
+                              })()}
 
                               <button
                                 type="button"
@@ -3654,6 +3734,7 @@ export default function MessagesPage() {
                         <div className="flex items-center gap-2 min-w-0">
                           <Edit3 size={14} className="text-amber-400 shrink-0" />
                           <span className="font-semibold text-amber-300">Editing message</span>
+                          <span className="text-[10px] text-amber-400/70">(allowed within 5 min)</span>
                         </div>
                         <button
                           type="button"
@@ -3899,16 +3980,16 @@ export default function MessagesPage() {
         </div>
       )}
 
-      {/* Clear Chat Confirmation Modal */}
+      {/* Clear Chat Confirmation Modal (Clears for current user only) */}
       {isClearChatModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-[#12131A] border border-white/10 rounded-2xl p-5 max-w-sm w-full shadow-2xl">
             <div className="w-10 h-10 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center mb-3">
               <Eraser size={20} />
             </div>
-            <h3 className="text-base font-bold text-white mb-1">Clear this chat?</h3>
+            <h3 className="text-base font-bold text-white mb-1">Clear chat for you?</h3>
             <p className="text-xs text-slate-400 mb-5 leading-relaxed">
-              Are you sure you want to clear all messages in this chat? All messages will be permanently deleted for everyone in this chat. This action cannot be undone.
+              Are you sure you want to clear this chat? Messages will be cleared from your view only. Other participants will still be able to see them.
             </p>
             <div className="flex items-center justify-end gap-2">
               <button
@@ -3926,7 +4007,7 @@ export default function MessagesPage() {
                 className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold shadow-md active:scale-95 transition-all flex items-center gap-2 cursor-pointer disabled:opacity-50"
               >
                 {isClearingChat && <Loader2 size={14} className="animate-spin" />}
-                <span>{isClearingChat ? "Clearing..." : "Clear Chat"}</span>
+                <span>{isClearingChat ? "Clearing..." : "Clear for me"}</span>
               </button>
             </div>
           </div>

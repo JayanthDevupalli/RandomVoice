@@ -80,6 +80,7 @@ import {
 import { MusicDeck } from "./music/MusicDeck";
 import { MusicModal } from "./music/MusicModal";
 import { RoomMusicState, MusicTrack, QueuedTrack } from "@/lib/music-types";
+import { parseMessageContent } from "@/lib/chat-utils";
 import { RoleBadge, RoleAvatarDot } from "@/components/ui/RoleBadge";
 import {
   VectorReaction,
@@ -2124,19 +2125,35 @@ export function JunctionRoom({
 
         if (!isSelf && !isChatOpenRef.current && showInRoomPopupsRef.current) {
           const isWhisper = Boolean(payload.targetIdentity && isLocalIdentity(payload.targetIdentity));
+          let popupText = payload.text || "";
+          try {
+            const parsed = parseMessageContent(payload.text || "");
+            if (parsed.type === "images" && parsed.images && parsed.images.length > 0) {
+              const count = parsed.images.length;
+              const caption = parsed.text ? `: ${parsed.text}` : "";
+              popupText = `📷 Photo${count > 1 ? `s (${count})` : ""}${caption}`;
+            } else if (parsed.type === "gif") {
+              popupText = "🖼️ GIF";
+            } else if (parsed.type === "voice") {
+              popupText = "🎵 Voice Note";
+            } else if (parsed.text) {
+              popupText = parsed.text;
+            }
+          } catch {}
+
           const newPopup: InRoomPopupMessage = {
             id: payload.id || `popup_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
             senderName: payload.senderName || "Room Participant",
             avatar: payload.avatar,
             color: payload.color,
-            text: payload.text || "",
+            text: popupText,
             isWhisper,
             targetIdentity: payload.targetIdentity,
             timestamp: Date.now(),
           };
 
-          // Strictly ONE pop-up at a time - never stack or flood the screen
-          setInRoomPopups([newPopup]);
+          // For every user message there should be new bubble pop up
+          setInRoomPopups((prev) => [...prev.slice(-3), newPopup]);
 
           // Auto-dismiss in 4.5s so it gives comfortable time to read clearly
           setTimeout(() => {
@@ -3702,6 +3719,13 @@ export function JunctionRoom({
     if (!inputMessage.trim()) return;
 
     if (editingMessage) {
+      const ageMs = Date.now() - (editingMessage.timestamp || 0);
+      if (ageMs > 5 * 60 * 1000) {
+        alert("Messages can only be edited within 5 minutes of sending.");
+        setEditingMessage(null);
+        setInputMessage("");
+        return;
+      }
       const updatedText = inputMessage.trim();
       setChatMessages((prev) =>
         prev.map((m) => (m.id === editingMessage.id ? { ...m, text: updatedText, isEdited: true } : m))
@@ -5846,19 +5870,22 @@ export function JunctionRoom({
                               >
                                 <Reply size={12} />
                               </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setEditingMessage(msg);
-                                  setInputMessage(msg.text);
-                                  setReplyingToMessage(null);
-                                }}
-                                className="w-6 h-6 rounded-full text-slate-400 hover:text-amber-300 hover:bg-amber-400/15 flex items-center justify-center transition-colors cursor-pointer"
-                                title="Edit message"
-                                aria-label="Edit"
-                              >
-                                <Edit2 size={12} />
-                              </button>
+                              {/* 5-minute limit message edit */}
+                              {isMe && (Date.now() - (msg.timestamp || 0) <= 5 * 60 * 1000) && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEditingMessage(msg);
+                                    setInputMessage(msg.text);
+                                    setReplyingToMessage(null);
+                                  }}
+                                  className="w-6 h-6 rounded-full text-slate-400 hover:text-amber-300 hover:bg-amber-400/15 flex items-center justify-center transition-colors cursor-pointer"
+                                  title="Edit message (within 5 min)"
+                                  aria-label="Edit"
+                                >
+                                  <Edit2 size={12} />
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 onClick={() => handleDeleteMessage(msg.id)}
@@ -6035,7 +6062,7 @@ export function JunctionRoom({
                         <Edit2 size={11} />
                       </div>
                       <span className="text-amber-300 font-semibold truncate">
-                        Editing your message (Enter to save, Esc to cancel)
+                        Editing your message (allowed within 5 min &bull; Enter to save, Esc to cancel)
                       </span>
                     </div>
                     <button
@@ -6830,7 +6857,7 @@ export function JunctionRoom({
           )}
           {/* Floating Pop-up Notification (In-Room Whisper Chat Preview) - Positioned right above bottom controls dock */}
           {!isChatOpen && showInRoomPopups && inRoomPopups.length > 0 && (
-            <div className="fixed bottom-20 left-3 right-3 sm:left-auto sm:right-6 sm:bottom-24 z-40 max-w-sm sm:max-w-[340px] mx-auto sm:mx-0 pointer-events-none transition-all duration-200">
+            <div className="fixed bottom-20 left-3 right-3 sm:left-auto sm:right-6 sm:bottom-24 z-40 max-w-sm sm:max-w-[340px] mx-auto sm:mx-0 pointer-events-none flex flex-col gap-2 transition-all duration-200">
               {inRoomPopups.map((popup) => (
                 <div
                   key={popup.id}

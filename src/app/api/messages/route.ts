@@ -18,7 +18,7 @@ async function verifyCaller(request: NextRequest, claimedUserId: string): Promis
   }
 }
 
-// Edit message (PATCH)
+// Edit message (PATCH) - Only allowed within 5 minutes of sending
 export async function PATCH(request: NextRequest) {
   try {
     const { id, content, userId } = await request.json();
@@ -30,6 +30,29 @@ export async function PATCH(request: NextRequest) {
     const isAuthorized = await verifyCaller(request, userId);
     if (!isAuthorized) {
       return NextResponse.json({ error: "Forbidden: Cannot edit another user's message" }, { status: 403 });
+    }
+
+    // Verify message age: must be within 5 minutes (300,000 ms)
+    const { data: existingMsg, error: fetchErr } = await supabaseAdmin
+      .from("messages")
+      .select("id, sender_id, created_at")
+      .eq("id", id)
+      .single();
+
+    if (fetchErr || !existingMsg) {
+      return NextResponse.json({ error: "Message not found" }, { status: 404 });
+    }
+
+    if (existingMsg.sender_id !== userId) {
+      return NextResponse.json({ error: "Forbidden: Cannot edit another user's message" }, { status: 403 });
+    }
+
+    const ageMs = Date.now() - new Date(existingMsg.created_at).getTime();
+    if (ageMs > 5 * 60 * 1000) {
+      return NextResponse.json(
+        { error: "Messages can only be edited within 5 minutes of being sent" },
+        { status: 400 }
+      );
     }
 
     const { data, error } = await supabaseAdmin

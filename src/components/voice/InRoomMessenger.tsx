@@ -22,20 +22,32 @@ import {
   Loader2,
   AlertTriangle,
   Users,
+  Image as ImageIcon,
+  MoreVertical,
+  Edit3,
+  Trash2,
+  Smile,
 } from "lucide-react";
 import { VoiceNotePlayer } from "@/components/chat/VoiceNotePlayer";
 import { RoomInviteCard } from "@/components/chat/RoomInviteCard";
+import { WhatsAppImageCluster } from "@/components/chat/WhatsAppImageCluster";
+import { MediaLightbox, LightboxMediaItem } from "@/components/chat/MediaLightbox";
+import { GifPicker } from "@/components/chat/GifPicker";
+import { QuickReactionPicker, ReactionBadges } from "@/components/chat/MessageReactions";
+import { compressImage, encryptImage } from "@/lib/e2ee-service";
 import {
   parseMessageContent,
   serializeTextMessage,
+  serializeImagesMessage,
+  serializeGifMessage,
   serializeRoomInvite,
+  ChatImageItem,
   getSenderColor,
   getProfileDisplayName,
   isSameDay,
   formatChatDateDivider,
   toggleReactionInContent,
 } from "@/lib/chat-utils";
-import { ReactionBadges } from "@/components/chat/MessageReactions";
 import { socialService, RelationshipStatus } from "@/lib/social-service";
 
 interface DirectMessage {
@@ -109,6 +121,31 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
   const [nicknames, setNicknames] = useState<Record<string, string>>({});
   const [partnerLastReadAt, setPartnerLastReadAt] = useState<string | null>(null);
 
+  // Lightbox & Reaction states for rich media
+  const [lightboxImages, setLightboxImages] = useState<LightboxMediaItem[]>([]);
+  const [lightboxIndex, setLightboxIndex] = useState(0);
+  const [isLightboxOpen, setIsLightboxOpen] = useState(false);
+  const [lightboxMessageId, setLightboxMessageId] = useState<string | null>(null);
+  const [activeReactionPickerMsgId, setActiveReactionPickerMsgId] = useState<string | null>(null);
+
+  // Staged Photos for E2EE Image sending
+  const [stagedImages, setStagedImages] = useState<
+    Array<{ id: string; file: File; previewUrl: string; width?: number; height?: number }>
+  >([]);
+  const [isEncryptingImages, setIsEncryptingImages] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // GIF Picker state
+  const [isGifPickerOpen, setIsGifPickerOpen] = useState(false);
+
+  // Message editing state with strict 5-minute limit
+  const [editingMessage, setEditingMessage] = useState<{ id: string; text: string; createdAt: string } | null>(null);
+
+  // Cleared chats map (clear for me only)
+  const [clearedChatsMap, setClearedChatsMap] = useState<Record<string, string>>({});
+  const [isHeaderMenuOpen, setIsHeaderMenuOpen] = useState(false);
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+
   // Social relationship & block state
   const [targetRelationship, setTargetRelationship] = useState<RelationshipStatus | null>(null);
   const [isRelationshipLoading, setIsRelationshipLoading] = useState(false);
@@ -118,6 +155,39 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Load user's private cleared chats map (stored in profiles.social_links.cleared_chats_map & localStorage)
+  useEffect(() => {
+    if (!user?.id) return;
+    const storageKey = `yapclub_cleared_chats_${user.id}`;
+    let localMap: Record<string, string> = {};
+    if (typeof window !== "undefined") {
+      try {
+        const stored = localStorage.getItem(storageKey);
+        if (stored) localMap = JSON.parse(stored);
+      } catch {}
+    }
+    setClearedChatsMap(localMap);
+
+    Promise.resolve(
+      supabase
+        .from("profiles")
+        .select("social_links")
+        .eq("id", user.id)
+        .maybeSingle()
+    )
+      .then(({ data }) => {
+        const remoteMap = (data?.social_links as any)?.cleared_chats_map || {};
+        const merged = { ...remoteMap, ...localMap };
+        setClearedChatsMap(merged);
+        if (typeof window !== "undefined") {
+          try {
+            localStorage.setItem(storageKey, JSON.stringify(merged));
+          } catch {}
+        }
+      })
+      .catch(() => {});
+  }, [user?.id]);
 
   // Load nicknames and block lists
   useEffect(() => {
@@ -502,9 +572,15 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
       if (error) {
         console.error("Error fetching messages:", error);
       } else if (data) {
-        setMessages(data as any[]);
-        if (data.length > 0) {
-          const latest = data[data.length - 1];
+        const clearedIso = clearedChatsMap[activeConversationId];
+        const clearedMs = clearedIso ? new Date(clearedIso).getTime() : 0;
+        const visibleRows = clearedMs
+          ? (data as any[]).filter((m) => new Date(m.created_at).getTime() > clearedMs)
+          : (data as any[]);
+
+        setMessages(visibleRows);
+        if (visibleRows.length > 0) {
+          const latest = visibleRows[visibleRows.length - 1];
           markAsRead(activeConversationId, latest.created_at);
         }
       }
@@ -512,7 +588,7 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
 
     fetchMessages();
 
-    // Subscribe to new incoming messages in this active conversation
+    // Subscribe to incoming messages & updates in this active conversation
     const channelId = `in_room_dm_${activeConversationId}_${Math.random().toString(36).substring(2, 9)}`;
     const channel = supabase
       .channel(channelId)
@@ -526,11 +602,36 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
         },
         (payload) => {
           const newMsg = payload.new as DirectMessage;
+          if (!newMsg) return;
+
+          const clearedIso = clearedChatsMap[activeConversationId];
+          const clearedMs = clearedIso ? new Date(clearedIso).getTime() : 0;
+          if (clearedMs && new Date(newMsg.created_at).getTime() <= clearedMs) {
+            return;
+          }
+
           setMessages((prev) => {
             if (prev.some((m) => m.id === newMsg.id)) return prev;
             return [...prev, newMsg];
           });
           markAsRead(activeConversationId, newMsg.created_at);
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "messages",
+          filter: `conversation_id=eq.${activeConversationId}`,
+        },
+        (payload) => {
+          const updated = payload.new as DirectMessage;
+          if (updated) {
+            setMessages((prev) =>
+              prev.map((m) => (m.id === updated.id ? { ...m, content: updated.content } : m))
+            );
+          }
         }
       )
       .subscribe();
@@ -541,7 +642,7 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
       }
       supabase.removeChannel(channel);
     };
-  }, [activeConversationId, user?.id, markAsRead]);
+  }, [activeConversationId, user?.id, markAsRead, clearedChatsMap]);
 
   // Global realtime subscription for updating all conversations' last message timestamp & sorting
   useEffect(() => {
@@ -598,9 +699,300 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
     }
   }, [activeConversationId]);
 
+  // Open full-screen MediaLightbox for single image, GIF or image cluster
+  const openClusterLightbox = (
+    imgs: Array<{ url: string; caption?: string; title?: string }>,
+    initialIndex: number,
+    msgId?: string
+  ) => {
+    setLightboxImages(imgs);
+    setLightboxIndex(initialIndex);
+    setLightboxMessageId(msgId || null);
+    setIsLightboxOpen(true);
+  };
+
+  // Image Selection for WhatsApp-style E2EE Photos
+  const handleSelectPhotos = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    const valid = files.filter((f) => f.type.startsWith("image/"));
+    if (valid.length === 0) {
+      alert("Please select valid image files.");
+      return;
+    }
+    const newStaged = valid.map((file) => ({
+      id: `staged_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      file,
+      previewUrl: URL.createObjectURL(file),
+    }));
+    setStagedImages((prev) => [...prev, ...newStaged].slice(0, 10));
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  // Send WhatsApp-Style Encrypted Photos
+  const handleSendImages = async () => {
+    if (!activeConversationId || !user || stagedImages.length === 0 || isEncryptingImages) return;
+
+    if (user.isBanned) {
+      alert("Your account is currently suspended. Messaging is disabled.");
+      return;
+    }
+    if (partnerId && (blockedUsers.includes(partnerId) || blockedMeUsers.includes(partnerId))) {
+      alert("Cannot send messages in this conversation.");
+      return;
+    }
+    if (!isGroupChat && (!targetRelationship || !targetRelationship.isAcceptedConnection)) {
+      alert("Messaging is locked until the follow request is accepted by both users.");
+      return;
+    }
+
+    setIsEncryptingImages(true);
+    const caption = inputMessage.trim();
+    const currentStaged = [...stagedImages];
+    setInputMessage("");
+    setStagedImages([]);
+
+    const tempId = `temp-img-${Date.now()}`;
+    const nowIso = new Date().toISOString();
+
+    const optimisticImages: ChatImageItem[] = currentStaged.map((s) => ({
+      id: s.id,
+      url: s.previewUrl,
+    }));
+    const optimisticContent = serializeImagesMessage(optimisticImages, caption);
+    const optimisticMsg: DirectMessage = {
+      id: tempId,
+      conversation_id: activeConversationId,
+      sender_id: user.id,
+      content: optimisticContent,
+      created_at: nowIso,
+      profiles: {
+        username: user.name || user.username || "You",
+        avatar: user.avatar || "user",
+      },
+    };
+    setMessages((prev) => [...prev, optimisticMsg]);
+
+    try {
+      const encryptedItems: ChatImageItem[] = await Promise.all(
+        currentStaged.map(async (staged) => {
+          const compressed = await compressImage(staged.file, 1600, 0.82);
+          const encrypted = await encryptImage(
+            compressed.blob,
+            activeConversationId,
+            compressed.width,
+            compressed.height
+          );
+          return {
+            id: staged.id,
+            ciphertext: encrypted.ciphertext,
+            iv: encrypted.iv,
+            mimeType: encrypted.mimeType,
+            width: encrypted.width,
+            height: encrypted.height,
+          };
+        })
+      );
+
+      const serializedContent = serializeImagesMessage(encryptedItems, caption);
+      const { data, error } = await supabase
+        .from("messages")
+        .insert({
+          conversation_id: activeConversationId,
+          sender_id: user.id,
+          content: serializedContent,
+        })
+        .select(`
+          id,
+          conversation_id,
+          sender_id,
+          content,
+          created_at,
+          profiles (
+            username,
+            avatar
+          )
+        `)
+        .single();
+
+      if (!error && data) {
+        setMessages((prev) => prev.map((m) => (m.id === tempId ? (data as any) : m)));
+      }
+
+      await supabase
+        .from("conversations")
+        .update({ last_message_at: nowIso })
+        .eq("id", activeConversationId);
+
+      markAsRead(activeConversationId);
+    } catch (err) {
+      console.error("Failed to send encrypted images:", err);
+    } finally {
+      setIsEncryptingImages(false);
+    }
+  };
+
+  // Send Animated GIF
+  const handleSendGif = async (gifUrl: string, gifTitle: string) => {
+    if (!activeConversationId || !user || isSending) return;
+
+    if (user.isBanned) {
+      alert("Your account is currently suspended. Messaging is disabled.");
+      return;
+    }
+    if (partnerId && (blockedUsers.includes(partnerId) || blockedMeUsers.includes(partnerId))) {
+      alert("Cannot send messages in this conversation.");
+      return;
+    }
+    if (!isGroupChat && (!targetRelationship || !targetRelationship.isAcceptedConnection)) {
+      alert("Messaging is locked until the follow request is accepted by both users.");
+      return;
+    }
+
+    setIsGifPickerOpen(false);
+    setIsSending(true);
+
+    const content = serializeGifMessage(gifUrl, gifTitle);
+    const tempId = "temp-gif-" + Date.now();
+    const nowIso = new Date().toISOString();
+
+    const optimisticMsg: DirectMessage = {
+      id: tempId,
+      conversation_id: activeConversationId,
+      sender_id: user.id,
+      content,
+      created_at: nowIso,
+      profiles: {
+        username: user.name || user.username || "You",
+        avatar: user.avatar || "user",
+      },
+    };
+    setMessages((prev) => [...prev, optimisticMsg]);
+
+    try {
+      const { data, error } = await supabase
+        .from("messages")
+        .insert({
+          conversation_id: activeConversationId,
+          sender_id: user.id,
+          content,
+        })
+        .select(`
+          id,
+          conversation_id,
+          sender_id,
+          content,
+          created_at,
+          profiles (
+            username,
+            avatar
+          )
+        `)
+        .single();
+
+      if (!error && data) {
+        setMessages((prev) => prev.map((m) => (m.id === tempId ? (data as any) : m)));
+      }
+
+      await supabase
+        .from("conversations")
+        .update({ last_message_at: nowIso })
+        .eq("id", activeConversationId);
+
+      markAsRead(activeConversationId);
+    } catch (err) {
+      console.error("Failed to send GIF:", err);
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  // Clear Chat for Me Only
+  const handleClearChatForMe = async () => {
+    if (!activeConversationId || !user?.id) return;
+    const nowIso = new Date().toISOString();
+    const updatedMap = { ...clearedChatsMap, [activeConversationId]: nowIso };
+    setClearedChatsMap(updatedMap);
+    setMessages([]);
+
+    if (typeof window !== "undefined") {
+      try {
+        localStorage.setItem(`yapclub_cleared_chats_${user.id}`, JSON.stringify(updatedMap));
+      } catch {}
+    }
+
+    Promise.resolve(
+      supabase
+        .from("profiles")
+        .select("social_links")
+        .eq("id", user.id)
+        .maybeSingle()
+    )
+      .then(({ data }) => {
+        const links = data?.social_links || {};
+        const remoteMap = links.cleared_chats_map || {};
+        remoteMap[activeConversationId] = nowIso;
+        return supabase
+          .from("profiles")
+          .update({ social_links: { ...links, cleared_chats_map: remoteMap } })
+          .eq("id", user.id);
+      })
+      .catch(() => {});
+
+    setShowClearConfirm(false);
+    setIsHeaderMenuOpen(false);
+  };
+
   // Handle Send Message with Strict Relationship & Format Verification
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    // If staged images exist, send images instead
+    if (stagedImages.length > 0) {
+      await handleSendImages();
+      return;
+    }
+
+    // Message editing within 5 minutes
+    if (editingMessage) {
+      if (!inputMessage.trim() || !user?.id) return;
+      const ageMs = Date.now() - new Date(editingMessage.createdAt).getTime();
+      if (ageMs > 5 * 60 * 1000) {
+        alert("Messages can only be edited within 5 minutes of sending.");
+        setEditingMessage(null);
+        setInputMessage("");
+        return;
+      }
+      const targetMsg = messages.find((m) => m.id === editingMessage.id);
+      const parsedTarget = targetMsg ? parseMessageContent(targetMsg.content) : null;
+      const newContent = serializeTextMessage(
+        inputMessage.trim(),
+        parsedTarget?.replyTo,
+        true,
+        parsedTarget?.reactions
+      );
+      setMessages((prev) =>
+        prev.map((m) => (m.id === editingMessage.id ? { ...m, content: newContent } : m))
+      );
+      const msgIdToEdit = editingMessage.id;
+      setEditingMessage(null);
+      setInputMessage("");
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        await fetch("/api/messages", {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+          },
+          body: JSON.stringify({ id: msgIdToEdit, content: newContent, userId: user.id }),
+        });
+      } catch (err) {
+        console.error("Failed to edit message:", err);
+      }
+      return;
+    }
+
     if (!inputMessage.trim() || !activeConversationId || !user?.id || isSending) return;
 
     // Platform ban guard
@@ -917,6 +1309,39 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
 
         {/* Window Controls */}
         <div className="flex items-center gap-1">
+          {activeConversationId && (
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setIsHeaderMenuOpen(!isHeaderMenuOpen)}
+                className="w-7 h-7 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 flex items-center justify-center transition-colors cursor-pointer"
+                title="Conversation Options"
+              >
+                <MoreVertical size={14} />
+              </button>
+              {isHeaderMenuOpen && (
+                <>
+                  <div
+                    className="fixed inset-0 z-40"
+                    onClick={() => setIsHeaderMenuOpen(false)}
+                  />
+                  <div className="absolute right-0 top-8 z-50 w-44 bg-[#141524]/95 border border-white/15 rounded-2xl shadow-2xl backdrop-blur-xl p-1 animate-in fade-in zoom-in-95 duration-150">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsHeaderMenuOpen(false);
+                        setShowClearConfirm(true);
+                      }}
+                      className="w-full px-3 py-2 text-left text-xs font-medium text-rose-300 hover:bg-rose-500/15 rounded-xl flex items-center gap-2 transition-colors cursor-pointer"
+                    >
+                      <Trash2 size={13} className="text-rose-400" />
+                      <span>Clear Chat for Me</span>
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
           <button
             type="button"
             onClick={() => setIsMinimized(!isMinimized)}
@@ -1141,6 +1566,61 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
                             <RoomInviteCard invite={parsed.roomInvite} isMe={isMe} />
                           ) : parsed.type === "voice" ? (
                             <VoiceNotePlayer audioUrl={parsed.audioUrl || ""} duration={parsed.duration} isMe={isMe} />
+                          ) : parsed.type === "images" && parsed.images && parsed.images.length > 0 ? (
+                            <div className="my-0.5">
+                              <WhatsAppImageCluster
+                                images={parsed.images}
+                                conversationId={activeConversationId}
+                                caption={parsed.text}
+                                isMe={isMe}
+                                onOpenLightbox={(imgs, idx) => openClusterLightbox(imgs, idx, m.id)}
+                                onOpenReactionPicker={() => setActiveReactionPickerMsgId((prev) => (prev === m.id ? null : m.id))}
+                                onToggleReaction={(emoji) => handleToggleReaction(m.id, emoji)}
+                                timestamp={new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                                readStatusNode={
+                                  isMe && !isGroupChat ? (
+                                    <span 
+                                      className="inline-flex items-center gap-0.5 ml-0.5"
+                                      title={partnerLastReadAt && new Date(partnerLastReadAt).getTime() >= new Date(m.created_at).getTime() ? "Seen" : "Delivered"}
+                                    >
+                                      {partnerLastReadAt && new Date(partnerLastReadAt).getTime() >= new Date(m.created_at).getTime() ? (
+                                        <CheckCheck size={11} className="stroke-[2.5] text-sky-400" />
+                                      ) : (
+                                        <CheckCheck size={11} className="stroke-[1.8] text-indigo-200/70" />
+                                      )}
+                                    </span>
+                                  ) : undefined
+                                }
+                              />
+                            </div>
+                          ) : parsed.type === "gif" && parsed.gifUrl ? (
+                            <div className="relative rounded-xl overflow-hidden max-w-[240px] bg-black/40 group/gif my-1">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setActiveReactionPickerMsgId((prev) => (prev === m.id ? null : m.id));
+                                }}
+                                className="absolute top-1.5 right-1.5 z-20 p-1.5 rounded-full bg-black/60 hover:bg-black/85 text-white/80 hover:text-amber-300 border border-white/15 backdrop-blur-md transition-all active:scale-95 cursor-pointer shadow-lg flex items-center justify-center opacity-85 hover:opacity-100"
+                                title="React to GIF"
+                              >
+                                <Smile size={13} />
+                              </button>
+                              <img
+                                src={parsed.gifUrl}
+                                alt={parsed.gifTitle || "GIF"}
+                                className="w-full h-auto max-h-[180px] object-cover rounded-xl cursor-pointer hover:opacity-95 transition-opacity"
+                                onClick={() => {
+                                  setLightboxImages([{ url: parsed.gifUrl!, title: parsed.gifTitle || "GIF" }]);
+                                  setLightboxIndex(0);
+                                  setLightboxMessageId(m.id);
+                                  setIsLightboxOpen(true);
+                                }}
+                              />
+                              <div className="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded-md bg-black/70 backdrop-blur-md text-[9px] font-black text-white/90 border border-white/10 pointer-events-none tracking-wider">
+                                GIF
+                              </div>
+                            </div>
                           ) : (
                             <div className="flex flex-wrap items-end justify-between gap-x-2 gap-y-0.5">
                               <p className="whitespace-pre-wrap select-text break-words min-w-0 text-[13px] leading-relaxed">
@@ -1158,6 +1638,35 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
                                     minute: "2-digit",
                                   })}
                                 </span>
+
+                                {/* 5-Minute Message Edit Action Button */}
+                                {isMe && parsed.type === "text" && (Date.now() - new Date(m.created_at).getTime() <= 5 * 60 * 1000) && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setEditingMessage({ id: m.id, text: parsed.text || "", createdAt: m.created_at });
+                                      setInputMessage(parsed.text || "");
+                                    }}
+                                    className="p-0.5 hover:text-white text-indigo-200/80 transition-colors cursor-pointer"
+                                    title="Edit message (within 5 min)"
+                                  >
+                                    <Edit3 size={10} />
+                                  </button>
+                                )}
+
+                                {/* Smile React Button */}
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setActiveReactionPickerMsgId((prev) => (prev === m.id ? null : m.id));
+                                  }}
+                                  className="p-0.5 hover:text-amber-300 opacity-60 hover:opacity-100 transition-opacity cursor-pointer"
+                                  title="Add reaction"
+                                >
+                                  <Smile size={10} />
+                                </button>
 
                                 {/* Sent / Seen ticks for 1-on-1 chats */}
                                 {isMe && !isGroupChat && (
@@ -1233,6 +1742,19 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
                             onToggleReaction={(emoji) => handleToggleReaction(m.id, emoji)}
                             isMe={isMe}
                           />
+
+                          {/* Floating Quick Reaction Picker */}
+                          {activeReactionPickerMsgId === m.id && (
+                            <div className={`relative mt-1 z-30 ${isMe ? "self-end" : "self-start"}`}>
+                              <QuickReactionPicker
+                                onSelect={(emoji) => {
+                                  handleToggleReaction(m.id, emoji);
+                                }}
+                                onClose={() => setActiveReactionPickerMsgId(null)}
+                                isMe={isMe}
+                              />
+                            </div>
+                          )}
                         </div>
                       </div>
                     </Fragment>
@@ -1392,57 +1914,212 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
                   </div>
                 </div>
               ) : (
-                /* Enhanced Sleek Message Input Form */
-                <form
-                  onSubmit={handleSendMessage}
-                  className="p-3 border-t border-white/[0.08] bg-[#0E0F17]/95 backdrop-blur-xl shrink-0"
-                >
-                  <div className="flex items-center gap-2 bg-[#141522] border border-white/10 hover:border-white/15 focus-within:border-indigo-500/60 focus-within:ring-2 focus-within:ring-indigo-500/20 rounded-2xl p-1.5 transition-all shadow-inner">
-                    {/* Quick Room Invite Button if in a Junction Room */}
-                    {currentJunction && (
+                <div className="border-t border-white/[0.08] bg-[#0E0F17]/95 backdrop-blur-xl shrink-0 flex flex-col">
+                  {/* Editing Message Banner */}
+                  {editingMessage && (
+                    <div className="px-3.5 py-1.5 bg-indigo-950/70 border-b border-indigo-500/25 text-xs flex items-center justify-between text-indigo-300 animate-in fade-in">
+                      <span className="flex items-center gap-1.5 truncate">
+                        <Edit3 size={12} className="text-indigo-400 shrink-0" />
+                        <span>Editing message (allowed within 5 min)</span>
+                      </span>
                       <button
                         type="button"
-                        onClick={handleSendRoomInvite}
-                        disabled={isSending}
-                        title={`Invite ${activePartnerName} to ${currentJunction.name}`}
-                        className="w-8 h-8 rounded-xl flex items-center justify-center text-indigo-400 hover:text-white bg-indigo-500/10 hover:bg-indigo-600 active:scale-90 transition-all cursor-pointer shrink-0"
+                        onClick={() => {
+                          setEditingMessage(null);
+                          setInputMessage("");
+                        }}
+                        className="text-slate-400 hover:text-white p-0.5 cursor-pointer"
+                        title="Cancel edit"
                       >
-                        <Radio size={14} />
+                        <X size={13} />
                       </button>
-                    )}
+                    </div>
+                  )}
 
-                    <input
-                      ref={inputRef}
-                      type="text"
-                      value={inputMessage}
-                      onChange={(e) => setInputMessage(e.target.value)}
-                      placeholder={`Message ${activePartnerName}...`}
-                      maxLength={500}
-                      className="flex-1 bg-transparent px-2 py-1.5 text-xs sm:text-sm text-white placeholder-slate-500 focus:outline-none min-w-0 font-normal"
-                    />
+                  {/* Staged Encrypted Photos Thumbnail Preview Strip */}
+                  {stagedImages.length > 0 && (
+                    <div className="p-2.5 bg-black/60 border-b border-white/10 flex items-center gap-2 overflow-x-auto animate-in fade-in">
+                      <div className="flex items-center gap-2">
+                        {stagedImages.map((staged, idx) => (
+                          <div key={staged.id} className="relative w-12 h-12 rounded-xl overflow-hidden border border-white/20 shrink-0 group">
+                            <img src={staged.previewUrl} alt={`Photo ${idx + 1}`} className="w-full h-full object-cover" />
+                            <button
+                              type="button"
+                              onClick={() => setStagedImages((prev) => prev.filter((s) => s.id !== staged.id))}
+                              className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-black/80 hover:bg-rose-600 text-white flex items-center justify-center transition-colors cursor-pointer"
+                              title="Remove photo"
+                            >
+                              <X size={9} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                      <span className="text-[10px] text-indigo-300 font-semibold shrink-0">
+                        {stagedImages.length} photo{stagedImages.length > 1 ? "s" : ""} staged
+                      </span>
+                    </div>
+                  )}
 
-                    <button
-                      type="submit"
-                      disabled={!inputMessage.trim() || isSending}
-                      className={`w-8 h-8 rounded-xl flex items-center justify-center transition-all shrink-0 ${
-                        inputMessage.trim() && !isSending
-                          ? "bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white shadow-md shadow-indigo-600/30 scale-100 hover:scale-105 active:scale-95 cursor-pointer"
-                          : "bg-white/5 text-slate-600 cursor-not-allowed"
-                      }`}
-                      aria-label="Send message"
-                    >
-                      {isSending ? (
-                        <Loader2 size={13} className="animate-spin text-indigo-400" />
-                      ) : (
-                        <Send size={13} className={inputMessage.trim() ? "translate-x-0.5" : ""} />
+                  {/* Hidden File Input for Image Attachments */}
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={handleSelectPhotos}
+                    className="hidden"
+                  />
+
+                  {/* Enhanced Sleek Message Input Form */}
+                  <form
+                    onSubmit={handleSendMessage}
+                    className="p-2.5 sm:p-3"
+                  >
+                    <div className="flex items-center gap-1.5 sm:gap-2 bg-[#141522] border border-white/10 hover:border-white/15 focus-within:border-indigo-500/60 focus-within:ring-2 focus-within:ring-indigo-500/20 rounded-2xl p-1.5 transition-all shadow-inner">
+                      {/* Attach Photo Button */}
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={isSending || isEncryptingImages}
+                        className="p-1.5 rounded-xl text-slate-400 hover:text-white hover:bg-white/10 active:scale-95 transition-all cursor-pointer shrink-0"
+                        title="Attach photos (WhatsApp-style E2EE)"
+                        aria-label="Attach photos"
+                      >
+                        <ImageIcon size={16} />
+                      </button>
+
+                      {/* GIF Button */}
+                      <button
+                        type="button"
+                        onClick={() => setIsGifPickerOpen(true)}
+                        disabled={isSending || isEncryptingImages}
+                        className="px-1.5 py-0.5 rounded-md border border-white/20 hover:border-white/40 text-slate-300 hover:text-white text-[10px] font-black tracking-wider active:scale-95 transition-all cursor-pointer shrink-0"
+                        title="Choose animated GIF"
+                        aria-label="Choose GIF"
+                      >
+                        GIF
+                      </button>
+
+                      {/* Quick Room Invite Button if in a Junction Room */}
+                      {currentJunction && (
+                        <button
+                          type="button"
+                          onClick={handleSendRoomInvite}
+                          disabled={isSending || isEncryptingImages}
+                          title={`Invite ${activePartnerName} to ${currentJunction.name}`}
+                          className="w-7 h-7 rounded-xl flex items-center justify-center text-indigo-400 hover:text-white bg-indigo-500/10 hover:bg-indigo-600 active:scale-90 transition-all cursor-pointer shrink-0"
+                        >
+                          <Radio size={13} />
+                        </button>
                       )}
-                    </button>
-                  </div>
-                </form>
+
+                      <input
+                        ref={inputRef}
+                        type="text"
+                        value={inputMessage}
+                        onChange={(e) => setInputMessage(e.target.value)}
+                        placeholder={
+                          editingMessage
+                            ? "Edit message..."
+                            : stagedImages.length > 0
+                            ? "Add a caption..."
+                            : `Message ${activePartnerName}...`
+                        }
+                        maxLength={500}
+                        className="flex-1 bg-transparent px-2 py-1.5 text-xs sm:text-sm text-white placeholder-slate-500 focus:outline-none min-w-0 font-normal"
+                      />
+
+                      <button
+                        type="submit"
+                        disabled={
+                          (!inputMessage.trim() && stagedImages.length === 0 && !editingMessage) ||
+                          isSending ||
+                          isEncryptingImages
+                        }
+                        className={`min-w-[32px] h-8 px-2.5 rounded-xl flex items-center justify-center gap-1 transition-all shrink-0 ${
+                          (inputMessage.trim() || stagedImages.length > 0 || editingMessage) &&
+                          !isSending &&
+                          !isEncryptingImages
+                            ? "bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white shadow-md shadow-indigo-600/30 scale-100 hover:scale-105 active:scale-95 cursor-pointer text-xs font-semibold"
+                            : "bg-white/5 text-slate-600 cursor-not-allowed text-xs font-semibold"
+                        }`}
+                        aria-label={editingMessage ? "Save Edit" : stagedImages.length > 0 ? "Send Photos" : "Send message"}
+                      >
+                        {isSending || isEncryptingImages ? (
+                          <Loader2 size={13} className="animate-spin text-indigo-400" />
+                        ) : stagedImages.length > 0 ? (
+                          <span>Send ({stagedImages.length})</span>
+                        ) : editingMessage ? (
+                          <span>Save</span>
+                        ) : (
+                          <Send size={13} className={inputMessage.trim() ? "translate-x-0.5" : ""} />
+                        )}
+                      </button>
+                    </div>
+                  </form>
+                </div>
               )}
             </div>
           )}
         </>
+      )}
+
+      {/* Clear Chat Confirmation Modal */}
+      {showClearConfirm && (
+        <div className="fixed inset-0 z-[160] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in">
+          <div className="w-full max-w-xs bg-[#12131F] border border-white/15 rounded-2xl p-4 shadow-2xl text-center flex flex-col items-center">
+            <div className="w-10 h-10 rounded-full bg-rose-500/10 border border-rose-500/20 text-rose-400 flex items-center justify-center mb-2.5">
+              <Trash2 size={18} />
+            </div>
+            <h4 className="text-sm font-bold text-white mb-1">Clear chat for you?</h4>
+            <p className="text-xs text-slate-400 leading-relaxed mb-4">
+              This will clear the conversation messages from your view only. Other participants will not be affected.
+            </p>
+            <div className="flex items-center gap-2 w-full">
+              <button
+                type="button"
+                onClick={() => setShowClearConfirm(false)}
+                className="flex-1 py-1.5 rounded-xl bg-white/10 hover:bg-white/15 text-slate-300 text-xs font-semibold transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleClearChatForMe}
+                className="flex-1 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition-colors shadow-md cursor-pointer"
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* GIF Picker Modal */}
+      <GifPicker
+        isOpen={isGifPickerOpen}
+        onClose={() => setIsGifPickerOpen(false)}
+        onSelectGif={handleSendGif}
+      />
+
+      {/* Fullscreen Media Lightbox for InRoomMessenger */}
+      {isLightboxOpen && (
+        <MediaLightbox
+          images={lightboxImages}
+          initialIndex={lightboxIndex}
+          onClose={() => {
+            setIsLightboxOpen(false);
+            setLightboxImages([]);
+            setLightboxMessageId(null);
+          }}
+          onToggleReaction={lightboxMessageId ? (emoji) => handleToggleReaction(lightboxMessageId, emoji) : undefined}
+          reactions={
+            lightboxMessageId
+              ? parseMessageContent(messages.find((m) => m.id === lightboxMessageId)?.content || "").reactions
+              : undefined
+          }
+          currentUserId={user?.id}
+        />
       )}
     </div>
   );

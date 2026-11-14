@@ -8,7 +8,10 @@ import {
   MessageSquare, 
   Maximize2, 
   Minimize2, 
-  Loader2
+  Loader2,
+  Smile,
+  Check,
+  CheckCheck
 } from "lucide-react";
 import { useUser } from "@/hooks/useUser";
 import { supabase } from "@/lib/supabase";
@@ -21,9 +24,13 @@ import {
   getProfileDisplayName, 
   formatChatDateDivider,
   getSenderColor,
+  toggleReactionInContent,
 } from "@/lib/chat-utils";
 import { VoiceNotePlayer } from "@/components/chat/VoiceNotePlayer";
 import { RoomInviteCard } from "@/components/chat/RoomInviteCard";
+import { WhatsAppImageCluster } from "@/components/chat/WhatsAppImageCluster";
+import { MediaLightbox, LightboxMediaItem } from "@/components/chat/MediaLightbox";
+import { QuickReactionPicker, ReactionBadges } from "@/components/chat/MessageReactions";
 
 interface IncomingNotification {
   id: string;
@@ -35,7 +42,7 @@ interface IncomingNotification {
   senderDisplayName: string;
   senderAvatar: string;
   previewText: string;
-  type: "text" | "voice" | "room_invite" | "gif";
+  type: "text" | "voice" | "room_invite" | "gif" | "images";
   createdAt: string;
 }
 
@@ -81,10 +88,12 @@ export function GlobalMessageBubbleOverlay() {
   const router = useRouter();
   const pathname = usePathname();
 
-  // State: "hidden" | "bubble" | "drawer"
-  const [viewState, setViewState] = useState<"hidden" | "bubble" | "drawer">("hidden");
-  const [currentNotification, setCurrentNotification] = useState<IncomingNotification | null>(null);
-  const [showPreviewSnippet, setShowPreviewSnippet] = useState(false);
+  // Active Chat Head Notifications list - A separate bubble for each user/conversation!
+  const [notifications, setNotifications] = useState<IncomingNotification[]>([]);
+  // Preview speech snippet pill active map: conversationId -> boolean
+  const [activeSnippets, setActiveSnippets] = useState<Record<string, boolean>>({});
+  // Currently open Quick Reply Drawer conversationId, or null if all bubbles are minimized
+  const [activeDrawerId, setActiveDrawerId] = useState<string | null>(null);
 
   // Quick Reply Drawer State
   const [drawerMessages, setDrawerMessages] = useState<QuickChatMessage[]>([]);
@@ -93,10 +102,36 @@ export function GlobalMessageBubbleOverlay() {
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const snippetTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Lightbox & Reaction states for rich media previews in drawer
+  const [lightboxImages, setLightboxImages] = useState<LightboxMediaItem[]>([]);
+  const [lightboxIndex, setLightboxIndex] = useState(0);
+  const [isLightboxOpen, setIsLightboxOpen] = useState(false);
+  const [lightboxMessageId, setLightboxMessageId] = useState<string | null>(null);
+  const [activeReactionPickerMsgId, setActiveReactionPickerMsgId] = useState<string | null>(null);
+
+  // Cleared chats map to ensure cleared messages don't reappear in popup drawer
+  const [clearedChatsMap, setClearedChatsMap] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (!user?.id) return;
+    const storageKey = `yapclub_cleared_chats_${user.id}`;
+    let localMap: Record<string, string> = {};
+    if (typeof window !== "undefined") {
+      try {
+        const stored = localStorage.getItem(storageKey);
+        if (stored) localMap = JSON.parse(stored);
+      } catch {}
+    }
+    setClearedChatsMap(localMap);
+
+    const remoteMap = (user as any)?.social_links?.cleared_chats_map || {};
+    const merged = { ...remoteMap, ...localMap };
+    setClearedChatsMap(merged);
+  }, [user?.id, (user as any)?.social_links?.cleared_chats_map]);
 
   // Helper to get formatted message preview
-  const getMessagePreview = (content: string): { preview: string; type: "text" | "voice" | "room_invite" | "gif" } => {
+  const getMessagePreview = (content: string): { preview: string; type: "text" | "voice" | "room_invite" | "gif" | "images" } => {
     const parsed = parseMessageContent(content);
     if (parsed.type === "voice") {
       return { preview: "🎵 Voice Note", type: "voice" };
@@ -104,10 +139,55 @@ export function GlobalMessageBubbleOverlay() {
     if (parsed.type === "gif") {
       return { preview: "🖼️ GIF", type: "gif" };
     }
+    if (parsed.type === "images" && parsed.images && parsed.images.length > 0) {
+      const count = parsed.images.length;
+      const caption = parsed.text ? `: ${parsed.text}` : "";
+      return { preview: `📷 Photo${count > 1 ? `s (${count})` : ""}${caption}`, type: "images" };
+    }
     if (parsed.type === "room_invite") {
       return { preview: `🎙️ Room Invite: ${parsed.roomInvite?.junctionName || "Hangout"}`, type: "room_invite" };
     }
     return { preview: parsed.text || "New message", type: "text" };
+  };
+
+  // Toggle reaction in drawer message
+  const handleToggleReaction = async (messageId: string, emoji: string) => {
+    if (!user?.id) return;
+    const targetMsg = drawerMessages.find((m) => m.id === messageId);
+    if (!targetMsg) return;
+
+    const dName = getProfileDisplayName(user, user.username || "You");
+    const { newContent } = toggleReactionInContent(targetMsg.content, {
+      emoji,
+      userId: user.id,
+      username: user.username,
+      displayName: dName,
+    });
+
+    setDrawerMessages((prev) =>
+      prev.map((m) => (m.id === messageId ? { ...m, content: newContent } : m))
+    );
+    setActiveReactionPickerMsgId(null);
+
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      await fetch("/api/messages/reactions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+        },
+        body: JSON.stringify({
+          messageId,
+          emoji,
+          userId: user.id,
+          username: user.username,
+          displayName: dName,
+        }),
+      });
+    } catch (e) {
+      console.error("Failed to toggle reaction in popup drawer:", e);
+    }
   };
 
   // Broadcast real-time read receipt to conversation presence channel
@@ -130,7 +210,8 @@ export function GlobalMessageBubbleOverlay() {
   // Automatically dismiss or suppress floating popups when user is in /messages
   useEffect(() => {
     if (pathname?.startsWith("/messages")) {
-      setViewState("hidden");
+      setNotifications([]);
+      setActiveDrawerId(null);
       if (typeof window !== "undefined") {
         sessionStorage.removeItem("yapclub_active_conversation");
       }
@@ -139,14 +220,15 @@ export function GlobalMessageBubbleOverlay() {
 
   // Handle marking conversation as read when drawer is open
   useEffect(() => {
-    if (viewState !== "drawer" || !currentNotification?.conversationId || !user?.id) {
-      if (typeof window !== "undefined" && viewState !== "drawer") {
+    if (!activeDrawerId || !user?.id) {
+      if (typeof window !== "undefined" && !activeDrawerId) {
         sessionStorage.removeItem("yapclub_active_conversation");
       }
       return;
     }
 
-    const convId = currentNotification.conversationId;
+    const convId = activeDrawerId;
+    const currentNotif = notifications.find((n) => n.conversationId === convId);
     const nowIso = new Date().toISOString();
 
     // 1. Mark as active in sessionStorage so useUnreadMessages doesn't count incoming messages as unread
@@ -154,18 +236,18 @@ export function GlobalMessageBubbleOverlay() {
       sessionStorage.setItem("yapclub_active_conversation", convId);
     }
 
-    // 2. Clear unread count via hook (updates local state, profile, and conversation_members table)
-    markAsRead(convId, currentNotification.createdAt || nowIso);
+    // 2. Clear unread count via hook
+    markAsRead(convId, currentNotif?.createdAt || nowIso);
 
     // 3. Broadcast real-time seen receipt
-    broadcastSeenReceipt(convId, currentNotification.createdAt || nowIso);
+    broadcastSeenReceipt(convId, currentNotif?.createdAt || nowIso);
 
     return () => {
       if (typeof window !== "undefined") {
         sessionStorage.removeItem("yapclub_active_conversation");
       }
     };
-  }, [viewState, currentNotification?.conversationId, user?.id, markAsRead, broadcastSeenReceipt, currentNotification?.createdAt]);
+  }, [activeDrawerId, user?.id, markAsRead, broadcastSeenReceipt, notifications]);
 
   // Listen to new incoming messages sitewide
   useEffect(() => {
@@ -196,17 +278,15 @@ export function GlobalMessageBubbleOverlay() {
             ? sessionStorage.getItem("yapclub_active_conversation")
             : null;
 
-          if (activeConv === newMsg.conversation_id) {
+          if (activeConv === newMsg.conversation_id && activeDrawerId === newMsg.conversation_id) {
             markAsRead(newMsg.conversation_id, newMsg.created_at);
             broadcastSeenReceipt(newMsg.conversation_id, newMsg.created_at);
 
             // If drawer is currently open for this conversation, append to list
-            if (viewState === "drawer" && currentNotification?.conversationId === newMsg.conversation_id) {
-              setDrawerMessages((prev) => {
-                if (prev.some((m) => m.id === newMsg.id)) return prev;
-                return [...prev, newMsg];
-              });
-            }
+            setDrawerMessages((prev) => {
+              if (prev.some((m) => m.id === newMsg.id)) return prev;
+              return [...prev, newMsg];
+            });
             return;
           }
 
@@ -241,31 +321,33 @@ export function GlobalMessageBubbleOverlay() {
             createdAt: newMsg.created_at,
           };
 
-          setCurrentNotification(notif);
+          // For every user message there should be new bubble pop up!
+          // Add or bump to top of bubble stack (support multiple simultaneous user bubbles)
+          setNotifications((prev) => {
+            const filtered = prev.filter((n) => n.conversationId !== notif.conversationId);
+            return [notif, ...filtered].slice(0, 5);
+          });
+
+          // Show preview speech snippet bubble pill for this specific message
+          setActiveSnippets((prev) => ({ ...prev, [notif.conversationId]: true }));
           playNotificationChime();
 
-          // User requested: Directly show as a bubble first on upper/middle right side
-          setViewState("bubble");
-          setShowPreviewSnippet(true);
-
-          // Hide preview speech snippet after 6 seconds, keeping the compact circular bubble
-          if (snippetTimeoutRef.current) clearTimeout(snippetTimeoutRef.current);
-          snippetTimeoutRef.current = setTimeout(() => {
-            setShowPreviewSnippet(false);
+          // Auto-hide preview snippet after 6 seconds, keeping the compact circular bubble
+          setTimeout(() => {
+            setActiveSnippets((prev) => ({ ...prev, [notif.conversationId]: false }));
           }, 6000);
         }
       )
       .subscribe();
 
     return () => {
-      if (snippetTimeoutRef.current) clearTimeout(snippetTimeoutRef.current);
       supabase.removeChannel(channel);
     };
-  }, [user?.id, isRegistered, pathname, viewState, currentNotification?.conversationId, markAsRead, broadcastSeenReceipt]);
+  }, [user?.id, isRegistered, pathname, activeDrawerId, markAsRead, broadcastSeenReceipt]);
 
   // Load message history when Quick Reply Drawer opens
   useEffect(() => {
-    if (viewState !== "drawer" || !currentNotification?.conversationId) return;
+    if (!activeDrawerId) return;
 
     let isMounted = true;
     setIsLoadingMessages(true);
@@ -286,12 +368,18 @@ export function GlobalMessageBubbleOverlay() {
               social_links
             )
           `)
-          .eq("conversation_id", currentNotification.conversationId)
+          .eq("conversation_id", activeDrawerId)
           .order("created_at", { ascending: true })
           .limit(30);
 
         if (!error && data && isMounted) {
-          const formatted = data.map((m: any) => ({
+          const clearedIso = clearedChatsMap[activeDrawerId];
+          const clearedMs = clearedIso ? new Date(clearedIso).getTime() : 0;
+          const visibleRows = clearedMs
+            ? data.filter((m: any) => new Date(m.created_at).getTime() > clearedMs)
+            : data;
+
+          const formatted = visibleRows.map((m: any) => ({
             ...m,
             profiles: Array.isArray(m.profiles) ? m.profiles[0] : m.profiles,
           }));
@@ -300,8 +388,8 @@ export function GlobalMessageBubbleOverlay() {
           // Mark latest message as read in hook & database
           if (formatted.length > 0) {
             const latest = formatted[formatted.length - 1];
-            markAsRead(currentNotification.conversationId, latest.created_at);
-            broadcastSeenReceipt(currentNotification.conversationId, latest.created_at);
+            markAsRead(activeDrawerId, latest.created_at);
+            broadcastSeenReceipt(activeDrawerId, latest.created_at);
           }
         }
       } catch (e) {
@@ -321,20 +409,21 @@ export function GlobalMessageBubbleOverlay() {
     return () => {
       isMounted = false;
     };
-  }, [viewState, currentNotification?.conversationId, markAsRead, broadcastSeenReceipt]);
+  }, [activeDrawerId, markAsRead, broadcastSeenReceipt, clearedChatsMap]);
 
   // Scroll to bottom when messages change in drawer
   useEffect(() => {
-    if (viewState === "drawer") {
+    if (activeDrawerId) {
       messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }
-  }, [drawerMessages, viewState]);
+  }, [drawerMessages, activeDrawerId]);
 
   // Handle Quick Reply Send
   const handleQuickSend = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!drawerInput.trim() || !user?.id || !currentNotification?.conversationId || isSending) return;
+    if (!drawerInput.trim() || !user?.id || !activeDrawerId || isSending) return;
 
+    const convId = activeDrawerId;
     const textToSend = drawerInput.trim();
     setDrawerInput("");
     setIsSending(true);
@@ -346,7 +435,7 @@ export function GlobalMessageBubbleOverlay() {
     // Optimistic local update
     const optimisticMsg: QuickChatMessage = {
       id: tempId,
-      conversation_id: currentNotification.conversationId,
+      conversation_id: convId,
       sender_id: user.id,
       content: serialized,
       created_at: nowIso,
@@ -359,13 +448,13 @@ export function GlobalMessageBubbleOverlay() {
     setDrawerMessages((prev) => [...prev, optimisticMsg]);
 
     // Mark as read immediately
-    markAsRead(currentNotification.conversationId, nowIso);
+    markAsRead(convId, nowIso);
 
     try {
       const { data, error } = await supabase
         .from("messages")
         .insert({
-          conversation_id: currentNotification.conversationId,
+          conversation_id: convId,
           sender_id: user.id,
           content: serialized,
         })
@@ -395,7 +484,7 @@ export function GlobalMessageBubbleOverlay() {
       await supabase
         .from("conversations")
         .update({ last_message_at: nowIso })
-        .eq("id", currentNotification.conversationId);
+        .eq("id", convId);
 
     } catch (err) {
       console.error("Quick send exception:", err);
@@ -406,136 +495,168 @@ export function GlobalMessageBubbleOverlay() {
 
   // Open Full Page Chat
   const handleOpenFullChat = () => {
-    if (!currentNotification?.conversationId) return;
+    if (!activeDrawerId) return;
+    const convId = activeDrawerId;
     if (typeof window !== "undefined") {
       sessionStorage.removeItem("yapclub_active_conversation");
     }
-    setViewState("hidden");
-    router.push(`/messages?conversation=${currentNotification.conversationId}`);
+    setActiveDrawerId(null);
+    setNotifications((prev) => prev.filter((n) => n.conversationId !== convId));
+    router.push(`/messages?conversation=${convId}`);
   };
 
   // If user is currently on /messages page, do not render overlay at all
-  if (pathname?.startsWith("/messages") || viewState === "hidden" || !currentNotification) {
+  if (pathname?.startsWith("/messages") || notifications.length === 0) {
     return null;
   }
 
-  const isSenderOnline = onlineUserIds.has(currentNotification.senderId);
-  const bubbleUnreadCount = unreadByConversation[currentNotification.conversationId] || 0;
+  const currentNotification = notifications.find((n) => n.conversationId === activeDrawerId) || null;
+  const isSenderOnline = currentNotification ? onlineUserIds.has(currentNotification.senderId) : false;
 
   return (
     <div className="fixed z-[110] pointer-events-auto select-none">
       {/* ========================================================
-          1. FLOATING CHAT HEAD BUBBLE (Upper / Middle Right Side)
+          1. FLOATING CHAT HEAD BUBBLE STACK (Upper / Middle Right Side)
+             - For every user message there is a new bubble pop up!
           ======================================================== */}
-      {viewState === "bubble" && (
-        <div className="fixed top-24 right-4 sm:top-28 sm:right-6 z-[110] flex items-center gap-2.5 animate-in slide-in-from-right-4 fade-in duration-200">
-          {/* Animated Message Sneak-Peek Snippet Pill (Left of Avatar) */}
-          {showPreviewSnippet && (
+      <div className="fixed top-24 right-4 sm:top-28 sm:right-6 z-[110] flex flex-col items-end gap-3 pointer-events-auto">
+        {notifications.map((notif) => {
+          const isSenderOnline = onlineUserIds.has(notif.senderId);
+          const bubbleUnreadCount = unreadByConversation[notif.conversationId] || 0;
+          const isSnippetVisible = activeSnippets[notif.conversationId];
+          const isThisDrawerOpen = activeDrawerId === notif.conversationId;
+
+          return (
             <div
-              onClick={() => setViewState("drawer")}
-              className="max-w-[210px] sm:max-w-[260px] p-2.5 px-3 bg-[#11121C]/95 hover:bg-[#151724] border border-white/15 hover:border-indigo-500/40 rounded-2xl shadow-2xl backdrop-blur-2xl flex flex-col cursor-pointer transition-all hover:scale-105 active:scale-95 group text-left"
+              key={notif.conversationId}
+              className="flex items-center gap-2.5 animate-in slide-in-from-right-4 fade-in duration-200"
             >
-              <div className="flex items-center justify-between gap-1 mb-0.5">
-                <span className="text-[11px] font-bold text-white truncate group-hover:text-indigo-300 transition-colors">
-                  {currentNotification.senderDisplayName}
-                </span>
-                <span className="text-[9px] text-slate-400 font-mono shrink-0">Just now</span>
-              </div>
-              {currentNotification.conversationType === "group" && (
-                <span className="text-[9px] text-indigo-400 font-semibold truncate mb-0.5">
-                  in {currentNotification.conversationName || "Group"}
-                </span>
+              {/* Animated Message Sneak-Peek Snippet Pill (Left of Avatar) */}
+              {isSnippetVisible && (
+                <div
+                  onClick={() => {
+                    setActiveDrawerId(notif.conversationId);
+                    setActiveSnippets((prev) => ({ ...prev, [notif.conversationId]: false }));
+                  }}
+                  className="max-w-[210px] sm:max-w-[260px] p-2.5 px-3 bg-[#11121C]/95 hover:bg-[#151724] border border-white/15 hover:border-indigo-500/40 rounded-2xl shadow-2xl backdrop-blur-2xl flex flex-col cursor-pointer transition-all hover:scale-105 active:scale-95 group text-left"
+                >
+                  <div className="flex items-center justify-between gap-1 mb-0.5">
+                    <span className="text-[11px] font-bold text-white truncate group-hover:text-indigo-300 transition-colors">
+                      {notif.senderDisplayName}
+                    </span>
+                    <span className="text-[9px] text-slate-400 font-mono shrink-0">Just now</span>
+                  </div>
+                  {notif.conversationType === "group" && (
+                    <span className="text-[9px] text-indigo-400 font-semibold truncate mb-0.5">
+                      in {notif.conversationName || "Group"}
+                    </span>
+                  )}
+                  <span className="text-[11px] text-slate-300 truncate line-clamp-1">
+                    {notif.previewText}
+                  </span>
+                </div>
               )}
-              <span className="text-[11px] text-slate-300 truncate line-clamp-1">
-                {currentNotification.previewText}
-              </span>
-            </div>
-          )}
 
-          {/* Circular Chat Head Avatar (Guaranteed Fixed Dimensions 56x56px) */}
-          <div className="relative group/bubble shrink-0">
-            <button
-              type="button"
-              onClick={() => setViewState("drawer")}
-              style={{
-                width: "56px",
-                height: "56px",
-                minWidth: "56px",
-                minHeight: "56px",
-                maxWidth: "56px",
-                maxHeight: "56px",
-              }}
-              className="group relative w-14 h-14 min-w-[56px] min-h-[56px] max-w-[56px] max-h-[56px] rounded-full bg-[#12131D] border-2 border-indigo-500 shadow-2xl hover:scale-105 active:scale-95 transition-all flex items-center justify-center cursor-pointer p-0.5 shrink-0 overflow-visible"
-              title={`${currentNotification.senderDisplayName}: ${currentNotification.previewText}`}
-            >
-              {/* Glowing Ping Ring */}
-              <span className="absolute inset-0 rounded-full bg-indigo-500/30 animate-ping pointer-events-none" />
+              {/* Circular Chat Head Avatar (Guaranteed Fixed Dimensions 56x56px) */}
+              <div className="relative group/bubble shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (activeDrawerId === notif.conversationId) {
+                      setActiveDrawerId(null);
+                    } else {
+                      setActiveDrawerId(notif.conversationId);
+                      setActiveSnippets((prev) => ({ ...prev, [notif.conversationId]: false }));
+                    }
+                  }}
+                  style={{
+                    width: "56px",
+                    height: "56px",
+                    minWidth: "56px",
+                    minHeight: "56px",
+                    maxWidth: "56px",
+                    maxHeight: "56px",
+                  }}
+                  className={`group relative w-14 h-14 min-w-[56px] min-h-[56px] max-w-[56px] max-h-[56px] rounded-full bg-[#12131D] border-2 shadow-2xl hover:scale-105 active:scale-95 transition-all flex items-center justify-center cursor-pointer p-0.5 shrink-0 overflow-visible ${
+                    isThisDrawerOpen ? "border-indigo-400 ring-2 ring-indigo-500/40 shadow-indigo-500/20" : "border-indigo-500"
+                  }`}
+                  title={`${notif.senderDisplayName}: ${notif.previewText}`}
+                >
+                  {/* Glowing Ping Ring when snippet is active */}
+                  {isSnippetVisible && (
+                    <span className="absolute inset-0 rounded-full bg-indigo-500/30 animate-ping pointer-events-none" />
+                  )}
 
-              <div
-                style={{
-                  width: "48px",
-                  height: "48px",
-                  minWidth: "48px",
-                  minHeight: "48px",
-                  maxWidth: "48px",
-                  maxHeight: "48px",
-                }}
-                className="w-12 h-12 rounded-full overflow-hidden bg-slate-800 shrink-0 aspect-square flex items-center justify-center pointer-events-none"
-              >
-                {currentNotification.senderAvatar.startsWith("http") ? (
-                  <img
-                    src={currentNotification.senderAvatar}
-                    alt={currentNotification.senderDisplayName}
+                  <div
                     style={{
-                      width: "100%",
-                      height: "100%",
-                      objectFit: "cover",
+                      width: "48px",
+                      height: "48px",
+                      minWidth: "48px",
+                      minHeight: "48px",
+                      maxWidth: "48px",
+                      maxHeight: "48px",
                     }}
-                    className="w-full h-full object-cover block"
-                  />
-                ) : (
-                  <UserAvatar avatar={currentNotification.senderAvatar} size="md" className="!w-full !h-full" />
-                )}
+                    className="w-12 h-12 rounded-full overflow-hidden bg-slate-800 shrink-0 aspect-square flex items-center justify-center pointer-events-none"
+                  >
+                    {notif.senderAvatar.startsWith("http") ? (
+                      <img
+                        src={notif.senderAvatar}
+                        alt={notif.senderDisplayName}
+                        style={{
+                          width: "100%",
+                          height: "100%",
+                          objectFit: "cover",
+                        }}
+                        className="w-full h-full object-cover block"
+                      />
+                    ) : (
+                      <UserAvatar avatar={notif.senderAvatar} size="md" className="!w-full !h-full" />
+                    )}
+                  </div>
+
+                  {/* Online Green Presence Dot */}
+                  {isSenderOnline && (
+                    <span className="absolute bottom-0 right-0 w-3 h-3 rounded-full bg-emerald-500 border-2 border-[#12131D]" />
+                  )}
+
+                  {/* Live Synchronized Unread Counter Badge */}
+                  {bubbleUnreadCount > 0 && (
+                    <span className="absolute -top-1 -right-1 px-1.5 py-0.5 rounded-full bg-indigo-600 text-[10px] font-black text-white border-2 border-[#12131D] shadow-md animate-bounce pointer-events-none">
+                      {bubbleUnreadCount > 9 ? "9+" : bubbleUnreadCount}
+                    </span>
+                  )}
+                </button>
+
+                {/* Close 'X' pill above bubble */}
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setNotifications((prev) => prev.filter((n) => n.conversationId !== notif.conversationId));
+                    if (activeDrawerId === notif.conversationId) {
+                      setActiveDrawerId(null);
+                    }
+                  }}
+                  className="absolute -top-1 -left-1 w-5 h-5 rounded-full bg-black/90 text-slate-400 hover:text-white hover:bg-rose-600 flex items-center justify-center opacity-90 sm:opacity-0 sm:group-hover/bubble:opacity-100 transition-opacity border border-white/20 cursor-pointer shadow-md z-20"
+                  title="Dismiss bubble"
+                >
+                  <X size={11} />
+                </button>
               </div>
-
-              {/* Online Green Presence Dot */}
-              {isSenderOnline && (
-                <span className="absolute bottom-0 right-0 w-3 h-3 rounded-full bg-emerald-500 border-2 border-[#12131D]" />
-              )}
-
-              {/* Live Synchronized Unread Counter Badge */}
-              {bubbleUnreadCount > 0 && (
-                <span className="absolute -top-1 -right-1 px-1.5 py-0.5 rounded-full bg-indigo-600 text-[10px] font-black text-white border-2 border-[#12131D] shadow-md animate-bounce pointer-events-none">
-                  {bubbleUnreadCount > 9 ? "9+" : bubbleUnreadCount}
-                </span>
-              )}
-            </button>
-
-            {/* Close 'X' pill above bubble */}
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                setViewState("hidden");
-              }}
-              className="absolute -top-1 -left-1 w-5 h-5 rounded-full bg-black/90 text-slate-400 hover:text-white hover:bg-rose-600 flex items-center justify-center opacity-90 sm:opacity-0 sm:group-hover/bubble:opacity-100 transition-opacity border border-white/20 cursor-pointer shadow-md z-20"
-              title="Dismiss"
-            >
-              <X size={11} />
-            </button>
-          </div>
-        </div>
-      )}
+            </div>
+          );
+        })}
+      </div>
 
       {/* ========================================================
           2. QUICK REPLY MINI-CHAT MESSAGE BOX (Upper / Middle Right)
           ======================================================== */}
-      {viewState === "drawer" && (
+      {activeDrawerId && currentNotification && (
         <div
           style={{
             maxWidth: "380px",
           }}
-          className="fixed inset-x-3 top-20 sm:inset-x-auto sm:top-24 sm:right-6 w-auto sm:w-[380px] bg-[#10111A]/95 border border-white/15 rounded-3xl shadow-2xl backdrop-blur-2xl flex flex-col z-[120] max-h-[80vh] h-[520px] animate-in fade-in slide-in-from-top-4 duration-200 overflow-hidden"
+          className="fixed inset-x-3 top-20 sm:inset-x-auto sm:top-24 sm:right-24 w-auto sm:w-[380px] bg-[#10111A]/95 border border-white/15 rounded-3xl shadow-2xl backdrop-blur-2xl flex flex-col z-[120] max-h-[80vh] h-[520px] animate-in fade-in slide-in-from-top-4 duration-200 overflow-hidden"
         >
           {/* Header */}
           <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between bg-black/25 shrink-0">
@@ -586,23 +707,26 @@ export function GlobalMessageBubbleOverlay() {
               <button
                 type="button"
                 onClick={handleOpenFullChat}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
                 title="Open in full messenger"
               >
                 <Maximize2 size={15} />
               </button>
               <button
                 type="button"
-                onClick={() => setViewState("bubble")}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+                onClick={() => setActiveDrawerId(null)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
                 title="Minimize to bubble"
               >
                 <Minimize2 size={15} />
               </button>
               <button
                 type="button"
-                onClick={() => setViewState("hidden")}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
+                onClick={() => {
+                  setNotifications((prev) => prev.filter((n) => n.conversationId !== activeDrawerId));
+                  setActiveDrawerId(null);
+                }}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
                 title="Close"
               >
                 <X size={16} />
@@ -665,20 +789,97 @@ export function GlobalMessageBubbleOverlay() {
                           <RoomInviteCard invite={parsed.roomInvite} isMe={isMe} />
                         ) : parsed.type === "voice" ? (
                           <VoiceNotePlayer audioUrl={parsed.audioUrl || ""} duration={parsed.duration} isMe={isMe} />
+                        ) : parsed.type === "images" && parsed.images && parsed.images.length > 0 ? (
+                          <div className="my-0.5">
+                            <WhatsAppImageCluster
+                              images={parsed.images}
+                              conversationId={currentNotification.conversationId}
+                              caption={parsed.text}
+                              isMe={isMe}
+                              onOpenLightbox={(imgs, idx) => {
+                                setLightboxImages(imgs);
+                                setLightboxIndex(idx);
+                                setLightboxMessageId(msg.id);
+                                setIsLightboxOpen(true);
+                              }}
+                              onOpenReactionPicker={() => setActiveReactionPickerMsgId((prev) => (prev === msg.id ? null : msg.id))}
+                              onToggleReaction={(emoji) => handleToggleReaction(msg.id, emoji)}
+                              timestamp={new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                            />
+                          </div>
+                        ) : parsed.type === "gif" && parsed.gifUrl ? (
+                          <div className="relative rounded-xl overflow-hidden max-w-[220px] bg-black/40 group/gif my-1">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setActiveReactionPickerMsgId((prev) => (prev === msg.id ? null : msg.id));
+                              }}
+                              className="absolute top-1.5 right-1.5 z-20 p-1 rounded-full bg-black/60 hover:bg-black/85 text-white/80 hover:text-amber-300 border border-white/15 backdrop-blur-md transition-all active:scale-95 cursor-pointer shadow-lg flex items-center justify-center opacity-85 hover:opacity-100"
+                              title="React to GIF"
+                            >
+                              <Smile size={12} />
+                            </button>
+                            <img
+                              src={parsed.gifUrl}
+                              alt={parsed.gifTitle || "GIF"}
+                              className="w-full h-auto max-h-[160px] object-cover rounded-xl cursor-pointer hover:opacity-95 transition-opacity"
+                              onClick={() => {
+                                setLightboxImages([{ url: parsed.gifUrl!, title: parsed.gifTitle || "GIF" }]);
+                                setLightboxIndex(0);
+                                setLightboxMessageId(msg.id);
+                                setIsLightboxOpen(true);
+                              }}
+                            />
+                            <div className="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded-md bg-black/70 backdrop-blur-md text-[8px] font-black text-white/90 border border-white/10 pointer-events-none tracking-wider">
+                              GIF
+                            </div>
+                          </div>
                         ) : (
                           <p className="whitespace-pre-wrap">{parsed.text || msg.content}</p>
                         )}
 
-                        <div
-                          className={`text-[9px] mt-1 flex items-center gap-1 select-none ${
-                            isMe ? "text-indigo-200/70 justify-end" : "text-slate-400 justify-end"
-                          }`}
-                        >
-                          {parsed.isEdited && <span className="italic opacity-80">(edited)</span>}
-                          <span>
-                            {new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                          </span>
+                        {/* Timestamp & Sent ticks */}
+                        {parsed.type !== "images" && (
+                          <div
+                            className={`text-[9px] mt-1 flex items-center gap-1 select-none ${
+                              isMe ? "text-indigo-200/70 justify-end" : "text-slate-400 justify-end"
+                            }`}
+                          >
+                            {parsed.isEdited && <span className="italic opacity-80">(edited)</span>}
+                            <span>
+                              {new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                            </span>
+                            {isMe && (
+                              <span className="inline-flex items-center ml-0.5">
+                                <CheckCheck size={11} className="stroke-[1.8] text-indigo-200/70" />
+                              </span>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Reaction Badges */}
+                        <div className="mt-1">
+                          <ReactionBadges
+                            reactions={parsed.reactions}
+                            currentUserId={user?.id}
+                            onToggleReaction={(emoji) => handleToggleReaction(msg.id, emoji)}
+                            isMe={isMe}
+                          />
                         </div>
+
+                        {/* Floating Quick Reaction Picker */}
+                        {activeReactionPickerMsgId === msg.id && (
+                          <div className={`relative mt-1 z-30 ${isMe ? "self-end" : "self-start"}`}>
+                            <QuickReactionPicker
+                              onSelect={(emoji) => {
+                                handleToggleReaction(msg.id, emoji);
+                              }}
+                              onClose={() => setActiveReactionPickerMsgId(null)}
+                              isMe={isMe}
+                            />
+                          </div>
+                        )}
                       </div>
                     </div>
                   </React.Fragment>
@@ -711,6 +912,26 @@ export function GlobalMessageBubbleOverlay() {
             </button>
           </form>
         </div>
+      )}
+
+      {/* Lightbox for Pop-up Media Viewing */}
+      {isLightboxOpen && (
+        <MediaLightbox
+          images={lightboxImages}
+          initialIndex={lightboxIndex}
+          onClose={() => {
+            setIsLightboxOpen(false);
+            setLightboxImages([]);
+            setLightboxMessageId(null);
+          }}
+          onToggleReaction={lightboxMessageId ? (emoji) => handleToggleReaction(lightboxMessageId, emoji) : undefined}
+          reactions={
+            lightboxMessageId
+              ? parseMessageContent(drawerMessages.find((m) => m.id === lightboxMessageId)?.content || "").reactions
+              : undefined
+          }
+          currentUserId={user?.id}
+        />
       )}
     </div>
   );
