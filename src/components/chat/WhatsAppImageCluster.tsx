@@ -1,7 +1,7 @@
 "use client";
 
-import React, { useEffect, useState, useMemo } from "react";
-import { Lock, Loader2, Image as ImageIcon } from "lucide-react";
+import React, { useEffect, useState, useMemo, useRef } from "react";
+import { Lock, Loader2, Image as ImageIcon, Smile, Heart } from "lucide-react";
 import { ChatImageItem } from "@/lib/chat-utils";
 import { decryptImage } from "@/lib/e2ee-service";
 
@@ -16,6 +16,8 @@ interface WhatsAppImageClusterProps {
   ) => void;
   timestamp?: string;
   readStatusNode?: React.ReactNode;
+  onOpenReactionPicker?: () => void;
+  onToggleReaction?: (emoji: string) => void;
 }
 
 export function WhatsAppImageCluster({
@@ -26,9 +28,71 @@ export function WhatsAppImageCluster({
   onOpenLightbox,
   timestamp,
   readStatusNode,
+  onOpenReactionPicker,
+  onToggleReaction,
 }: WhatsAppImageClusterProps) {
   const [decryptedUrls, setDecryptedUrls] = useState<Record<string, string>>({});
   const [decryptionErrors, setDecryptionErrors] = useState<Record<string, boolean>>({});
+
+  // Mobile long-press and double-tap gestures
+  const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const isLongPressRef = useRef(false);
+  const touchStartPosRef = useRef<{ x: number; y: number } | null>(null);
+  const lastTapRef = useRef<number>(0);
+  const [showHeartPop, setShowHeartPop] = useState(false);
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    const touch = e.touches[0];
+    touchStartPosRef.current = { x: touch.clientX, y: touch.clientY };
+    isLongPressRef.current = false;
+    longPressTimerRef.current = setTimeout(() => {
+      isLongPressRef.current = true;
+      if (typeof navigator !== "undefined" && navigator.vibrate) {
+        navigator.vibrate(40);
+      }
+      onOpenReactionPicker?.();
+    }, 380);
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (!touchStartPosRef.current) return;
+    const touch = e.touches[0];
+    const dx = Math.abs(touch.clientX - touchStartPosRef.current.x);
+    const dy = Math.abs(touch.clientY - touchStartPosRef.current.y);
+    if (dx > 10 || dy > 10) {
+      if (longPressTimerRef.current) {
+        clearTimeout(longPressTimerRef.current);
+        longPressTimerRef.current = null;
+      }
+    }
+  };
+
+  const handleTouchEnd = () => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  };
+
+  const handleSlotPointerDown = (e: React.PointerEvent) => {
+    const now = Date.now();
+    if (now - lastTapRef.current < 300) {
+      // Double tap detected!
+      e.preventDefault();
+      e.stopPropagation();
+      if (longPressTimerRef.current) {
+        clearTimeout(longPressTimerRef.current);
+        longPressTimerRef.current = null;
+      }
+      isLongPressRef.current = true; // prevent single click lightbox open
+      setShowHeartPop(true);
+      setTimeout(() => setShowHeartPop(false), 900);
+      onToggleReaction?.("❤️");
+      lastTapRef.current = 0;
+      return;
+    }
+    lastTapRef.current = now;
+  };
 
   useEffect(() => {
     let isMounted = true;
@@ -87,6 +151,10 @@ export function WhatsAppImageCluster({
 
   const handleSlotClick = (e: React.MouseEvent, index: number) => {
     e.stopPropagation();
+    if (isLongPressRef.current) {
+      isLongPressRef.current = false;
+      return;
+    }
     onOpenLightbox(lightboxList, index);
   };
 
@@ -131,7 +199,7 @@ export function WhatsAppImageCluster({
     <div className="w-fit max-w-[280px] xs:max-w-[320px] sm:max-w-[360px] rounded-2xl overflow-hidden select-none">
       {/* WhatsApp Cluster Container */}
       <div className="relative rounded-2xl overflow-hidden bg-black/30 border border-white/10 group/cluster">
-        {/* E2EE Security Badge on Top */}
+        {/* E2EE Security Badge on Top Left */}
         <div className="absolute top-1.5 left-1.5 z-20 pointer-events-none">
           <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-black/60 backdrop-blur-md text-emerald-400 text-[9px] font-semibold tracking-wide border border-emerald-500/20 shadow-sm">
             <Lock size={9} className="stroke-[2.5]" />
@@ -139,10 +207,39 @@ export function WhatsAppImageCluster({
           </span>
         </div>
 
+        {/* Quick React Smile Button on Top Right (Mobile & Desktop) */}
+        {onOpenReactionPicker && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenReactionPicker();
+            }}
+            className="absolute top-1.5 right-1.5 z-20 p-1.5 rounded-full bg-black/60 hover:bg-black/85 text-white/80 hover:text-amber-300 border border-white/15 backdrop-blur-md transition-all active:scale-95 cursor-pointer shadow-lg flex items-center justify-center opacity-85 hover:opacity-100"
+            title="React to photo"
+            aria-label="React to photo"
+          >
+            <Smile size={13} />
+          </button>
+        )}
+
+        {/* Heart Pop Animation on Double-Tap */}
+        {showHeartPop && (
+          <div className="absolute inset-0 z-30 pointer-events-none flex items-center justify-center animate-in zoom-in-50 fade-in duration-200">
+            <span className="text-5xl sm:text-6xl drop-shadow-[0_4px_16px_rgba(244,63,94,0.6)] animate-bounce">
+              ❤️
+            </span>
+          </div>
+        )}
+
         {/* 1 Image Layout */}
         {isSingle && (
           <div
             onClick={(e) => handleSlotClick(e, 0)}
+            onPointerDown={handleSlotPointerDown}
+            onTouchStart={handleTouchStart}
+            onTouchMove={handleTouchMove}
+            onTouchEnd={handleTouchEnd}
             className="relative cursor-pointer max-h-[360px] sm:max-h-[420px] overflow-hidden flex items-center justify-center"
           >
             {renderImageTile(images[0], 0, "max-h-[360px] sm:max-h-[420px] w-auto max-w-full object-contain")}
@@ -160,10 +257,24 @@ export function WhatsAppImageCluster({
         {/* 2 Images Layout: Side by Side (2 columns, 1 row) */}
         {count === 2 && (
           <div className="grid grid-cols-2 gap-0.5 h-36 sm:h-44 w-full">
-            <div onClick={(e) => handleSlotClick(e, 0)} className="relative cursor-pointer overflow-hidden h-full">
+            <div
+              onClick={(e) => handleSlotClick(e, 0)}
+              onPointerDown={handleSlotPointerDown}
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
+              className="relative cursor-pointer overflow-hidden h-full"
+            >
               {renderImageTile(images[0], 0)}
             </div>
-            <div onClick={(e) => handleSlotClick(e, 1)} className="relative cursor-pointer overflow-hidden h-full">
+            <div
+              onClick={(e) => handleSlotClick(e, 1)}
+              onPointerDown={handleSlotPointerDown}
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
+              className="relative cursor-pointer overflow-hidden h-full"
+            >
               {renderImageTile(images[1], 1)}
             </div>
           </div>
@@ -174,15 +285,33 @@ export function WhatsAppImageCluster({
           <div className="flex flex-col gap-0.5 w-full">
             <div
               onClick={(e) => handleSlotClick(e, 0)}
+              onPointerDown={handleSlotPointerDown}
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
               className="relative cursor-pointer overflow-hidden h-36 sm:h-44 w-full"
             >
               {renderImageTile(images[0], 0)}
             </div>
             <div className="grid grid-cols-2 gap-0.5 h-24 sm:h-28 w-full">
-              <div onClick={(e) => handleSlotClick(e, 1)} className="relative cursor-pointer overflow-hidden h-full">
+              <div
+                onClick={(e) => handleSlotClick(e, 1)}
+                onPointerDown={handleSlotPointerDown}
+                onTouchStart={handleTouchStart}
+                onTouchMove={handleTouchMove}
+                onTouchEnd={handleTouchEnd}
+                className="relative cursor-pointer overflow-hidden h-full"
+              >
                 {renderImageTile(images[1], 1)}
               </div>
-              <div onClick={(e) => handleSlotClick(e, 2)} className="relative cursor-pointer overflow-hidden h-full">
+              <div
+                onClick={(e) => handleSlotClick(e, 2)}
+                onPointerDown={handleSlotPointerDown}
+                onTouchStart={handleTouchStart}
+                onTouchMove={handleTouchMove}
+                onTouchEnd={handleTouchEnd}
+                className="relative cursor-pointer overflow-hidden h-full"
+              >
                 {renderImageTile(images[2], 2)}
               </div>
             </div>
@@ -196,6 +325,10 @@ export function WhatsAppImageCluster({
               <div
                 key={img.id || idx}
                 onClick={(e) => handleSlotClick(e, idx)}
+                onPointerDown={handleSlotPointerDown}
+                onTouchStart={handleTouchStart}
+                onTouchMove={handleTouchMove}
+                onTouchEnd={handleTouchEnd}
                 className="relative cursor-pointer overflow-hidden h-full"
               >
                 {renderImageTile(img, idx)}
@@ -208,23 +341,48 @@ export function WhatsAppImageCluster({
         {count > 4 && (
           <div className="grid grid-cols-2 gap-0.5 h-52 sm:h-60 w-full">
             {/* Slot 0 */}
-            <div onClick={(e) => handleSlotClick(e, 0)} className="relative cursor-pointer overflow-hidden h-full">
+            <div
+              onClick={(e) => handleSlotClick(e, 0)}
+              onPointerDown={handleSlotPointerDown}
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
+              className="relative cursor-pointer overflow-hidden h-full"
+            >
               {renderImageTile(images[0], 0)}
             </div>
 
             {/* Slot 1 */}
-            <div onClick={(e) => handleSlotClick(e, 1)} className="relative cursor-pointer overflow-hidden h-full">
+            <div
+              onClick={(e) => handleSlotClick(e, 1)}
+              onPointerDown={handleSlotPointerDown}
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
+              className="relative cursor-pointer overflow-hidden h-full"
+            >
               {renderImageTile(images[1], 1)}
             </div>
 
             {/* Slot 2 */}
-            <div onClick={(e) => handleSlotClick(e, 2)} className="relative cursor-pointer overflow-hidden h-full">
+            <div
+              onClick={(e) => handleSlotClick(e, 2)}
+              onPointerDown={handleSlotPointerDown}
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
+              className="relative cursor-pointer overflow-hidden h-full"
+            >
               {renderImageTile(images[2], 2)}
             </div>
 
             {/* Slot 3: 4th image with WhatsApp "+N" dark overlay */}
             <div
               onClick={(e) => handleSlotClick(e, 3)}
+              onPointerDown={handleSlotPointerDown}
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
               className="relative cursor-pointer overflow-hidden h-full group/more"
             >
               {renderImageTile(images[3], 3)}

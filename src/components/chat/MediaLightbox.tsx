@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from "react";
-import { X, ExternalLink, Download, ChevronLeft, ChevronRight, Lock } from "lucide-react";
+import { X, ExternalLink, Download, ChevronLeft, ChevronRight, Lock, Smile } from "lucide-react";
 import { createPortal } from "react-dom";
+import { QuickReactionPicker, ReactionBadges } from "@/components/chat/MessageReactions";
+import { MessageReaction } from "@/lib/chat-utils";
 
 export interface LightboxMediaItem {
   url: string;
@@ -17,6 +19,9 @@ interface MediaLightboxProps {
   initialIndex?: number;
   onClose: () => void;
   title?: string;
+  onToggleReaction?: (emoji: string) => void;
+  reactions?: MessageReaction[];
+  currentUserId?: string;
 }
 
 export function MediaLightbox({
@@ -25,6 +30,9 @@ export function MediaLightbox({
   initialIndex = 0,
   onClose,
   title = "Media",
+  onToggleReaction,
+  reactions,
+  currentUserId,
 }: MediaLightboxProps) {
   // Normalize items
   const items: LightboxMediaItem[] = images && images.length > 0
@@ -36,6 +44,7 @@ export function MediaLightbox({
   const [currentIndex, setCurrentIndex] = useState(
     Math.min(Math.max(0, initialIndex), Math.max(0, items.length - 1))
   );
+  const [showReactionPicker, setShowReactionPicker] = useState(false);
 
   useEffect(() => {
     setCurrentIndex(Math.min(Math.max(0, initialIndex), Math.max(0, items.length - 1)));
@@ -134,6 +143,37 @@ export function MediaLightbox({
         </div>
 
         <div className="flex items-center gap-2">
+          {onToggleReaction && (
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setShowReactionPicker((prev) => !prev)}
+                className={`p-2 rounded-xl transition-colors cursor-pointer ${
+                  showReactionPicker
+                    ? "bg-amber-500/25 text-amber-300 border border-amber-500/30"
+                    : "bg-white/10 hover:bg-white/20 text-white"
+                }`}
+                title="React to photo"
+                aria-label="React to photo"
+              >
+                <Smile size={16} />
+              </button>
+
+              {showReactionPicker && (
+                <div className="absolute top-full right-0 mt-2 z-50">
+                  <QuickReactionPicker
+                    onSelect={(emoji) => {
+                      onToggleReaction(emoji);
+                      setShowReactionPicker(false);
+                    }}
+                    onClose={() => setShowReactionPicker(false)}
+                    isMe={false}
+                  />
+                </div>
+              )}
+            </div>
+          )}
+
           <button
             type="button"
             onClick={handleDownload}
@@ -198,6 +238,18 @@ export function MediaLightbox({
           {currentItem.caption && (
             <div className="mt-2.5 px-4 py-1.5 rounded-xl bg-black/75 backdrop-blur-md border border-white/10 text-white text-xs sm:text-sm text-center max-w-lg shadow-xl">
               {currentItem.caption}
+            </div>
+          )}
+
+          {/* Reaction Badges in Lightbox */}
+          {reactions && reactions.length > 0 && onToggleReaction && (
+            <div className="mt-2 flex justify-center z-20">
+              <ReactionBadges
+                reactions={reactions}
+                currentUserId={currentUserId}
+                onToggleReaction={onToggleReaction}
+                onOpenPicker={() => setShowReactionPicker(true)}
+              />
             </div>
           )}
         </div>

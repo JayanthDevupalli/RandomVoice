@@ -122,6 +122,13 @@ export function MessageInfoModal({
                     className="w-full h-auto object-cover rounded-lg"
                   />
                 </div>
+              ) : parsedMessage?.type === "images" && parsedMessage.images && parsedMessage.images.length > 0 ? (
+                <div className="flex flex-col gap-1.5 max-w-[200px]">
+                  <div className="flex items-center gap-1.5 text-xs text-indigo-300 font-semibold">
+                    <span>📷 {parsedMessage.images.length} Photo{parsedMessage.images.length > 1 ? "s" : ""}</span>
+                  </div>
+                  {parsedMessage.text && <p className="whitespace-pre-wrap text-xs text-white/90">{parsedMessage.text}</p>}
+                </div>
               ) : parsedMessage?.type === "room_invite" && parsedMessage.roomInvite ? (
                 <RoomInviteCard invite={parsedMessage.roomInvite} isMe={isMe} />
               ) : (

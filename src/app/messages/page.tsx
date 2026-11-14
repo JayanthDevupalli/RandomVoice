@@ -217,6 +217,7 @@ export default function MessagesPage() {
   const [lightboxImages, setLightboxImages] = useState<Array<{ url: string; caption?: string; title?: string }>>([]);
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [isLightboxOpen, setIsLightboxOpen] = useState(false);
+  const [lightboxMessageId, setLightboxMessageId] = useState<string | null>(null);
 
   // --- Feature: End-to-End Encrypted Photo Sharing (WhatsApp Style) ---
   const [stagedImages, setStagedImages] = useState<Array<{ id: string; file: File; previewUrl: string; width?: number; height?: number }>>([]);
@@ -525,19 +526,7 @@ export default function MessagesPage() {
       } catch (err) {}
     }
 
-    // 2. Persist to conversation_members table for instant RLS-compliant realtime DB sync
-    supabase
-      .from("conversation_members")
-      .update({ last_read_at: safeReadTime })
-      .eq("conversation_id", activeConversationId)
-      .eq("user_id", user.id)
-      .then(({ error }) => {
-        if (error) {
-          console.warn("Failed to update conversation_members.last_read_at:", error.message);
-        }
-      });
-
-    // 3. Persist to profiles.social_links as resilient secondary fallback
+    // 2. Persist to profiles.social_links as resilient primary storage across all devices/incognito
     Promise.resolve(
       supabase
         .from("profiles")
@@ -553,6 +542,15 @@ export default function MessagesPage() {
         .update({ social_links: { ...links, last_read_map: lastReadMap } })
         .eq("id", user.id);
     }).catch(() => {});
+
+    // 3. Persist to conversation_members table (safely caught in case column does not exist)
+    Promise.resolve(
+      supabase
+        .from("conversation_members")
+        .update({ last_read_at: safeReadTime })
+        .eq("conversation_id", activeConversationId)
+        .eq("user_id", user.id)
+    ).catch(() => {});
   }, [activeConversationId, user?.id]);
 
   // Mark active conversation as read
@@ -611,6 +609,20 @@ export default function MessagesPage() {
     return map;
   }, [messages]);
 
+  // Map of each member's latest message time in this conversation (proves user was active up to this time)
+  const memberLatestMsgTimeMap = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const msg of messages) {
+      if (msg.sender_id && msg.created_at) {
+        const time = new Date(msg.created_at).getTime();
+        if (!map[msg.sender_id] || time > map[msg.sender_id]) {
+          map[msg.sender_id] = time;
+        }
+      }
+    }
+    return map;
+  }, [messages]);
+
   // Load active group members for header subtitle, online indicators & member management
   const loadActiveGroupMembers = useCallback(async () => {
     if (!activeConversationId) {
@@ -625,12 +637,12 @@ export default function MessagesPage() {
       return;
     }
     try {
+      let membersData: any[] = [];
       const { data, error } = await supabase
         .from("conversation_members")
         .select(`
           user_id,
           role,
-          last_read_at,
           profiles (
             id,
             username,
@@ -640,84 +652,73 @@ export default function MessagesPage() {
         `)
         .eq("conversation_id", activeConversationId);
 
-      const initialReadMap: Record<string, string> = {};
-
-      if (error) {
+      if (!error && data && data.length > 0) {
+        membersData = data;
+      } else {
         // Fallback flat query if join fails
         const { data: flatMembers } = await supabase
           .from("conversation_members")
-          .select("user_id, role, last_read_at")
+          .select("user_id, role")
           .eq("conversation_id", activeConversationId);
 
         if (flatMembers && flatMembers.length > 0) {
-          const uids = flatMembers.map((m: any) => m.user_id);
+          const uids = flatMembers.map((m: any) => m.user_id).filter(Boolean);
           const { data: profs } = await supabase
             .from("profiles")
             .select("id, username, avatar, social_links")
             .in("id", uids);
 
           const pMap = new Map((profs || []).map((p: any) => [p.id, p]));
-          flatMembers.forEach((m: any) => {
-            const p = pMap.get(m.user_id);
-            const readFromSocial = (p?.social_links as any)?.last_read_map?.[activeConversationId];
-            const readIso = [m.last_read_at, readFromSocial]
-              .filter(Boolean)
-              .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
-            if (readIso && m.user_id) {
-              initialReadMap[m.user_id] = readIso;
-            }
-          });
-
-          const formatted = flatMembers.map((m: any) => {
-            const p = pMap.get(m.user_id);
-            const dName = getProfileDisplayName(p, p?.username || "Unknown");
-            return {
-              id: m.user_id,
-              name: dName,
-              displayName: dName,
-              username: p?.username || "Unknown",
-              role: m.role || "member",
-              avatar: p?.avatar,
-              social_links: p?.social_links,
-            };
-          });
-          setActiveGroupMembers(formatted);
-          setGroupMembersReadMap(initialReadMap);
-          return;
+          membersData = flatMembers.map((m: any) => ({
+            user_id: m.user_id,
+            role: m.role,
+            profiles: pMap.get(m.user_id) || null,
+          }));
         }
       }
 
-      if (data) {
-        data.forEach((d: any) => {
-          const profile = Array.isArray(d.profiles) ? d.profiles[0] : d.profiles;
-          const readFromSocial = (profile?.social_links as any)?.last_read_map?.[activeConversationId];
-          const readIso = [d.last_read_at, readFromSocial]
-            .filter(Boolean)
-            .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
-          if (readIso && d.user_id) {
-            initialReadMap[d.user_id] = readIso;
-          }
-        });
-        const membersList = data.map((d: any) => {
-          const profile = Array.isArray(d.profiles) ? d.profiles[0] : d.profiles;
-          const dName = getProfileDisplayName(profile, profile?.username || "Unknown");
-          return {
-            id: d.user_id,
-            name: dName,
-            displayName: dName,
-            username: profile?.username || "Unknown",
-            role: d.role || "member",
-            avatar: profile?.avatar,
-            social_links: profile?.social_links,
-          };
-        });
-        setActiveGroupMembers(membersList);
-        setGroupMembersReadMap(initialReadMap);
-      }
+      const initialReadMap: Record<string, string> = {};
+
+      const membersList = membersData.map((d: any) => {
+        const profile = Array.isArray(d.profiles) ? d.profiles[0] : d.profiles;
+        const dName = getProfileDisplayName(profile, profile?.username || "Unknown");
+        const readFromSocial = (profile?.social_links as any)?.last_read_map?.[activeConversationId];
+        const memberMsgTime = memberLatestMsgTimeMap[d.user_id]
+          ? new Date(memberLatestMsgTimeMap[d.user_id]).toISOString()
+          : undefined;
+
+        // Current user is actively looking at this conversation right now
+        const isSelf = d.user_id === user?.id;
+        const selfTime = isSelf ? new Date().toISOString() : undefined;
+
+        const effectiveReadIso = [readFromSocial, memberMsgTime, selfTime]
+          .filter(Boolean)
+          .sort((a, b) => new Date(b!).getTime() - new Date(a!).getTime())[0];
+
+        if (effectiveReadIso && d.user_id) {
+          initialReadMap[d.user_id] = effectiveReadIso;
+        }
+
+        return {
+          id: d.user_id,
+          name: dName,
+          displayName: dName,
+          username: profile?.username || "Unknown",
+          role: d.role || "member",
+          avatar: profile?.avatar,
+          social_links: profile?.social_links,
+        };
+      });
+
+      setActiveGroupMembers(membersList);
+      setGroupMembersReadMap((prev) => ({
+        ...initialReadMap,
+        ...prev,
+      }));
     } catch (err) {
       console.error("Failed to load active group members:", err);
     }
-  }, [activeConversationId, activeConversation?.type]);
+  }, [activeConversationId, activeConversation?.type, memberLatestMsgTimeMap, user?.id]);
 
   useEffect(() => {
     if (activeConversationId && (!activeConversation || activeConversation.type === "group")) {
@@ -727,20 +728,6 @@ export default function MessagesPage() {
       setGroupMembersReadMap({});
     }
   }, [activeConversationId, activeConversation?.type, loadActiveGroupMembers]);
-
-  // Map of each member's latest message time in this conversation (proves user was active up to this time)
-  const memberLatestMsgTimeMap = useMemo(() => {
-    const map: Record<string, number> = {};
-    for (const msg of messages) {
-      if (msg.sender_id && msg.created_at) {
-        const time = new Date(msg.created_at).getTime();
-        if (!map[msg.sender_id] || time > map[msg.sender_id]) {
-          map[msg.sender_id] = time;
-        }
-      }
-    }
-    return map;
-  }, [messages]);
 
   // Comprehensive check whether a group member has read a message
   const isMemberRead = useCallback(
@@ -1534,7 +1521,7 @@ export default function MessagesPage() {
 
     presenceChannelRef.current = presenceChannel;
 
-    // 3. Listen to DB changes on conversation_members for live persistent updates
+    // 3. Listen to DB changes on conversation_members for live updates
     const membersChannel = supabase
       .channel(`members_sync_${activeConversationId}_${Math.random().toString(36).substring(2, 7)}`)
       .on(
@@ -1568,10 +1555,47 @@ export default function MessagesPage() {
       )
       .subscribe();
 
+    // 4. Listen to profiles table updates for live cross-device persistent read receipts
+    const profilesReadChannel = supabase
+      .channel(`profiles_read_sync_${activeConversationId}_${Math.random().toString(36).substring(2, 7)}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "profiles",
+        },
+        (payload) => {
+          const updated = payload.new as any;
+          if (!updated?.id || updated.id === user.id) return;
+          const remoteReadMap = (updated?.social_links as any)?.last_read_map;
+          const readAt = remoteReadMap?.[activeConversationId];
+          if (!readAt) return;
+
+          if (isGroup) {
+            setGroupMembersReadMap((prev) => {
+              if (!prev[updated.id] || new Date(readAt).getTime() > new Date(prev[updated.id]).getTime()) {
+                return { ...prev, [updated.id]: readAt };
+              }
+              return prev;
+            });
+          } else if (updated.id === otherUserId) {
+            setOtherUserLastReadAt((prev) => {
+              if (!prev || new Date(readAt).getTime() > new Date(prev).getTime()) {
+                return readAt;
+              }
+              return prev;
+            });
+          }
+        }
+      )
+      .subscribe();
+
     return () => {
       if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
       supabase.removeChannel(presenceChannel);
       supabase.removeChannel(membersChannel);
+      supabase.removeChannel(profilesReadChannel);
       presenceChannelRef.current = null;
       setIsOtherUserConvOnline(false);
       setIsOtherUserTyping(false);
@@ -1783,18 +1807,21 @@ export default function MessagesPage() {
   };
 
   // --- Lightbox & Image Handlers (WhatsApp Style with E2EE) ---
-  const openSingleMediaLightbox = (url: string, title: string = "Media") => {
+  const openSingleMediaLightbox = (url: string, title: string = "Media", messageId?: string) => {
     setLightboxImages([{ url, title }]);
     setLightboxIndex(0);
+    setLightboxMessageId(messageId || null);
     setIsLightboxOpen(true);
   };
 
   const openClusterLightbox = (
     images: Array<{ url: string; caption?: string; title?: string }>,
-    initialIndex: number
+    initialIndex: number,
+    messageId?: string
   ) => {
     setLightboxImages(images);
     setLightboxIndex(initialIndex);
+    setLightboxMessageId(messageId || null);
     setIsLightboxOpen(true);
   };
 
@@ -2857,7 +2884,7 @@ export default function MessagesPage() {
                               const msgTime = new Date(msg.created_at).getTime();
                               const otherReadTime = otherUserLastReadAt ? new Date(otherUserLastReadAt).getTime() : 0;
                               const effectiveOtherReadTime = Math.max(otherReadTime, otherUserLatestMsgTime);
-                              const isMsgSeen = Boolean(effectiveOtherReadTime > 0 && effectiveOtherReadTime >= msgTime);
+                              const isMsgSeen = Boolean(effectiveOtherReadTime > 0 && effectiveOtherReadTime >= msgTime - 3000);
                               const isMsgDelivered = Boolean(isOtherUserOnline || isMsgSeen);
                               return (
                                 <div 
@@ -2914,7 +2941,9 @@ export default function MessagesPage() {
                                       conversationId={activeConversationId}
                                       caption={parsed.text}
                                       isMe={isMe}
-                                      onOpenLightbox={openClusterLightbox}
+                                      onOpenLightbox={(imgs, idx) => openClusterLightbox(imgs, idx, msg.id)}
+                                      onOpenReactionPicker={() => setActiveReactionPickerMsgId((prev) => prev === msg.id ? null : msg.id)}
+                                      onToggleReaction={(emoji) => handleToggleReaction(msg.id, emoji)}
                                       timestamp={new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                                       readStatusNode={
                                         <>
@@ -2988,6 +3017,19 @@ export default function MessagesPage() {
                                     />
                                   ) : isGif ? (
                                     <div className="relative rounded-xl overflow-hidden max-w-[240px] sm:max-w-[300px] bg-black/40 group/gif">
+                                      {/* Quick React Smile button on GIF */}
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setActiveReactionPickerMsgId((prev) => (prev === msg.id ? null : msg.id));
+                                        }}
+                                        className="absolute top-1.5 right-1.5 z-20 p-1.5 rounded-full bg-black/60 hover:bg-black/85 text-white/80 hover:text-amber-300 border border-white/15 backdrop-blur-md transition-all active:scale-95 cursor-pointer shadow-lg flex items-center justify-center opacity-85 hover:opacity-100"
+                                        title="React to GIF"
+                                        aria-label="React to GIF"
+                                      >
+                                        <Smile size={13} />
+                                      </button>
                                       <img
                                         src={parsed.gifUrl}
                                         alt={parsed.gifTitle || "GIF"}
@@ -2997,6 +3039,7 @@ export default function MessagesPage() {
                                           e.stopPropagation();
                                           setExpandedMediaUrl(parsed.gifUrl!);
                                           setExpandedMediaTitle(parsed.gifTitle || "GIF");
+                                          setLightboxMessageId(msg.id);
                                         }}
                                       />
                                       <div className="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded-md bg-black/70 backdrop-blur-md text-[9px] font-black text-white/90 border border-white/10 pointer-events-none tracking-wider">
@@ -3232,7 +3275,7 @@ export default function MessagesPage() {
 
                           {/* Quick Reaction Floating Picker */}
                           {activeReactionPickerMsgId === msg.id && (
-                            <div className={`absolute -top-10 ${isMe ? 'right-2' : 'left-2'} z-30`}>
+                            <div className={`absolute ${index === 0 ? 'top-full mt-1.5' : '-top-11'} ${isMe ? 'right-2' : 'left-2'} z-40`}>
                               <QuickReactionPicker
                                 onSelect={(emoji) => {
                                   handleToggleReaction(msg.id, emoji);
@@ -4114,14 +4157,33 @@ export default function MessagesPage() {
           onClose={() => {
             setIsLightboxOpen(false);
             setLightboxImages([]);
+            setLightboxMessageId(null);
           }}
+          onToggleReaction={lightboxMessageId ? (emoji) => handleToggleReaction(lightboxMessageId, emoji) : undefined}
+          reactions={
+            lightboxMessageId
+              ? parseMessageContent(messages.find((m) => m.id === lightboxMessageId)?.content || "").reactions
+              : undefined
+          }
+          currentUserId={user?.id}
         />
       )}
       {expandedMediaUrl && !isLightboxOpen && (
         <MediaLightbox
           mediaUrl={expandedMediaUrl}
-          onClose={() => setExpandedMediaUrl(null)}
+          onClose={() => {
+            setExpandedMediaUrl(null);
+            setExpandedMediaTitle("");
+            setLightboxMessageId(null);
+          }}
           title={expandedMediaTitle}
+          onToggleReaction={lightboxMessageId ? (emoji) => handleToggleReaction(lightboxMessageId, emoji) : undefined}
+          reactions={
+            lightboxMessageId
+              ? parseMessageContent(messages.find((m) => m.id === lightboxMessageId)?.content || "").reactions
+              : undefined
+          }
+          currentUserId={user?.id}
         />
       )}
     </div>

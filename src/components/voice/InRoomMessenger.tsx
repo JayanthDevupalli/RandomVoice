@@ -338,7 +338,6 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
           .from("conversation_members")
           .select(`
             user_id,
-            last_read_at,
             profiles (
               id,
               username,
@@ -355,12 +354,13 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
             const prof = Array.isArray(raw) ? raw[0] : raw;
             if (prof && item.user_id) {
               const dName = getProfileDisplayName(prof, prof.username || "User");
+              const readFromSocial = (prof?.social_links as any)?.last_read_map?.[activeConversationId];
               map[item.user_id] = {
                 username: prof.username || "User",
                 name: dName,
                 displayName: dName,
                 avatar: prof.avatar || "user",
-                lastReadAt: (item as any).last_read_at || undefined,
+                lastReadAt: (item as any).last_read_at || readFromSocial || undefined,
               };
             }
           }
@@ -454,14 +454,14 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
       return;
     }
     supabase
-      .from("conversation_members")
-      .select("last_read_at")
-      .eq("conversation_id", activeConversationId)
-      .eq("user_id", partnerId)
+      .from("profiles")
+      .select("social_links")
+      .eq("id", partnerId)
       .maybeSingle()
       .then(({ data }) => {
-        if (data?.last_read_at) {
-          setPartnerLastReadAt(data.last_read_at);
+        const readAt = (data?.social_links as any)?.last_read_map?.[activeConversationId];
+        if (readAt) {
+          setPartnerLastReadAt(readAt);
         }
       });
   }, [activeConversationId, isGroupChat, partnerId]);
