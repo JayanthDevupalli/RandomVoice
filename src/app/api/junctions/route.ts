@@ -1,11 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAllJunctions, createJunction, purgeUserFromAllJunctions } from "@/lib/junctions-store";
-import { createClient } from "@supabase/supabase-js";
-
-const sbAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL || "",
-  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ""
-);
+import { supabaseAdmin as sbAdmin } from "@/lib/supabase-admin";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
