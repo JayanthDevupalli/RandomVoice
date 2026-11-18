@@ -2128,11 +2128,7 @@ export function JunctionRoom({
           let popupText = payload.text || "";
           try {
             const parsed = parseMessageContent(payload.text || "");
-            if (parsed.type === "images" && parsed.images && parsed.images.length > 0) {
-              const count = parsed.images.length;
-              const caption = parsed.text ? `: ${parsed.text}` : "";
-              popupText = `📷 Photo${count > 1 ? `s (${count})` : ""}${caption}`;
-            } else if (parsed.type === "gif") {
+            if (parsed.type === "gif") {
               popupText = "🖼️ GIF";
             } else if (parsed.type === "voice") {
               popupText = "🎵 Voice Note";

@@ -28,8 +28,7 @@ import {
 } from "@/lib/chat-utils";
 import { VoiceNotePlayer } from "@/components/chat/VoiceNotePlayer";
 import { RoomInviteCard } from "@/components/chat/RoomInviteCard";
-import { WhatsAppImageCluster } from "@/components/chat/WhatsAppImageCluster";
-import { MediaLightbox, LightboxMediaItem } from "@/components/chat/MediaLightbox";
+import { MediaLightbox } from "@/components/chat/MediaLightbox";
 import { QuickReactionPicker, ReactionBadges } from "@/components/chat/MessageReactions";
 
 interface IncomingNotification {
@@ -42,7 +41,7 @@ interface IncomingNotification {
   senderDisplayName: string;
   senderAvatar: string;
   previewText: string;
-  type: "text" | "voice" | "room_invite" | "gif" | "images";
+  type: "text" | "voice" | "room_invite" | "gif";
   createdAt: string;
 }
 
@@ -103,10 +102,9 @@ export function GlobalMessageBubbleOverlay() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Lightbox & Reaction states for rich media previews in drawer
-  const [lightboxImages, setLightboxImages] = useState<LightboxMediaItem[]>([]);
-  const [lightboxIndex, setLightboxIndex] = useState(0);
-  const [isLightboxOpen, setIsLightboxOpen] = useState(false);
+  // Lightbox & Reaction states for GIF previews in drawer
+  const [expandedMediaUrl, setExpandedMediaUrl] = useState<string | null>(null);
+  const [expandedMediaTitle, setExpandedMediaTitle] = useState<string>("GIF");
   const [lightboxMessageId, setLightboxMessageId] = useState<string | null>(null);
   const [activeReactionPickerMsgId, setActiveReactionPickerMsgId] = useState<string | null>(null);
 
@@ -131,18 +129,13 @@ export function GlobalMessageBubbleOverlay() {
   }, [user?.id, (user as any)?.social_links?.cleared_chats_map]);
 
   // Helper to get formatted message preview
-  const getMessagePreview = (content: string): { preview: string; type: "text" | "voice" | "room_invite" | "gif" | "images" } => {
+  const getMessagePreview = (content: string): { preview: string; type: "text" | "voice" | "room_invite" | "gif" } => {
     const parsed = parseMessageContent(content);
     if (parsed.type === "voice") {
       return { preview: "🎵 Voice Note", type: "voice" };
     }
     if (parsed.type === "gif") {
       return { preview: "🖼️ GIF", type: "gif" };
-    }
-    if (parsed.type === "images" && parsed.images && parsed.images.length > 0) {
-      const count = parsed.images.length;
-      const caption = parsed.text ? `: ${parsed.text}` : "";
-      return { preview: `📷 Photo${count > 1 ? `s (${count})` : ""}${caption}`, type: "images" };
     }
     if (parsed.type === "room_invite") {
       return { preview: `🎙️ Room Invite: ${parsed.roomInvite?.junctionName || "Hangout"}`, type: "room_invite" };
@@ -789,24 +782,6 @@ export function GlobalMessageBubbleOverlay() {
                           <RoomInviteCard invite={parsed.roomInvite} isMe={isMe} />
                         ) : parsed.type === "voice" ? (
                           <VoiceNotePlayer audioUrl={parsed.audioUrl || ""} duration={parsed.duration} isMe={isMe} />
-                        ) : parsed.type === "images" && parsed.images && parsed.images.length > 0 ? (
-                          <div className="my-0.5">
-                            <WhatsAppImageCluster
-                              images={parsed.images}
-                              conversationId={currentNotification.conversationId}
-                              caption={parsed.text}
-                              isMe={isMe}
-                              onOpenLightbox={(imgs, idx) => {
-                                setLightboxImages(imgs);
-                                setLightboxIndex(idx);
-                                setLightboxMessageId(msg.id);
-                                setIsLightboxOpen(true);
-                              }}
-                              onOpenReactionPicker={() => setActiveReactionPickerMsgId((prev) => (prev === msg.id ? null : msg.id))}
-                              onToggleReaction={(emoji) => handleToggleReaction(msg.id, emoji)}
-                              timestamp={new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                            />
-                          </div>
                         ) : parsed.type === "gif" && parsed.gifUrl ? (
                           <div className="relative rounded-xl overflow-hidden max-w-[220px] bg-black/40 group/gif my-1">
                             <button
@@ -825,10 +800,9 @@ export function GlobalMessageBubbleOverlay() {
                               alt={parsed.gifTitle || "GIF"}
                               className="w-full h-auto max-h-[160px] object-cover rounded-xl cursor-pointer hover:opacity-95 transition-opacity"
                               onClick={() => {
-                                setLightboxImages([{ url: parsed.gifUrl!, title: parsed.gifTitle || "GIF" }]);
-                                setLightboxIndex(0);
+                                setExpandedMediaUrl(parsed.gifUrl!);
+                                setExpandedMediaTitle(parsed.gifTitle || "GIF");
                                 setLightboxMessageId(msg.id);
-                                setIsLightboxOpen(true);
                               }}
                             />
                             <div className="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded-md bg-black/70 backdrop-blur-md text-[8px] font-black text-white/90 border border-white/10 pointer-events-none tracking-wider">
@@ -840,23 +814,21 @@ export function GlobalMessageBubbleOverlay() {
                         )}
 
                         {/* Timestamp & Sent ticks */}
-                        {parsed.type !== "images" && (
-                          <div
-                            className={`text-[9px] mt-1 flex items-center gap-1 select-none ${
-                              isMe ? "text-indigo-200/70 justify-end" : "text-slate-400 justify-end"
-                            }`}
-                          >
-                            {parsed.isEdited && <span className="italic opacity-80">(edited)</span>}
-                            <span>
-                              {new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                        <div
+                          className={`text-[9px] mt-1 flex items-center gap-1 select-none ${
+                            isMe ? "text-indigo-200/70 justify-end" : "text-slate-400 justify-end"
+                          }`}
+                        >
+                          {parsed.isEdited && <span className="italic opacity-80">(edited)</span>}
+                          <span>
+                            {new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                          </span>
+                          {isMe && (
+                            <span className="inline-flex items-center ml-0.5">
+                              <CheckCheck size={11} className="stroke-[1.8] text-indigo-200/70" />
                             </span>
-                            {isMe && (
-                              <span className="inline-flex items-center ml-0.5">
-                                <CheckCheck size={11} className="stroke-[1.8] text-indigo-200/70" />
-                              </span>
-                            )}
-                          </div>
-                        )}
+                          )}
+                        </div>
 
                         {/* Reaction Badges */}
                         <div className="mt-1">
@@ -914,14 +886,14 @@ export function GlobalMessageBubbleOverlay() {
         </div>
       )}
 
-      {/* Lightbox for Pop-up Media Viewing */}
-      {isLightboxOpen && (
+      {/* Lightbox for Pop-up GIF Viewing */}
+      {expandedMediaUrl && (
         <MediaLightbox
-          images={lightboxImages}
-          initialIndex={lightboxIndex}
+          mediaUrl={expandedMediaUrl}
+          title={expandedMediaTitle}
           onClose={() => {
-            setIsLightboxOpen(false);
-            setLightboxImages([]);
+            setExpandedMediaUrl(null);
+            setExpandedMediaTitle("GIF");
             setLightboxMessageId(null);
           }}
           onToggleReaction={lightboxMessageId ? (emoji) => handleToggleReaction(lightboxMessageId, emoji) : undefined}

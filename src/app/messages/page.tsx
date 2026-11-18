@@ -30,8 +30,7 @@ import {
   UserPlus,
   Info,
   Smile,
-  Tag,
-  Image as ImageIcon
+  Tag
 } from "lucide-react";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import { useRouter } from "next/navigation";
@@ -46,8 +45,6 @@ import {
   serializeVoiceMessage,
   serializeGifMessage,
   serializeNicknameMessage,
-  serializeImagesMessage,
-  ChatImageItem,
   getSenderColor,
   getProfileDisplayName,
   isSameDay,
@@ -65,8 +62,6 @@ import { MediaLightbox } from "@/components/chat/MediaLightbox";
 import { GroupInfoModal } from "@/components/chat/GroupInfoModal";
 import { AddGroupMemberModal } from "@/components/chat/AddGroupMemberModal";
 import { MessageInfoModal } from "@/components/chat/MessageInfoModal";
-import { WhatsAppImageCluster } from "@/components/chat/WhatsAppImageCluster";
-import { compressImage, encryptImage } from "@/lib/e2ee-service";
 
 function formatGroupSubtitle(
   members: Array<{ id: string; username: string; name?: string; displayName?: string; social_links?: any }>,
@@ -170,7 +165,6 @@ export default function MessagesPage() {
     isVoice?: boolean;
     isGif?: boolean;
     gifUrl?: string;
-    isImages?: boolean;
   } | null>(null);
 
   const [editingMessage, setEditingMessage] = useState<{
@@ -217,15 +211,7 @@ export default function MessagesPage() {
   const [isGifPickerOpen, setIsGifPickerOpen] = useState(false);
   const [expandedMediaUrl, setExpandedMediaUrl] = useState<string | null>(null);
   const [expandedMediaTitle, setExpandedMediaTitle] = useState<string>("GIF");
-  const [lightboxImages, setLightboxImages] = useState<Array<{ url: string; caption?: string; title?: string }>>([]);
-  const [lightboxIndex, setLightboxIndex] = useState(0);
-  const [isLightboxOpen, setIsLightboxOpen] = useState(false);
   const [lightboxMessageId, setLightboxMessageId] = useState<string | null>(null);
-
-  // --- Feature: End-to-End Encrypted Photo Sharing (WhatsApp Style) ---
-  const [stagedImages, setStagedImages] = useState<Array<{ id: string; file: File; previewUrl: string; width?: number; height?: number }>>([]);
-  const [isEncryptingImages, setIsEncryptingImages] = useState(false);
-  const imageInputRef = useRef<HTMLInputElement>(null);
   const [activeActionMsgId, setActiveActionMsgId] = useState<string | null>(null);
   const [activeReactionPickerMsgId, setActiveReactionPickerMsgId] = useState<string | null>(null);
 
@@ -1252,7 +1238,7 @@ export default function MessagesPage() {
       }
     }
     const parsed = parseMessageContent(currentContent);
-    if (parsed.type === "voice" || parsed.type === "images" || parsed.type === "gif" || parsed.type === "room_invite") return;
+    if (parsed.type === "voice" || parsed.type === "gif" || parsed.type === "room_invite") return;
     setEditingMessage({
       id: msgId,
       text: parsed.text || "",
@@ -1709,11 +1695,6 @@ export default function MessagesPage() {
     e.preventDefault();
     if (!activeConversationId || !user) return;
 
-    if (stagedImages.length > 0) {
-      await handleSendImages();
-      return;
-    }
-
     if (!inputMessage.trim()) return;
 
     if (editingMessage) {
@@ -1867,215 +1848,6 @@ export default function MessagesPage() {
       }
     } catch (err) {
       console.error("Error sending GIF message:", err);
-    }
-  };
-
-  // --- Lightbox & Image Handlers (WhatsApp Style with E2EE) ---
-  const openSingleMediaLightbox = (url: string, title: string = "Media", messageId?: string) => {
-    setLightboxImages([{ url, title }]);
-    setLightboxIndex(0);
-    setLightboxMessageId(messageId || null);
-    setIsLightboxOpen(true);
-  };
-
-  const openClusterLightbox = (
-    images: Array<{ url: string; caption?: string; title?: string }>,
-    initialIndex: number,
-    messageId?: string
-  ) => {
-    setLightboxImages(images);
-    setLightboxIndex(initialIndex);
-    setLightboxMessageId(messageId || null);
-    setIsLightboxOpen(true);
-  };
-
-  const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-
-    const newItems: Array<{ id: string; file: File; previewUrl: string }> = [];
-
-    Array.from(files).forEach((file) => {
-      if (!file.type.startsWith("image/")) {
-        alert(`"${file.name}" is not an image.`);
-        return;
-      }
-      if (file.size > 25 * 1024 * 1024) {
-        alert(`"${file.name}" exceeds the 25MB limit.`);
-        return;
-      }
-      newItems.push({
-        id: `staged-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-        file,
-        previewUrl: URL.createObjectURL(file),
-      });
-    });
-
-    if (newItems.length > 0) {
-      setStagedImages((prev) => [...prev, ...newItems]);
-    }
-
-    e.target.value = "";
-  };
-
-  const handleRemoveStagedImage = (id: string) => {
-    setStagedImages((prev) => {
-      const target = prev.find((item) => item.id === id);
-      if (target?.previewUrl) {
-        URL.revokeObjectURL(target.previewUrl);
-      }
-      return prev.filter((item) => item.id !== id);
-    });
-  };
-
-  const handleClearStagedImages = () => {
-    stagedImages.forEach((item) => {
-      if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
-    });
-    setStagedImages([]);
-  };
-
-  const handlePaste = (e: React.ClipboardEvent) => {
-    const items = e.clipboardData?.items;
-    if (!items || items.length === 0) return;
-
-    const imageFiles: File[] = [];
-    for (let i = 0; i < items.length; i++) {
-      if (items[i].type.startsWith("image/")) {
-        const file = items[i].getAsFile();
-        if (file) imageFiles.push(file);
-      }
-    }
-
-    if (imageFiles.length > 0) {
-      e.preventDefault();
-      const newItems = imageFiles.map((file) => ({
-        id: `staged-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-        file,
-        previewUrl: URL.createObjectURL(file),
-      }));
-      setStagedImages((prev) => [...prev, ...newItems]);
-    }
-  };
-
-  const handleSendImages = async () => {
-    if (!activeConversationId || !user || stagedImages.length === 0 || isEncryptingImages) return;
-
-    if (user?.isBanned) {
-      alert("Your account is currently suspended. Messaging is disabled.");
-      return;
-    }
-
-    const targetUserId = activeConversation?.other_user?.id;
-    if (targetUserId && (blockedUsers.includes(targetUserId) || blockedMeUsers.includes(targetUserId))) {
-      alert("Cannot send messages in this conversation.");
-      return;
-    }
-
-    if (activeConversation?.type !== "group" && messages.length === 0 && (!targetRelationship || !targetRelationship.isAcceptedConnection)) {
-      alert("Messaging is locked until the follow request is accepted by both users.");
-      return;
-    }
-
-    setIsEncryptingImages(true);
-    const caption = inputMessage.trim();
-    const currentReplyTo = replyingTo;
-    const currentStaged = [...stagedImages];
-
-    // Reset input fields immediately
-    setInputMessage("");
-    setReplyingTo(null);
-    setStagedImages([]);
-
-    const tempId = `temp-img-${Date.now()}`;
-    const nowIso = new Date().toISOString();
-
-    // Optimistic image cluster for instant local viewing
-    const optimisticImages: ChatImageItem[] = currentStaged.map((staged) => ({
-      id: staged.id,
-      url: staged.previewUrl,
-    }));
-
-    const optimisticContent = serializeImagesMessage(optimisticImages, caption, currentReplyTo);
-
-    const optimisticMsg = {
-      id: tempId,
-      conversation_id: activeConversationId,
-      sender_id: user.id,
-      content: optimisticContent,
-      created_at: nowIso,
-      profiles: {
-        username: user.username,
-        avatar: user.avatar,
-        social_links: { display_name: user.name || user.displayName },
-      },
-    };
-
-    setMessages((prev) => [...prev, optimisticMsg]);
-
-    try {
-      // Compress and Encrypt each image on client using Web Crypto AES-256-GCM
-      const encryptedItems: ChatImageItem[] = await Promise.all(
-        currentStaged.map(async (staged) => {
-          const compressed = await compressImage(staged.file, 1600, 0.82);
-          const encrypted = await encryptImage(
-            compressed.blob,
-            activeConversationId,
-            compressed.width,
-            compressed.height
-          );
-          return {
-            id: staged.id,
-            ciphertext: encrypted.ciphertext,
-            iv: encrypted.iv,
-            mimeType: encrypted.mimeType,
-            width: encrypted.width,
-            height: encrypted.height,
-          };
-        })
-      );
-
-      const serializedContent = serializeImagesMessage(encryptedItems, caption, currentReplyTo);
-
-      const { data, error } = await supabase
-        .from("messages")
-        .insert({
-          conversation_id: activeConversationId,
-          sender_id: user.id,
-          content: serializedContent,
-        })
-        .select(`
-          id,
-          content,
-          created_at,
-          sender_id,
-          profiles (
-            username,
-            avatar,
-            social_links
-          )
-        `)
-        .single();
-
-      if (!error && data) {
-        const profile = Array.isArray(data.profiles) ? data.profiles[0] : data.profiles;
-        setMessages((prev) =>
-          prev.map((m) => (m.id === tempId ? { ...data, profiles: profile } : m))
-        );
-
-        await supabase
-          .from("conversations")
-          .update({ last_message_at: nowIso })
-          .eq("id", activeConversationId);
-
-        markAsRead(activeConversationId);
-      }
-    } catch (err) {
-      console.error("Error compressing/encrypting and sending images:", err);
-      alert("Failed to send encrypted images. Please try again.");
-      setMessages((prev) => prev.filter((m) => m.id !== tempId));
-    } finally {
-      setIsEncryptingImages(false);
     }
   };
 
@@ -2869,15 +2641,12 @@ export default function MessagesPage() {
                                       ? "Voice Note"
                                       : parsed.type === "gif"
                                       ? "GIF"
-                                      : parsed.type === "images"
-                                      ? `📷 Photo${(parsed.images?.length || 1) > 1 ? `s (${parsed.images?.length})` : ""}`
                                       : parsed.type === "room_invite"
                                       ? "Voice Hangout Invite"
                                       : parsed.text || "",
                                     isVoice: parsed.type === "voice",
                                     isGif: parsed.type === "gif",
                                     gifUrl: parsed.gifUrl,
-                                    isImages: parsed.type === "images",
                                   });
                                 }}
                                 className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
@@ -2887,7 +2656,7 @@ export default function MessagesPage() {
                                 <Reply size={13} />
                               </button>
 
-                              {parsed.type !== "voice" && parsed.type !== "room_invite" && parsed.type !== "gif" && parsed.type !== "images" && (() => {
+                              {parsed.type !== "voice" && parsed.type !== "room_invite" && parsed.type !== "gif" && (() => {
                                 const ageMs = Date.now() - new Date(msg.created_at).getTime();
                                 const isWithin5Minutes = ageMs <= 5 * 60 * 1000;
                                 if (!isWithin5Minutes) return null;
@@ -2960,7 +2729,6 @@ export default function MessagesPage() {
                             {/* Message Bubble Container */}
                             {(() => {
                               const isGif = parsed.type === "gif" && !!parsed.gifUrl;
-                              const isImages = parsed.type === "images" && Boolean(parsed.images && parsed.images.length > 0);
                               const msgTime = new Date(msg.created_at).getTime();
                               const otherReadTime = otherUserLastReadAt ? new Date(otherUserLastReadAt).getTime() : 0;
                               const effectiveOtherReadTime = Math.max(otherReadTime, otherUserLatestMsgTime);
@@ -2970,7 +2738,7 @@ export default function MessagesPage() {
                                 <div 
                                   onClick={() => setActiveActionMsgId(prev => prev === msg.id ? null : msg.id)}
                                   className={`w-fit rounded-2xl shadow-md break-words min-w-[64px] max-w-full overflow-hidden cursor-pointer transition-all ${
-                                    isGif || isImages
+                                    isGif
                                       ? isMe
                                         ? 'p-1 bg-gradient-to-r from-indigo-600 to-indigo-500 text-white rounded-tr-xs'
                                         : 'p-1 bg-[#1e202c] text-slate-100 border border-white/5 rounded-tl-xs backdrop-blur-sm'
@@ -3009,85 +2777,13 @@ export default function MessagesPage() {
                                         <span className="truncate">{parsed.replyTo.sender}</span>
                                       </div>
                                       <p className="line-clamp-2 text-[11px] opacity-80 break-words w-full overflow-hidden text-ellipsis">
-                                        {parsed.replyTo.isVoice ? "🎵 Voice Note" : parsed.replyTo.isGif ? "🖼️ GIF" : parsed.replyTo.isImages ? "📷 Photo" : parsed.replyTo.text}
+                                        {parsed.replyTo.isVoice ? "🎵 Voice Note" : parsed.replyTo.isGif ? "🖼️ GIF" : parsed.replyTo.text}
                                       </p>
                                     </div>
                                   )}
 
-                                  {/* WhatsApp E2EE Image Cluster, Room Invite, Voice Note, GIF, or Text */}
-                                  {isImages ? (
-                                    <WhatsAppImageCluster
-                                      images={parsed.images!}
-                                      conversationId={activeConversationId}
-                                      caption={parsed.text}
-                                      isMe={isMe}
-                                      onOpenLightbox={(imgs, idx) => openClusterLightbox(imgs, idx, msg.id)}
-                                      onOpenReactionPicker={() => setActiveReactionPickerMsgId((prev) => prev === msg.id ? null : msg.id)}
-                                      onToggleReaction={(emoji) => handleToggleReaction(msg.id, emoji)}
-                                      timestamp={new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                                      readStatusNode={
-                                        <>
-                                          {isMe && activeConversation?.type !== "group" && (
-                                            <span className="inline-flex items-center gap-0.5 ml-0.5">
-                                              {isMsgSeen ? (
-                                                <span className="text-sky-400 font-bold flex items-center" title="Seen">
-                                                  <CheckCheck size={12} className="stroke-[2.5]" />
-                                                </span>
-                                              ) : isMsgDelivered ? (
-                                                <span className="text-indigo-200/80 flex items-center" title="Delivered">
-                                                  <CheckCheck size={12} className="stroke-[1.8]" />
-                                                </span>
-                                              ) : (
-                                                <span className="text-indigo-200/60 flex items-center" title="Sent">
-                                                  <Check size={11} className="stroke-[2]" />
-                                                </span>
-                                              )}
-                                            </span>
-                                          )}
-                                          {isMe && activeConversation?.type === "group" && (() => {
-                                            const otherMembers = activeGroupMembers.filter((m) => m.id !== user.id);
-                                            const totalRecipients = otherMembers.length;
-                                            if (totalRecipients === 0) return null;
-                                            const readCount = otherMembers.filter((m) => isMemberRead(m.id, msgTime)).length;
-                                            const isAllSeen = readCount === totalRecipients;
-
-                                            return (
-                                              <span
-                                                onClick={(e) => {
-                                                  e.stopPropagation();
-                                                  setMessageInfoTarget({ message: msg, parsedMessage: parsed });
-                                                }}
-                                                className={`inline-flex items-center gap-1 ml-1 px-1.5 py-0.5 rounded cursor-pointer pointer-events-auto hover:opacity-90 transition-all font-semibold ${
-                                                  isAllSeen
-                                                    ? "text-sky-400"
-                                                    : readCount > 0
-                                                    ? "text-sky-300"
-                                                    : "text-slate-300"
-                                                }`}
-                                                title="Click to view message info"
-                                              >
-                                                {isAllSeen ? (
-                                                  <>
-                                                    <CheckCheck size={11} className="stroke-[2.5] text-sky-400" />
-                                                    <span>All</span>
-                                                  </>
-                                                ) : readCount > 0 ? (
-                                                  <>
-                                                    <CheckCheck size={11} className="stroke-[2] text-sky-400" />
-                                                    <span>{readCount}/{totalRecipients}</span>
-                                                  </>
-                                                ) : (
-                                                  <>
-                                                    <Check size={10} className="stroke-[2]" />
-                                                  </>
-                                                )}
-                                              </span>
-                                            );
-                                          })()}
-                                        </>
-                                      }
-                                    />
-                                  ) : parsed.type === "room_invite" && parsed.roomInvite ? (
+                                  {/* Room Invite, Voice Note, GIF, or Text */}
+                                  {parsed.type === "room_invite" && parsed.roomInvite ? (
                                     <RoomInviteCard invite={parsed.roomInvite} isMe={isMe} />
                                   ) : parsed.type === "voice" ? (
                                     <VoiceNotePlayer
@@ -3387,15 +3083,12 @@ export default function MessagesPage() {
                                       ? "Voice Note"
                                       : parsed.type === "gif"
                                       ? "GIF"
-                                      : parsed.type === "images"
-                                      ? `📷 Photo${(parsed.images?.length || 1) > 1 ? `s (${parsed.images?.length})` : ""}`
                                       : parsed.type === "room_invite"
                                       ? "Voice Hangout Invite"
                                       : parsed.text || "",
                                     isVoice: parsed.type === "voice",
                                     isGif: parsed.type === "gif",
                                     gifUrl: parsed.gifUrl,
-                                    isImages: parsed.type === "images",
                                   });
                                 }}
                                 className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 active:scale-95 transition-all cursor-pointer"
@@ -3633,78 +3326,12 @@ export default function MessagesPage() {
                     className="relative p-2 sm:p-4 border-t border-white/5 bg-[#090A0F]/95 backdrop-blur-xl shrink-0 w-full z-20"
                     style={{ paddingBottom: "max(0.65rem, env(safe-area-inset-bottom, 0px))" }}
                   >
-                    {/* Hidden E2EE Image File Input */}
-                    <input
-                      ref={imageInputRef}
-                      type="file"
-                      multiple
-                      accept="image/*"
-                      onChange={handleImageSelect}
-                      className="hidden"
-                    />
-
                     {/* GIF Picker Popover / Mobile Drawer */}
                     <GifPicker
                       isOpen={isGifPickerOpen}
                       onClose={() => setIsGifPickerOpen(false)}
                       onSelectGif={handleSendGif}
                     />
-
-                    {/* Staged Images Preview Tray (WhatsApp Style) */}
-                    {stagedImages.length > 0 && (
-                      <div className="mb-2 p-2.5 rounded-2xl bg-[#12131D]/95 border border-white/10 backdrop-blur-xl animate-in fade-in slide-in-from-bottom-2 duration-150">
-                        <div className="flex items-center justify-between pb-2 mb-2 border-b border-white/5 text-xs">
-                          <div className="flex items-center gap-1.5 text-slate-300 font-semibold">
-                            <ImageIcon size={14} className="text-indigo-400" />
-                            <span>{stagedImages.length} photo{stagedImages.length > 1 ? "s" : ""} staged</span>
-                            <span className="flex items-center gap-1 text-[10px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full font-medium ml-1">
-                              <Lock size={9} />
-                              <span>End-to-End Encrypted</span>
-                            </span>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={handleClearStagedImages}
-                            className="text-[11px] text-slate-400 hover:text-rose-400 transition-colors cursor-pointer"
-                          >
-                            Clear all
-                          </button>
-                        </div>
-
-                        <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-0.5">
-                          {stagedImages.map((staged, idx) => (
-                            <div
-                              key={staged.id}
-                              className="relative w-16 h-16 sm:w-20 sm:h-20 rounded-xl overflow-hidden shrink-0 border border-white/10 group shadow-md"
-                            >
-                              <img src={staged.previewUrl} alt="" className="w-full h-full object-cover" />
-                              <button
-                                type="button"
-                                onClick={() => handleRemoveStagedImage(staged.id)}
-                                className="absolute top-1 right-1 p-1 rounded-full bg-black/70 hover:bg-rose-600 text-white transition-colors cursor-pointer shadow-md"
-                                title="Remove photo"
-                              >
-                                <X size={11} />
-                              </button>
-                              <span className="absolute bottom-1 left-1 px-1 py-0.2 rounded bg-black/60 text-[9px] text-white/80 font-mono">
-                                #{idx + 1}
-                              </span>
-                            </div>
-                          ))}
-
-                          {/* Add more photos button */}
-                          <button
-                            type="button"
-                            onClick={() => imageInputRef.current?.click()}
-                            className="w-16 h-16 sm:w-20 sm:h-20 rounded-xl border-2 border-dashed border-white/20 hover:border-indigo-400/60 bg-white/[0.02] hover:bg-white/5 flex flex-col items-center justify-center gap-1 text-slate-400 hover:text-white transition-all shrink-0 cursor-pointer"
-                            title="Add more photos"
-                          >
-                            <Plus size={18} className="text-indigo-400" />
-                            <span className="text-[10px] font-semibold">Add</span>
-                          </button>
-                        </div>
-                      </div>
-                    )}
 
                     {/* Replying Banner */}
                     {replyingTo && (
@@ -3714,7 +3341,7 @@ export default function MessagesPage() {
                           <div className="min-w-0">
                             <span className="font-semibold text-indigo-300">Replying to {replyingTo.sender}: </span>
                             <span className="text-slate-300 truncate inline-block max-w-[180px] sm:max-w-md align-bottom">
-                              {replyingTo.isVoice ? "🎵 Voice Note" : replyingTo.isGif ? "🖼️ GIF" : replyingTo.isImages ? "📷 Photo" : replyingTo.text}
+                              {replyingTo.isVoice ? "🎵 Voice Note" : replyingTo.isGif ? "🖼️ GIF" : replyingTo.text}
                             </span>
                           </div>
                         </div>
@@ -3787,28 +3414,8 @@ export default function MessagesPage() {
                         {/* Unified WhatsApp-style Message Input Capsule */}
                         <div className="relative flex-1 flex items-center min-w-0 bg-[#12131D]/90 hover:bg-[#151724] focus-within:bg-[#151724] border border-white/10 focus-within:border-indigo-500/50 focus-within:ring-2 focus-within:ring-indigo-500/20 rounded-full pl-1.5 pr-2 sm:pl-2 sm:pr-3 py-1 sm:py-1.5 transition-all shadow-inner">
                           
-                          {/* Media Buttons: Photos & GIF */}
+                          {/* Media Button: GIF */}
                           <div className="flex items-center gap-1 shrink-0">
-                            {/* Attach Photos Button (E2EE) */}
-                            <button
-                              type="button"
-                              onClick={() => imageInputRef.current?.click()}
-                              className={`relative w-8 h-8 sm:w-8.5 sm:h-8.5 flex items-center justify-center rounded-full transition-all cursor-pointer ${
-                                stagedImages.length > 0
-                                  ? "bg-indigo-600 text-white shadow-sm shadow-indigo-600/40 ring-1 ring-indigo-400/50"
-                                  : "text-slate-400 hover:text-white hover:bg-white/10 active:scale-95"
-                              }`}
-                              title="Attach photos (End-to-End Encrypted)"
-                              aria-label="Attach photos"
-                            >
-                              <ImageIcon size={18} />
-                              {stagedImages.length > 0 && (
-                                <span className="absolute -top-0.5 -right-0.5 w-4 h-4 rounded-full bg-emerald-500 text-[9px] font-bold text-white flex items-center justify-center border border-[#12131D] shadow-sm">
-                                  {stagedImages.length}
-                                </span>
-                              )}
-                            </button>
-
                             {/* Sleek GIF Badge Button */}
                             <button
                               type="button"
@@ -3834,14 +3441,7 @@ export default function MessagesPage() {
                             type="text"
                             value={inputMessage}
                             onChange={handleInputChange}
-                            onPaste={handlePaste}
-                            placeholder={
-                              stagedImages.length > 0
-                                ? "Add a caption..."
-                                : editingMessage
-                                ? "Edit message..."
-                                : "Type a message..."
-                            }
+                            placeholder={editingMessage ? "Edit message..." : "Type a message..."}
                             className="flex-1 bg-transparent border-0 text-white placeholder:text-slate-500 text-sm sm:text-[14.5px] px-2 py-1.5 focus:outline-none focus:ring-0 min-w-0"
                           />
 
@@ -3860,7 +3460,7 @@ export default function MessagesPage() {
 
                         {/* Floating Action Button (FAB) on the Right: Voice Note or Send */}
                         <div className="shrink-0">
-                          {!inputMessage.trim() && !editingMessage && stagedImages.length === 0 ? (
+                          {!inputMessage.trim() && !editingMessage ? (
                             <button
                               type="button"
                               onClick={startVoiceRecording}
@@ -3873,26 +3473,11 @@ export default function MessagesPage() {
                           ) : (
                             <button
                               type="submit"
-                              disabled={isEncryptingImages}
-                              className={`flex items-center justify-center rounded-full bg-gradient-to-tr from-indigo-600 via-indigo-500 to-violet-500 hover:from-indigo-500 hover:to-violet-400 active:scale-95 text-white transition-all shadow-lg shadow-indigo-600/35 cursor-pointer animate-in zoom-in-75 duration-150 ${
-                                stagedImages.length > 0
-                                  ? "px-3.5 h-10 sm:h-11 gap-1.5 font-bold text-xs"
-                                  : "w-10 h-10 sm:w-11 sm:h-11"
-                              }`}
+                              className="w-10 h-10 sm:w-11 sm:h-11 flex items-center justify-center rounded-full bg-gradient-to-tr from-indigo-600 via-indigo-500 to-violet-500 hover:from-indigo-500 hover:to-violet-400 active:scale-95 text-white transition-all shadow-lg shadow-indigo-600/35 cursor-pointer animate-in zoom-in-75 duration-150"
                               aria-label={editingMessage ? "Save Edit" : "Send Message"}
-                              title={editingMessage ? "Save Edit" : stagedImages.length > 0 ? "Send Encrypted Photos" : "Send Message"}
+                              title={editingMessage ? "Save Edit" : "Send Message"}
                             >
-                              {isEncryptingImages ? (
-                                <>
-                                  <Loader2 size={16} className="animate-spin" />
-                                  <span className="hidden xs:inline text-xs font-semibold">Encrypting...</span>
-                                </>
-                              ) : stagedImages.length > 0 ? (
-                                <>
-                                  <Send size={14} />
-                                  <span>Send ({stagedImages.length})</span>
-                                </>
-                              ) : editingMessage ? (
+                              {editingMessage ? (
                                 <Check size={18} className="stroke-[2.5]" />
                               ) : (
                                 <Send size={17} className="translate-x-[1px]" />
@@ -4230,26 +3815,8 @@ export default function MessagesPage() {
         />
       )}
 
-      {/* Fullscreen Media Lightbox for GIFs and Photos */}
-      {isLightboxOpen && (
-        <MediaLightbox
-          images={lightboxImages}
-          initialIndex={lightboxIndex}
-          onClose={() => {
-            setIsLightboxOpen(false);
-            setLightboxImages([]);
-            setLightboxMessageId(null);
-          }}
-          onToggleReaction={lightboxMessageId ? (emoji) => handleToggleReaction(lightboxMessageId, emoji) : undefined}
-          reactions={
-            lightboxMessageId
-              ? parseMessageContent(messages.find((m) => m.id === lightboxMessageId)?.content || "").reactions
-              : undefined
-          }
-          currentUserId={user?.id}
-        />
-      )}
-      {expandedMediaUrl && !isLightboxOpen && (
+      {/* Fullscreen Media Lightbox for GIFs */}
+      {expandedMediaUrl && (
         <MediaLightbox
           mediaUrl={expandedMediaUrl}
           onClose={() => {
