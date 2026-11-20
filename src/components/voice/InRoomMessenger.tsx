@@ -44,6 +44,8 @@ import {
   toggleReactionInContent,
 } from "@/lib/chat-utils";
 import { socialService, RelationshipStatus } from "@/lib/social-service";
+import { detectSafetyConcern, hasBlockedMaliciousLink } from "@/lib/safety-utils";
+import { SafetyComposerNudge, SafeMessageText } from "@/components/safety/SafetyNudges";
 
 interface DirectMessage {
   id: string;
@@ -110,6 +112,14 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
 
   const [messages, setMessages] = useState<DirectMessage[]>([]);
   const [inputMessage, setInputMessage] = useState("");
+  const [dismissedSafetyKind, setDismissedSafetyKind] = useState<string | null>(null);
+  const inRoomDMSafety = React.useMemo(
+    () => detectSafetyConcern(inputMessage, "dm"),
+    [inputMessage]
+  );
+  useEffect(() => {
+    if (!inRoomDMSafety) setDismissedSafetyKind(null);
+  }, [inRoomDMSafety]);
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isSending, setIsSending] = useState(false);
@@ -152,7 +162,7 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
       try {
         const stored = localStorage.getItem(storageKey);
         if (stored) localMap = JSON.parse(stored);
-      } catch {}
+      } catch { }
     }
     setClearedChatsMap(localMap);
 
@@ -170,10 +180,10 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
         if (typeof window !== "undefined") {
           try {
             localStorage.setItem(storageKey, JSON.stringify(merged));
-          } catch {}
+          } catch { }
         }
       })
-      .catch(() => {});
+      .catch(() => { });
   }, [user?.id]);
 
   // Load nicknames and block lists
@@ -186,7 +196,7 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
       try {
         const saved = localStorage.getItem(`yapclub_nicknames_${user.id}`);
         if (saved) localMap = JSON.parse(saved);
-      } catch (e) {}
+      } catch (e) { }
 
       setNicknames(localMap);
 
@@ -199,14 +209,14 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
           const merged = { ...cloudMap, ...localMap };
           setNicknames(merged);
         }
-      } catch (e) {}
+      } catch (e) { }
 
       // 2. Block lists
       try {
         const { blockedByMeIds, blockedMeIds } = await socialService.getBlockLists(user.id);
         setBlockedUsers(blockedByMeIds);
         setBlockedMeUsers(blockedMeIds);
-      } catch (e) {}
+      } catch (e) { }
     };
 
     loadNicknamesAndBlocks();
@@ -224,7 +234,7 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
         const { blockedByMeIds, blockedMeIds } = await socialService.getBlockLists(user.id);
         setBlockedUsers(blockedByMeIds);
         setBlockedMeUsers(blockedMeIds);
-      } catch (e) {}
+      } catch (e) { }
     };
     window.addEventListener("yapclub_social_updated", handleSocialUpdated);
 
@@ -772,7 +782,7 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
     if (typeof window !== "undefined") {
       try {
         localStorage.setItem(`yapclub_cleared_chats_${user.id}`, JSON.stringify(updatedMap));
-      } catch {}
+      } catch { }
     }
 
     Promise.resolve(
@@ -791,7 +801,7 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
           .update({ social_links: { ...links, cleared_chats_map: remoteMap } })
           .eq("id", user.id);
       })
-      .catch(() => {});
+      .catch(() => { });
 
     setShowClearConfirm(false);
     setIsHeaderMenuOpen(false);
@@ -842,6 +852,7 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
     }
 
     if (!inputMessage.trim() || !activeConversationId || !user?.id || isSending) return;
+    if (hasBlockedMaliciousLink(inputMessage)) return;
 
     // Platform ban guard
     if (user.isBanned) {
@@ -1053,8 +1064,8 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
   const activePartnerName = isGroupChat
     ? activeConversation?.name || "Group Chat"
     : activePartner
-    ? nicknames[activePartner.id] || activePartnerShownName
-    : "Direct Message";
+      ? nicknames[activePartner.id] || activePartnerShownName
+      : "Direct Message";
 
   const isBlocked = partnerId ? blockedUsers.includes(partnerId) : false;
   const isBlockedByOther = partnerId ? blockedMeUsers.includes(partnerId) : false;
@@ -1069,11 +1080,10 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
 
   return (
     <div
-      className={`fixed z-50 transition-all duration-300 ease-out shadow-2xl backdrop-blur-2xl border border-white/10 bg-[#0B0C15]/95 overflow-hidden flex flex-col ${
-        isMinimized
-          ? "bottom-20 right-3.5 sm:right-6 w-auto sm:min-w-[280px] h-14 rounded-2xl bg-[#0F101C]/95 border-white/15 px-3 py-2"
-          : "inset-x-3 bottom-20 top-14 sm:inset-auto sm:bottom-20 sm:right-6 sm:w-[400px] sm:h-[530px] rounded-3xl"
-      }`}
+      className={`fixed z-50 transition-all duration-300 ease-out shadow-2xl backdrop-blur-2xl border border-white/10 bg-[#0B0C15]/95 overflow-hidden flex flex-col ${isMinimized
+        ? "bottom-20 right-3.5 sm:right-6 w-auto sm:min-w-[280px] h-14 rounded-2xl bg-[#0F101C]/95 border-white/15 px-3 py-2"
+        : "inset-x-3 bottom-20 top-14 sm:inset-auto sm:bottom-20 sm:right-6 sm:w-[400px] sm:h-[530px] rounded-3xl"
+        }`}
     >
       {/* Header */}
       <div className="px-4 py-3 border-b border-white/[0.08] bg-black/40 backdrop-blur-md flex items-center justify-between shrink-0 select-none">
@@ -1267,8 +1277,8 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
                     const name = isGroup
                       ? c.name || "Group Chat"
                       : c.other_user
-                      ? nicknames[c.other_user.id] || dName || c.other_user.username
-                      : c.name || "Chat";
+                        ? nicknames[c.other_user.id] || dName || c.other_user.username
+                        : c.name || "Chat";
                     const unread = unreadByConversation[c.id] || 0;
 
                     return (
@@ -1303,9 +1313,9 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
                             <p className="text-[10px] text-slate-400 truncate mt-0.5">
                               {c.last_message_at && new Date(c.last_message_at).getTime() > 0
                                 ? new Date(c.last_message_at).toLocaleDateString([], {
-                                    month: "short",
-                                    day: "numeric",
-                                  })
+                                  month: "short",
+                                  day: "numeric",
+                                })
                                 : "Active chat"}
                             </p>
                           </div>
@@ -1384,11 +1394,10 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
 
                           {/* Snug Message Bubble */}
                           <div
-                            className={`w-fit min-w-[64px] max-w-[85%] sm:max-w-[78%] px-3 py-1.5 sm:px-3.5 sm:py-2 rounded-2xl text-[13px] leading-relaxed break-words shadow-sm ${
-                              isMe
-                                ? `bg-gradient-to-r from-indigo-600 to-indigo-500 text-white ${isFirstInCluster ? "rounded-br-xs" : ""} shadow-indigo-950/30`
-                                : `bg-[#181926] text-slate-100 ${isFirstInCluster ? "rounded-bl-xs" : ""} border border-white/[0.08]`
-                            }`}
+                            className={`w-fit min-w-[64px] max-w-[85%] sm:max-w-[78%] px-3 py-1.5 sm:px-3.5 sm:py-2 rounded-2xl text-[13px] leading-relaxed break-words shadow-sm ${isMe
+                              ? `bg-gradient-to-r from-indigo-600 to-indigo-500 text-white ${isFirstInCluster ? "rounded-br-xs" : ""} shadow-indigo-950/30`
+                              : `bg-[#181926] text-slate-100 ${isFirstInCluster ? "rounded-bl-xs" : ""} border border-white/[0.08]`
+                              }`}
                           >
                             {/* WhatsApp-Style Sender Name inside the bubble on first message in cluster */}
                             {!isMe && isGroupChat && isFirstInCluster && (
@@ -1410,46 +1419,137 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
                               </div>
                             )}
 
-                          {parsed.type === "room_invite" && parsed.roomInvite ? (
-                            <RoomInviteCard invite={parsed.roomInvite} isMe={isMe} />
-                          ) : parsed.type === "voice" ? (
-                            <VoiceNotePlayer audioUrl={parsed.audioUrl || ""} duration={parsed.duration} isMe={isMe} />
-                          ) : parsed.type === "gif" && parsed.gifUrl ? (
-                            <div className="relative rounded-xl overflow-hidden max-w-[240px] bg-black/40 group/gif my-1">
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setActiveReactionPickerMsgId((prev) => (prev === m.id ? null : m.id));
-                                }}
-                                className="absolute top-1.5 right-1.5 z-20 p-1.5 rounded-full bg-black/60 hover:bg-black/85 text-white/80 hover:text-amber-300 border border-white/15 backdrop-blur-md transition-all active:scale-95 cursor-pointer shadow-lg flex items-center justify-center opacity-85 hover:opacity-100"
-                                title="React to GIF"
-                              >
-                                <Smile size={13} />
-                              </button>
-                              <img
-                                src={parsed.gifUrl}
-                                alt={parsed.gifTitle || "GIF"}
-                                className="w-full h-auto max-h-[180px] object-cover rounded-xl cursor-pointer hover:opacity-95 transition-opacity"
-                                onClick={() => {
-                                  setExpandedMediaUrl(parsed.gifUrl!);
-                                  setExpandedMediaTitle(parsed.gifTitle || "GIF");
-                                  setLightboxMessageId(m.id);
-                                }}
-                              />
-                              <div className="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded-md bg-black/70 backdrop-blur-md text-[9px] font-black text-white/90 border border-white/10 pointer-events-none tracking-wider">
-                                GIF
+                            {parsed.type === "room_invite" && parsed.roomInvite ? (
+                              <RoomInviteCard invite={parsed.roomInvite} isMe={isMe} />
+                            ) : parsed.type === "voice" ? (
+                              <VoiceNotePlayer audioUrl={parsed.audioUrl || ""} duration={parsed.duration} isMe={isMe} />
+                            ) : parsed.type === "gif" && parsed.gifUrl ? (
+                              <div className="relative rounded-xl overflow-hidden max-w-[240px] bg-black/40 group/gif my-1">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setActiveReactionPickerMsgId((prev) => (prev === m.id ? null : m.id));
+                                  }}
+                                  className="absolute top-1.5 right-1.5 z-20 p-1.5 rounded-full bg-black/60 hover:bg-black/85 text-white/80 hover:text-amber-300 border border-white/15 backdrop-blur-md transition-all active:scale-95 cursor-pointer shadow-lg flex items-center justify-center opacity-85 hover:opacity-100"
+                                  title="React to GIF"
+                                >
+                                  <Smile size={13} />
+                                </button>
+                                <img
+                                  src={parsed.gifUrl}
+                                  alt={parsed.gifTitle || "GIF"}
+                                  className="w-full h-auto max-h-[180px] object-cover rounded-xl cursor-pointer hover:opacity-95 transition-opacity"
+                                  onClick={() => {
+                                    setExpandedMediaUrl(parsed.gifUrl!);
+                                    setExpandedMediaTitle(parsed.gifTitle || "GIF");
+                                    setLightboxMessageId(m.id);
+                                  }}
+                                />
+                                <div className="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded-md bg-black/70 backdrop-blur-md text-[9px] font-black text-white/90 border border-white/10 pointer-events-none tracking-wider">
+                                  GIF
+                                </div>
                               </div>
-                            </div>
-                          ) : (
-                            <div className="flex flex-wrap items-end justify-between gap-x-2 gap-y-0.5">
-                              <p className="whitespace-pre-wrap select-text break-words min-w-0 text-[13px] leading-relaxed">
-                                {parsed.text}
-                              </p>
+                            ) : (
+                              <div className="flex flex-wrap items-end justify-between gap-x-2 gap-y-0.5">
+                                <p className="whitespace-pre-wrap select-text break-words min-w-0 text-[13px] leading-relaxed">
+                                  <SafeMessageText text={parsed.text || ""} isMe={isMe} />
+                                </p>
+                                <div
+                                  className={`flex items-center gap-1 select-none shrink-0 ml-auto pb-0.5 text-[9px] font-mono ${isMe ? "text-indigo-200/70" : "text-slate-400/80"
+                                    }`}
+                                >
+                                  {parsed.isEdited && <span className="italic opacity-80">(edited)</span>}
+                                  <span>
+                                    {new Date(m.created_at).toLocaleTimeString([], {
+                                      hour: "2-digit",
+                                      minute: "2-digit",
+                                    })}
+                                  </span>
+
+                                  {/* 5-Minute Message Edit Action Button */}
+                                  {isMe && parsed.type === "text" && (Date.now() - new Date(m.created_at).getTime() <= 5 * 60 * 1000) && (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setEditingMessage({ id: m.id, text: parsed.text || "", createdAt: m.created_at });
+                                        setInputMessage(parsed.text || "");
+                                      }}
+                                      className="p-0.5 hover:text-white text-indigo-200/80 transition-colors cursor-pointer"
+                                      title="Edit message (within 5 min)"
+                                    >
+                                      <Edit3 size={10} />
+                                    </button>
+                                  )}
+
+                                  {/* Smile React Button */}
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setActiveReactionPickerMsgId((prev) => (prev === m.id ? null : m.id));
+                                    }}
+                                    className="p-0.5 hover:text-amber-300 opacity-60 hover:opacity-100 transition-opacity cursor-pointer"
+                                    title="Add reaction"
+                                  >
+                                    <Smile size={10} />
+                                  </button>
+
+                                  {/* Sent / Seen ticks for 1-on-1 chats */}
+                                  {isMe && !isGroupChat && (
+                                    <span
+                                      className="inline-flex items-center gap-0.5 ml-0.5"
+                                      title={partnerLastReadAt && new Date(partnerLastReadAt).getTime() >= new Date(m.created_at).getTime() ? "Seen" : "Delivered"}
+                                    >
+                                      {partnerLastReadAt && new Date(partnerLastReadAt).getTime() >= new Date(m.created_at).getTime() ? (
+                                        <CheckCheck size={11} className="stroke-[2.5] text-sky-400" />
+                                      ) : (
+                                        <CheckCheck size={11} className="stroke-[1.8] text-indigo-200/70" />
+                                      )}
+                                    </span>
+                                  )}
+
+                                  {/* Group chat seen status */}
+                                  {isMe && isGroupChat && (() => {
+                                    const otherMembers = Object.entries(groupMembersMap).filter(([uid]) => uid !== user?.id);
+                                    const total = otherMembers.length;
+                                    if (total === 0) return null;
+                                    const msgTime = new Date(m.created_at).getTime();
+                                    const readCount = otherMembers.filter(([, member]) => member.lastReadAt && new Date(member.lastReadAt).getTime() >= msgTime).length;
+                                    const isAll = readCount === total;
+
+                                    return (
+                                      <span
+                                        className={`inline-flex items-center gap-0.5 ml-1 text-[9px] font-semibold ${isAll ? "text-sky-400" : readCount > 0 ? "text-sky-300" : "text-indigo-200/60"
+                                          }`}
+                                        title={isAll ? "Seen by all" : readCount > 0 ? `Seen by ${readCount}/${total}` : "Delivered"}
+                                      >
+                                        {isAll ? (
+                                          <>
+                                            <CheckCheck size={11} className="stroke-[2.5]" />
+                                            <span>all</span>
+                                          </>
+                                        ) : readCount > 0 ? (
+                                          <>
+                                            <CheckCheck size={11} className="stroke-[2]" />
+                                            <span>{readCount}</span>
+                                          </>
+                                        ) : (
+                                          <Check size={10} className="stroke-[2]" />
+                                        )}
+                                      </span>
+                                    );
+                                  })()}
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Bubble timestamp for Voice & Invites */}
+                            {(parsed.type === "voice" || parsed.type === "room_invite") && (
                               <div
-                                className={`flex items-center gap-1 select-none shrink-0 ml-auto pb-0.5 text-[9px] font-mono ${
-                                  isMe ? "text-indigo-200/70" : "text-slate-400/80"
-                                }`}
+                                className={`flex items-center justify-end gap-1 mt-1 text-[9px] font-mono select-none ${isMe ? "text-indigo-200/70" : "text-slate-400/80"
+                                  }`}
                               >
                                 {parsed.isEdited && <span className="italic opacity-80">(edited)</span>}
                                 <span>
@@ -1458,128 +1558,34 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
                                     minute: "2-digit",
                                   })}
                                 </span>
-
-                                {/* 5-Minute Message Edit Action Button */}
-                                {isMe && parsed.type === "text" && (Date.now() - new Date(m.created_at).getTime() <= 5 * 60 * 1000) && (
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      setEditingMessage({ id: m.id, text: parsed.text || "", createdAt: m.created_at });
-                                      setInputMessage(parsed.text || "");
-                                    }}
-                                    className="p-0.5 hover:text-white text-indigo-200/80 transition-colors cursor-pointer"
-                                    title="Edit message (within 5 min)"
-                                  >
-                                    <Edit3 size={10} />
-                                  </button>
-                                )}
-
-                                {/* Smile React Button */}
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setActiveReactionPickerMsgId((prev) => (prev === m.id ? null : m.id));
-                                  }}
-                                  className="p-0.5 hover:text-amber-300 opacity-60 hover:opacity-100 transition-opacity cursor-pointer"
-                                  title="Add reaction"
-                                >
-                                  <Smile size={10} />
-                                </button>
-
-                                {/* Sent / Seen ticks for 1-on-1 chats */}
-                                {isMe && !isGroupChat && (
-                                  <span 
-                                    className="inline-flex items-center gap-0.5 ml-0.5"
-                                    title={partnerLastReadAt && new Date(partnerLastReadAt).getTime() >= new Date(m.created_at).getTime() ? "Seen" : "Delivered"}
-                                  >
-                                    {partnerLastReadAt && new Date(partnerLastReadAt).getTime() >= new Date(m.created_at).getTime() ? (
-                                      <CheckCheck size={11} className="stroke-[2.5] text-sky-400" />
-                                    ) : (
-                                      <CheckCheck size={11} className="stroke-[1.8] text-indigo-200/70" />
-                                    )}
-                                  </span>
-                                )}
-
-                                {/* Group chat seen status */}
-                                {isMe && isGroupChat && (() => {
-                                  const otherMembers = Object.entries(groupMembersMap).filter(([uid]) => uid !== user?.id);
-                                  const total = otherMembers.length;
-                                  if (total === 0) return null;
-                                  const msgTime = new Date(m.created_at).getTime();
-                                  const readCount = otherMembers.filter(([, member]) => member.lastReadAt && new Date(member.lastReadAt).getTime() >= msgTime).length;
-                                  const isAll = readCount === total;
-
-                                  return (
-                                    <span
-                                      className={`inline-flex items-center gap-0.5 ml-1 text-[9px] font-semibold ${
-                                        isAll ? "text-sky-400" : readCount > 0 ? "text-sky-300" : "text-indigo-200/60"
-                                      }`}
-                                      title={isAll ? "Seen by all" : readCount > 0 ? `Seen by ${readCount}/${total}` : "Delivered"}
-                                    >
-                                      {isAll ? (
-                                        <>
-                                          <CheckCheck size={11} className="stroke-[2.5]" />
-                                          <span>all</span>
-                                        </>
-                                      ) : readCount > 0 ? (
-                                        <>
-                                          <CheckCheck size={11} className="stroke-[2]" />
-                                          <span>{readCount}</span>
-                                        </>
-                                      ) : (
-                                        <Check size={10} className="stroke-[2]" />
-                                      )}
-                                    </span>
-                                  );
-                                })()}
                               </div>
-                            </div>
-                          )}
+                            )}
 
-                          {/* Bubble timestamp for Voice & Invites */}
-                          {(parsed.type === "voice" || parsed.type === "room_invite") && (
-                            <div
-                              className={`flex items-center justify-end gap-1 mt-1 text-[9px] font-mono select-none ${
-                                isMe ? "text-indigo-200/70" : "text-slate-400/80"
-                              }`}
-                            >
-                              {parsed.isEdited && <span className="italic opacity-80">(edited)</span>}
-                              <span>
-                                {new Date(m.created_at).toLocaleTimeString([], {
-                                  hour: "2-digit",
-                                  minute: "2-digit",
-                                })}
-                              </span>
-                            </div>
-                          )}
+                            {/* Reaction Badges */}
+                            <ReactionBadges
+                              reactions={parsed.reactions}
+                              currentUserId={user?.id}
+                              onToggleReaction={(emoji) => handleToggleReaction(m.id, emoji)}
+                              isMe={isMe}
+                            />
 
-                          {/* Reaction Badges */}
-                          <ReactionBadges
-                            reactions={parsed.reactions}
-                            currentUserId={user?.id}
-                            onToggleReaction={(emoji) => handleToggleReaction(m.id, emoji)}
-                            isMe={isMe}
-                          />
-
-                          {/* Floating Quick Reaction Picker */}
-                          {activeReactionPickerMsgId === m.id && (
-                            <div className={`relative mt-1 z-30 ${isMe ? "self-end" : "self-start"}`}>
-                              <QuickReactionPicker
-                                onSelect={(emoji) => {
-                                  handleToggleReaction(m.id, emoji);
-                                }}
-                                onClose={() => setActiveReactionPickerMsgId(null)}
-                                isMe={isMe}
-                              />
-                            </div>
-                          )}
+                            {/* Floating Quick Reaction Picker */}
+                            {activeReactionPickerMsgId === m.id && (
+                              <div className={`relative mt-1 z-30 ${isMe ? "self-end" : "self-start"}`}>
+                                <QuickReactionPicker
+                                  onSelect={(emoji) => {
+                                    handleToggleReaction(m.id, emoji);
+                                  }}
+                                  onClose={() => setActiveReactionPickerMsgId(null)}
+                                  isMe={isMe}
+                                />
+                              </div>
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    </Fragment>
-                  );
-                })
+                      </Fragment>
+                    );
+                  })
                 )}
                 <div ref={messagesEndRef} />
               </div>
@@ -1626,8 +1632,8 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
                       {targetRelationship?.hasPendingRequestFromMe
                         ? "Follow request sent. Messaging is locked until they accept."
                         : targetRelationship?.hasPendingRequestFromThem
-                        ? "This user sent you a follow request. Accept to start messaging."
-                        : "Follow request must be accepted before you can send messages."}
+                          ? "This user sent you a follow request. Accept to start messaging."
+                          : "Follow request must be accepted before you can send messages."}
                     </span>
                   </div>
 
@@ -1757,6 +1763,16 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
                   )}
 
                   {/* Enhanced Sleek Message Input Form */}
+                  <SafetyComposerNudge
+                    detection={inRoomDMSafety}
+                    dismissed={Boolean(
+                      inRoomDMSafety && dismissedSafetyKind === inRoomDMSafety.kind
+                    )}
+                    onDismiss={() =>
+                      inRoomDMSafety && setDismissedSafetyKind(inRoomDMSafety.kind)
+                    }
+                    className="mx-3 mt-1.5"
+                  />
                   <form
                     onSubmit={handleSendMessage}
                     className="p-2.5 sm:p-3"
@@ -1803,12 +1819,17 @@ export function InRoomMessenger({ isOpen, onClose, currentJunction }: InRoomMess
 
                       <button
                         type="submit"
-                        disabled={(!inputMessage.trim() && !editingMessage) || isSending}
-                        className={`min-w-[32px] h-8 px-2.5 rounded-xl flex items-center justify-center gap-1 transition-all shrink-0 ${
-                          (inputMessage.trim() || editingMessage) && !isSending
-                            ? "bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white shadow-md shadow-indigo-600/30 scale-100 hover:scale-105 active:scale-95 cursor-pointer text-xs font-semibold"
-                            : "bg-white/5 text-slate-600 cursor-not-allowed text-xs font-semibold"
-                        }`}
+                        disabled={
+                          (!inputMessage.trim() && !editingMessage) ||
+                          isSending ||
+                          inRoomDMSafety?.severity === "block"
+                        }
+                        className={`min-w-[32px] h-8 px-2.5 rounded-xl flex items-center justify-center gap-1 transition-all shrink-0 ${(inputMessage.trim() || editingMessage) &&
+                          !isSending &&
+                          inRoomDMSafety?.severity !== "block"
+                          ? "bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white shadow-md shadow-indigo-600/30 scale-100 hover:scale-105 active:scale-95 cursor-pointer text-xs font-semibold"
+                          : "bg-white/5 text-slate-600 cursor-not-allowed text-xs font-semibold"
+                          }`}
                         aria-label={editingMessage ? "Save Edit" : "Send message"}
                       >
                         {isSending ? (

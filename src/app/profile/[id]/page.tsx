@@ -44,6 +44,7 @@ import { CardCustomizer } from "@/components/profile/CardCustomizer";
 import { getCardThemeStyle } from "@/lib/card-themes";
 import { socialService } from "@/lib/social-service";
 import { RoleBadge } from "@/components/ui/RoleBadge";
+import { stripExifAndSanitizeImage } from "@/lib/image-privacy";
 
 type SettingsTab = "profile" | "theme" | "security";
 
@@ -565,13 +566,20 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
     if (!isOwner || !profile) return;
     setIsUploading(true);
 
-    const fileName = `${profile.id}-${Date.now()}.jpg`;
-    const filePath = `public/${fileName}`;
-
     try {
+      // Privacy safeguard: Strip all EXIF / GPS / device metadata before uploading
+      const sanitizedBlob = await stripExifAndSanitizeImage(croppedBlob, {
+        maxWidth: 800,
+        maxHeight: 800,
+        quality: 0.92,
+      });
+
+      const fileName = `${profile.id}-${Date.now()}.jpg`;
+      const filePath = `public/${fileName}`;
+
       const { error: uploadError } = await supabase.storage
         .from("avatars")
-        .upload(filePath, croppedBlob, {
+        .upload(filePath, sanitizedBlob, {
           contentType: "image/jpeg",
           upsert: true,
         });
@@ -613,28 +621,37 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
       }
     } catch (err: any) {
       console.error("Upload failed", err);
-      // Fallback for guest or if bucket access fails
+      // Fallback for guest or if bucket access fails (also sanitized)
       if (guest) {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          const base64data = reader.result as string;
-          updateGuest({ avatar: base64data });
-          setProfile({ ...profile, avatar: base64data });
+        try {
+          const sanitizedBlob = await stripExifAndSanitizeImage(croppedBlob, {
+            maxWidth: 400,
+            maxHeight: 400,
+            quality: 0.85,
+          });
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const base64data = reader.result as string;
+            updateGuest({ avatar: base64data });
+            setProfile({ ...profile, avatar: base64data });
+            setCropModalOpen(false);
+            if (tempImageSrc) {
+              URL.revokeObjectURL(tempImageSrc);
+              setTempImageSrc(null);
+            }
+            if (typeof window !== "undefined") {
+              window.dispatchEvent(
+                new CustomEvent("yapclub_profile_updated", {
+                  detail: { avatar: base64data },
+                })
+              );
+            }
+          };
+          reader.readAsDataURL(sanitizedBlob);
+          return;
+        } catch {
           setCropModalOpen(false);
-          if (tempImageSrc) {
-            URL.revokeObjectURL(tempImageSrc);
-            setTempImageSrc(null);
-          }
-          if (typeof window !== "undefined") {
-            window.dispatchEvent(
-              new CustomEvent("yapclub_profile_updated", {
-                detail: { avatar: base64data },
-              })
-            );
-          }
-        };
-        reader.readAsDataURL(croppedBlob);
-        return;
+        }
       }
       alert(err?.message || "Failed to upload image. Please check your connection and try again.");
     } finally {
@@ -876,6 +893,10 @@ export default function ProfilePage({ params: propParams }: { params?: { id: str
                               <Camera size={12} />
                               <span>Change Profile Picture</span>
                             </button>
+                            <div className="flex items-center justify-center gap-1 text-[10px] text-emerald-400/80 font-medium mt-1">
+                              <ShieldCheck size={11} className="shrink-0" />
+                              <span>Privacy Safe: GPS & camera tags auto-stripped</span>
+                            </div>
                             <input
                               type="file"
                               ref={fileInputRef}

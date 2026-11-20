@@ -3,6 +3,7 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import { useDMVoiceCall } from "@/components/providers/DMVoiceCallContext";
 import { useUser } from "@/hooks/useUser";
+import { supabase } from "@/lib/supabase";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import { 
   Phone, 
@@ -48,7 +49,7 @@ function DMVoiceCallPipeline({
     { onlySubscribed: true }
   ).filter((trackRef) => !trackRef.participant.isLocal && trackRef.publication?.kind === Track.Kind.Audio);
 
-  // 1. LiveKit Microphone Mute / Unmute Sync
+  // 1. LiveKit Microphone Mute / Unmute Sync & Hardware Release Cleanup
   useEffect(() => {
     if (localParticipant) {
       const shouldEnable = !isMuted && !isDeafened;
@@ -62,6 +63,20 @@ function DMVoiceCallPipeline({
           console.warn("LiveKit DM setMicrophoneEnabled warning:", err);
         });
     }
+
+    return () => {
+      if (localParticipant) {
+        try {
+          localParticipant.setMicrophoneEnabled(false).catch(() => {});
+          localParticipant.audioTrackPublications?.forEach((pub: any) => {
+            try {
+              pub.track?.stop();
+              pub.audioTrack?.stop();
+            } catch {}
+          });
+        } catch {}
+      }
+    };
   }, [localParticipant, isMuted, isDeafened]);
 
   // 2. Speaker Off (Deafen) Volume & Mute Sync on all remote tracks
@@ -238,23 +253,33 @@ export function DMVoiceCallOverlay() {
 
   // Fetch LiveKit token when call is connected
   useEffect(() => {
+    let cancelled = false;
     if (callState === "connected" && activeCall && user) {
       const roomName = `dm_call_${activeCall.conversationId}`;
       const uniqueIdentity = user.username || user.id;
       const displayLabel = user.name || user.username || "User";
-      fetch(
-        `/api/token?room=${encodeURIComponent(roomName)}&username=${encodeURIComponent(
-          uniqueIdentity
-        )}&displayName=${encodeURIComponent(displayLabel)}&avatar=${encodeURIComponent(user.avatar || "zap")}`
-      )
-        .then((res) => res.json())
-        .then((data) => {
-          if (data.token) {
+      (async () => {
+        try {
+          const { data: { session } } = await supabase.auth.getSession();
+          const res = await fetch(
+            `/api/token?room=${encodeURIComponent(roomName)}&username=${encodeURIComponent(
+              uniqueIdentity
+            )}&displayName=${encodeURIComponent(displayLabel)}&avatar=${encodeURIComponent(user.avatar || "zap")}`,
+            {
+              headers: session?.access_token
+                ? { Authorization: `Bearer ${session.access_token}` }
+                : {},
+            }
+          );
+          const data = await res.json();
+          if (!cancelled && data.token) {
             setLiveKitToken(data.token);
             setLiveKitUrl(data.serverUrl);
           }
-        })
-        .catch((err) => console.error("Error fetching DM call LiveKit token:", err));
+        } catch (err) {
+          console.error("Error fetching DM call LiveKit token:", err);
+        }
+      })();
     } else {
       setLiveKitToken(null);
       setLiveKitUrl(null);
@@ -264,6 +289,9 @@ export function DMVoiceCallOverlay() {
         isSelfSpeaking: false,
       });
     }
+    return () => {
+      cancelled = true;
+    };
   }, [callState, activeCall?.conversationId, user?.id, user?.username, user?.name, user?.avatar]);
 
   if (callState === "idle" || !activeCall) return null;

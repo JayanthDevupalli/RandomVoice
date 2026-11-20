@@ -28,6 +28,7 @@ import { supabase } from "@/lib/supabase";
 import confetti from "canvas-confetti";
 import { useLiveStats } from "@/hooks/useLiveStats";
 import { generateRecoveryCode } from "@/lib/recovery-utils";
+import { LANDING_CHILL_LINE } from "@/lib/safety-utils";
 import { RecoveryCodeModal } from "@/components/auth/RecoveryCodeModal";
 
 interface LandingWelcomeProps {
@@ -605,7 +606,7 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
                         className="hidden"
                       />
                       <span className="text-[11px] sm:text-xs text-slate-400 font-light group-hover:text-slate-200 transition-colors">
-                        I accept the <Link href="/guidelines" className="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">Guidelines & Code of Conduct</Link>.
+                        I accept the <Link href="/terms" className="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">Terms</Link>, <Link href="/privacy" className="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">Privacy Policy</Link>, and <Link href="/guidelines" className="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">Guidelines</Link>.
                       </span>
                     </label>
                   </div>
@@ -620,6 +621,11 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
                     <span>Enter Yap Rooms</span>
                     <ArrowRight size={16} strokeWidth={2.2} />
                   </button>
+
+                  {/* Casual Vibe Micro-Reminder */}
+                  <p className="text-[11px] text-slate-400/80 text-center leading-relaxed px-2">
+                    {LANDING_CHILL_LINE}
+                  </p>
 
                   {/* Switch to Login Link */}
                   <div className="pt-2 text-center border-t border-white/5">
@@ -984,8 +990,15 @@ export function LandingWelcome({ initialMode = "guest" }: LandingWelcomeProps) {
       )}
 
       {/* Footer */}
-      <footer className="w-full py-4 sm:py-6 text-center text-[10px] sm:text-xs font-light text-slate-600 relative z-10">
-        <p>yapclub © {new Date().getFullYear()} • Anonymous & Member Social Audio</p>
+      <footer className="w-full py-4 sm:py-6 text-center text-[11px] sm:text-xs font-light text-slate-500 relative z-10 flex flex-col items-center gap-1.5">
+        <div className="flex items-center justify-center gap-2.5 text-slate-400">
+          <Link href="/terms" className="hover:text-slate-200 transition-colors">Terms of Service</Link>
+          <span className="text-slate-600">•</span>
+          <Link href="/privacy" className="hover:text-slate-200 transition-colors">Privacy Policy</Link>
+          <span className="text-slate-600">•</span>
+          <Link href="/guidelines" className="hover:text-slate-200 transition-colors">Guidelines</Link>
+        </div>
+        <p className="text-slate-600 text-[10px] sm:text-[11px]">yapclub © {new Date().getFullYear()} • Anonymous & Member Social Audio</p>
       </footer>
     </div>
   );

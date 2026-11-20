@@ -81,6 +81,8 @@ import { MusicDeck } from "./music/MusicDeck";
 import { MusicModal } from "./music/MusicModal";
 import { RoomMusicState, MusicTrack, QueuedTrack } from "@/lib/music-types";
 import { parseMessageContent } from "@/lib/chat-utils";
+import { detectSafetyConcern, hasBlockedMaliciousLink } from "@/lib/safety-utils";
+import { RotatingVibeBanner, SafetyComposerNudge, SafeMessageText } from "@/components/safety/SafetyNudges";
 import { RoleBadge, RoleAvatarDot } from "@/components/ui/RoleBadge";
 import {
   VectorReaction,
@@ -854,6 +856,14 @@ export function JunctionRoom({
   const [rightPanelTab, setRightPanelTab] = useState<"chat" | "junctions">("chat");
   const [chatMessages, setChatMessages] = useState<RoomChatMessage[]>([]);
   const [inputMessage, setInputMessage] = useState("");
+  const [dismissedSafetyKind, setDismissedSafetyKind] = useState<string | null>(null);
+  const chatSafetyDetection = useMemo(
+    () => detectSafetyConcern(inputMessage, "room"),
+    [inputMessage]
+  );
+  useEffect(() => {
+    if (!chatSafetyDetection) setDismissedSafetyKind(null);
+  }, [chatSafetyDetection]);
   const [privateRecipient, setPrivateRecipient] = useState<string>("all");
   const [reactions, setReactions] = useState<VectorReaction[]>([]);
   const recentReactionPositionsRef = useRef<{ x: number; time: number }[]>([]);
@@ -2089,7 +2099,17 @@ export function JunctionRoom({
           return;
         }
         setChatMessages((prev) => {
-          if (prev.some((m) => m.id === payload.id)) return prev;
+          if (
+            prev.some(
+              (m) =>
+                (payload.id && m.id === payload.id) ||
+                (m.senderName === payload.senderName &&
+                  m.text === payload.text &&
+                  Math.abs((m.timestamp || 0) - (payload.timestamp || 0)) < 3000)
+            )
+          ) {
+            return prev;
+          }
           return [...prev, payload];
         });
 
@@ -2123,7 +2143,7 @@ export function JunctionRoom({
           setMinimizedUnreadCount((prev) => prev + 1);
         }
 
-        if (!isSelf && !isChatOpenRef.current && showInRoomPopupsRef.current) {
+        if (!isSelf && !isChatOpenRef.current && showInRoomPopupsRef.current && isNewMessage) {
           const isWhisper = Boolean(payload.targetIdentity && isLocalIdentity(payload.targetIdentity));
           let popupText = payload.text || "";
           try {
@@ -2135,10 +2155,11 @@ export function JunctionRoom({
             } else if (parsed.text) {
               popupText = parsed.text;
             }
-          } catch {}
+          } catch { }
 
+          const popupId = payload.id || `popup_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
           const newPopup: InRoomPopupMessage = {
-            id: payload.id || `popup_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            id: popupId,
             senderName: payload.senderName || "Room Participant",
             avatar: payload.avatar,
             color: payload.color,
@@ -2148,8 +2169,21 @@ export function JunctionRoom({
             timestamp: Date.now(),
           };
 
-          // For every user message there should be new bubble pop up
-          setInRoomPopups((prev) => [...prev.slice(-3), newPopup]);
+          // For every user message there should be new bubble pop up without duplicates
+          setInRoomPopups((prev) => {
+            if (
+              prev.some(
+                (p) =>
+                  p.id === newPopup.id ||
+                  (p.senderName === newPopup.senderName &&
+                    p.text === newPopup.text &&
+                    Math.abs(p.timestamp - newPopup.timestamp) < 3000)
+              )
+            ) {
+              return prev;
+            }
+            return [...prev.slice(-2), newPopup];
+          });
 
           // Auto-dismiss in 4.5s so it gives comfortable time to read clearly
           setTimeout(() => {
@@ -2909,7 +2943,8 @@ export function JunctionRoom({
             myEffectiveRole
           )}&userId=${encodeURIComponent(
             myId
-          )}&role=${encodeURIComponent(storedRole || "speaker")}`
+          )}&role=${encodeURIComponent(storedRole || "speaker")}`,
+          { headers: authHeaders }
         );
 
         // Fetch seating and voice credentials in parallel without artificial delays!
@@ -3108,7 +3143,21 @@ export function JunctionRoom({
 
         if (liveKitRoomRef.current) {
           try {
+            const local = liveKitRoomRef.current.localParticipant;
+            if (local) {
+              local.audioTrackPublications?.forEach((pub: any) => {
+                try {
+                  pub.track?.stop();
+                  pub.audioTrack?.stop();
+                } catch { }
+              });
+            }
             liveKitRoomRef.current.disconnect();
+          } catch { }
+        }
+        if (mediaStream) {
+          try {
+            mediaStream.getTracks().forEach((t) => t.stop());
           } catch { }
         }
 
@@ -3713,6 +3762,7 @@ export function JunctionRoom({
   const handleSendMessage = (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputMessage.trim()) return;
+    if (hasBlockedMaliciousLink(inputMessage)) return;
 
     if (editingMessage) {
       const ageMs = Date.now() - (editingMessage.timestamp || 0);
@@ -3986,10 +4036,24 @@ export function JunctionRoom({
         navigator.sendBeacon(`/api/junctions/${junctionId}`, new Blob([leavePayload], { type: "application/json" }));
       }
 
-      // 5. Cleanly disconnect LiveKit
+      // 5. Cleanly disconnect LiveKit and immediately stop all local microphone tracks
       if (liveKitRoomRef.current) {
         try {
+          const local = liveKitRoomRef.current.localParticipant;
+          if (local) {
+            local.audioTrackPublications?.forEach((pub: any) => {
+              try {
+                pub.track?.stop();
+                pub.audioTrack?.stop();
+              } catch { }
+            });
+          }
           await liveKitRoomRef.current.disconnect();
+        } catch { }
+      }
+      if (mediaStream) {
+        try {
+          mediaStream.getTracks().forEach((t) => t.stop());
         } catch { }
       }
 
@@ -4542,8 +4606,8 @@ export function JunctionRoom({
             <div className="relative shrink-0">
               <div
                 className={`w-9 h-9 rounded-full flex items-center justify-center overflow-hidden transition-all duration-300 ${isSomeoneSpeaking
-                    ? "ring-2 ring-emerald-400 shadow-[0_0_15px_rgba(52,211,153,0.6)] animate-pulse"
-                    : "ring-1 ring-white/15"
+                  ? "ring-2 ring-emerald-400 shadow-[0_0_15px_rgba(52,211,153,0.6)] animate-pulse"
+                  : "ring-1 ring-white/15"
                   }`}
                 style={{ backgroundColor: speakingParticipant?.color || "#6366F1" }}
               >
@@ -4609,8 +4673,8 @@ export function JunctionRoom({
                   handleToggleMic();
                 }}
                 className={`w-8 h-8 rounded-full flex items-center justify-center transition-all active:scale-90 cursor-pointer ${isMuted || isMutedByMod
-                    ? "bg-rose-500/25 text-rose-300 border border-rose-500/40 hover:bg-rose-500/35 ring-1 ring-rose-500/20"
-                    : "bg-white/10 text-emerald-300 border border-white/10 hover:bg-white/15"
+                  ? "bg-rose-500/25 text-rose-300 border border-rose-500/40 hover:bg-rose-500/35 ring-1 ring-rose-500/20"
+                  : "bg-white/10 text-emerald-300 border border-white/10 hover:bg-white/15"
                   }`}
                 title={isMuted ? "Unmute Microphone" : "Mute Microphone"}
               >
@@ -4626,8 +4690,8 @@ export function JunctionRoom({
                   setIsDeafened(!isDeafened);
                 }}
                 className={`w-8 h-8 rounded-full flex items-center justify-center transition-all active:scale-90 cursor-pointer ${isDeafened
-                    ? "bg-amber-500/25 text-amber-300 border border-amber-500/40 hover:bg-amber-500/35"
-                    : "bg-white/5 text-slate-400 hover:text-white hover:bg-white/10 border border-white/5"
+                  ? "bg-amber-500/25 text-amber-300 border border-amber-500/40 hover:bg-amber-500/35"
+                  : "bg-white/5 text-slate-400 hover:text-white hover:bg-white/10 border border-white/5"
                   }`}
                 title={isDeafened ? "Undeafen Audio" : "Deafen Audio"}
               >
@@ -4647,8 +4711,8 @@ export function JunctionRoom({
                   onMaximize?.();
                 }}
                 className={`w-8 h-8 rounded-full flex items-center justify-center transition-all active:scale-90 cursor-pointer relative ${minimizedUnreadCount > 0
-                    ? "bg-indigo-600 text-white shadow-[0_0_18px_rgba(99,102,241,0.65)] ring-2 ring-indigo-400/80"
-                    : "bg-indigo-600 hover:bg-indigo-500 text-white shadow-md shadow-indigo-600/30"
+                  ? "bg-indigo-600 text-white shadow-[0_0_18px_rgba(99,102,241,0.65)] ring-2 ring-indigo-400/80"
+                  : "bg-indigo-600 hover:bg-indigo-500 text-white shadow-md shadow-indigo-600/30"
                   }`}
                 title={
                   minimizedUnreadCount > 0
@@ -5249,11 +5313,10 @@ export function JunctionRoom({
                       </button>
                     </div>
                   ) : (
-                    <div className={`w-full max-w-5xl mx-auto transition-all duration-300 ${
-                      participantCount === 1
-                        ? "flex items-center justify-center"
-                        : "grid grid-cols-2 sm:flex sm:flex-wrap items-center justify-center gap-2 sm:gap-4.5"
-                    }`}>
+                    <div className={`w-full max-w-5xl mx-auto transition-all duration-300 ${participantCount === 1
+                      ? "flex items-center justify-center"
+                      : "grid grid-cols-2 sm:flex sm:flex-wrap items-center justify-center gap-2 sm:gap-4.5"
+                      }`}>
                       {seatedParticipants.map((participant, index) => {
                         const isLocal = isLocalParticipant(participant);
                         const isParticipantMod = participant?.role === "moderator";
@@ -5288,16 +5351,13 @@ export function JunctionRoom({
                           <div
                             key={participant.identity || participant.username || participant.id || `seat-${index}`}
                             style={cardThemeStyle}
-                            className={`relative min-w-0 rounded-2xl sm:rounded-[1.4rem] flex flex-col justify-between items-center text-center transition-all duration-300 border overflow-hidden backdrop-blur-xl group/card shadow-[0_12px_32px_-8px_rgba(0,0,0,0.6)] ${
-                              participantCount === 1
-                                ? "p-3.5 sm:p-4.5 w-[220px] xs:w-[240px] sm:w-[260px] min-h-[195px] sm:min-h-[225px]"
-                                : `p-2 sm:p-4 w-full sm:w-[220px] md:w-[235px] max-w-[250px] min-h-[170px] sm:min-h-[215px] ${
-                                    participantCount % 2 === 1 && index === participantCount - 1
-                                      ? "col-span-2 max-w-[180px] xs:max-w-[220px] justify-self-center"
-                                      : ""
-                                  }`
-                            } ${
-                              participantRole === "super_admin"
+                            className={`relative min-w-0 rounded-2xl sm:rounded-[1.4rem] flex flex-col justify-between items-center text-center transition-all duration-300 border overflow-hidden backdrop-blur-xl group/card shadow-[0_12px_32px_-8px_rgba(0,0,0,0.6)] ${participantCount === 1
+                              ? "p-3.5 sm:p-4.5 w-[220px] xs:w-[240px] sm:w-[260px] min-h-[195px] sm:min-h-[225px]"
+                              : `p-2 sm:p-4 w-full sm:w-[220px] md:w-[235px] max-w-[250px] min-h-[170px] sm:min-h-[215px] ${participantCount % 2 === 1 && index === participantCount - 1
+                                ? "col-span-2 max-w-[180px] xs:max-w-[220px] justify-self-center"
+                                : ""
+                              }`
+                              } ${participantRole === "super_admin"
                                 ? "ring-1.5 ring-amber-400/80 shadow-[0_0_25px_rgba(245,158,11,0.25)]"
                                 : participantRole === "admin"
                                   ? "ring-1.5 ring-rose-400/80 shadow-[0_0_25px_rgba(244,63,94,0.25)]"
@@ -5306,7 +5366,7 @@ export function JunctionRoom({
                                     : speaking
                                       ? "ring-2 ring-emerald-400/90 shadow-[0_0_25px_rgba(52,211,153,0.35)]"
                                       : "border-white/10 hover:border-white/20"
-                            }`}
+                              }`}
                           >
                             {/* Ambient Card Backlight Glow */}
                             <div
@@ -5768,6 +5828,7 @@ export function JunctionRoom({
             {/* TAB 1: WHISPER CHAT */}
             {rightPanelTab === "chat" && (
               <div className="flex-1 flex flex-col min-h-0 relative overflow-hidden">
+                <RotatingVibeBanner />
                 {/* Chat Messages Log */}
                 <div
                   ref={chatScrollContainerRef}
@@ -5906,7 +5967,7 @@ export function JunctionRoom({
                                 : 'rounded-2xl rounded-tl-xs border border-white/[0.08] bg-[#181924]/90 text-slate-100 shadow-black/20')
                             }
                   `}>
-                            <span>{msg.text}</span>
+                            <SafeMessageText text={msg.text} isMe={isMe} />
                             {msg.isEdited && (
                               <span className="text-[10px] opacity-70 ml-1.5 italic select-none">
                                 (edited)
@@ -6075,6 +6136,18 @@ export function JunctionRoom({
                   </div>
                 )}
 
+                {/* Smart PII / Link Safety Nudge */}
+                <SafetyComposerNudge
+                  detection={chatSafetyDetection}
+                  dismissed={Boolean(
+                    chatSafetyDetection && dismissedSafetyKind === chatSafetyDetection.kind
+                  )}
+                  onDismiss={() =>
+                    chatSafetyDetection && setDismissedSafetyKind(chatSafetyDetection.kind)
+                  }
+                  className="mx-3 mt-2"
+                />
+
                 {/* Chat Input Area */}
                 <form onSubmit={handleSendMessage} className="p-3 sm:p-4 border-t border-white/[0.08] bg-[#0E0F17]/90 backdrop-blur-xl shrink-0">
                   <div className="relative flex items-center bg-white/[0.04] border border-white/10 rounded-2xl p-1 focus-within:border-indigo-500/60 focus-within:bg-white/[0.07] focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-inner">
@@ -6104,7 +6177,7 @@ export function JunctionRoom({
                     />
                     <button
                       type="submit"
-                      disabled={!inputMessage.trim()}
+                      disabled={!inputMessage.trim() || chatSafetyDetection?.severity === "block"}
                       className="w-8 h-8 rounded-xl flex items-center justify-center bg-indigo-600 hover:bg-indigo-500 active:scale-95 disabled:bg-white/5 disabled:text-slate-600 text-white transition-all shadow-md shadow-indigo-600/20 cursor-pointer disabled:cursor-not-allowed"
                       aria-label="Send message"
                     >

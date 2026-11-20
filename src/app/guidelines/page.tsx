@@ -1,6 +1,6 @@
 import Link from "next/link";
 import type { Metadata } from "next";
-import { ArrowLeft, ShieldAlert, Heart, Scale } from "lucide-react";
+import { ArrowLeft, ShieldAlert, Heart, Scale, Coffee } from "lucide-react";
 
 export const metadata: Metadata = {
   title: "Community Guidelines & Safety Rules | Talk Safely With Strangers",
@@ -39,6 +39,24 @@ export default function GuidelinesPage() {
         </p>
 
         <div className="space-y-8">
+          <section className="p-6 rounded-2xl bg-indigo-500/[0.07] border border-indigo-400/20">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="p-2.5 rounded-xl bg-indigo-500/20 text-indigo-300 border border-indigo-400/30">
+                <Coffee size={20} />
+              </div>
+              <h2 className="text-xl font-bold text-white">The Vibe Check (TL;DR)</h2>
+            </div>
+            <p className="text-slate-300 text-sm leading-relaxed mb-3">
+              YapClub is built for light, fun, casual hangouts — not heavy real-world drama. Keep your conversations easygoing and protect your peace:
+            </p>
+            <ul className="space-y-2 text-slate-400 text-sm leading-relaxed list-disc pl-5">
+              <li><strong className="text-slate-200">Stay naturally anonymous:</strong> Don&apos;t rush to share your phone number, home/college address, Instagram, or UPI ID with people you just met.</li>
+              <li><strong className="text-slate-200">Never share OTPs, passwords, or money:</strong> Real YapClub staff will never ask you for codes, logins, or payments.</li>
+              <li><strong className="text-slate-200">Zero awkwardness leaving:</strong> If a room or chat feels off, mute, hop to another room, or tap block — no explanation needed.</li>
+              <li><strong className="text-slate-200">Keep internet stuff light:</strong> Remember avatars aren&apos;t real life. Enjoy the banter, leave the stress offline.</li>
+            </ul>
+          </section>
+
           <section className="p-6 rounded-2xl bg-card border border-slate-800">
             <div className="flex items-center gap-3 mb-4">
               <div className="p-2.5 rounded-xl bg-indigo-600/20 text-indigo-400 border border-indigo-500/30">

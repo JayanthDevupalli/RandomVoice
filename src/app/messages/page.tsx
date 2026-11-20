@@ -4,14 +4,14 @@ import React, { useEffect, useState, useRef, useCallback, useMemo, Fragment } fr
 import { useUser } from "@/hooks/useUser";
 import { Navbar } from "@/components/layout/Navbar";
 import { supabase } from "@/lib/supabase";
-import { 
-  Search, 
-  MessageSquare, 
-  Send, 
-  ArrowLeft, 
-  Loader2, 
-  Plus, 
-  Users, 
+import {
+  Search,
+  MessageSquare,
+  Send,
+  ArrowLeft,
+  Loader2,
+  Plus,
+  Users,
   X,
   Mic,
   MoreVertical,
@@ -30,7 +30,8 @@ import {
   UserPlus,
   Info,
   Smile,
-  Tag
+  Tag,
+  Sparkles,
 } from "lucide-react";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import { useRouter } from "next/navigation";
@@ -39,9 +40,9 @@ import { useUnreadMessages } from "@/hooks/useUnreadMessages";
 import { VoiceNotePlayer } from "@/components/chat/VoiceNotePlayer";
 import { useGlobalPresence } from "@/components/providers/GlobalPresenceProvider";
 import { useDMVoiceCall } from "@/components/providers/DMVoiceCallContext";
-import { 
-  parseMessageContent, 
-  serializeTextMessage, 
+import {
+  parseMessageContent,
+  serializeTextMessage,
   serializeVoiceMessage,
   serializeGifMessage,
   serializeNicknameMessage,
@@ -62,6 +63,12 @@ import { MediaLightbox } from "@/components/chat/MediaLightbox";
 import { GroupInfoModal } from "@/components/chat/GroupInfoModal";
 import { AddGroupMemberModal } from "@/components/chat/AddGroupMemberModal";
 import { MessageInfoModal } from "@/components/chat/MessageInfoModal";
+import { detectSafetyConcern, hasBlockedMaliciousLink } from "@/lib/safety-utils";
+import {
+  NewChatChillBanner,
+  SafetyComposerNudge,
+  SafeMessageText,
+} from "@/components/safety/SafetyNudges";
 
 function formatGroupSubtitle(
   members: Array<{ id: string; username: string; name?: string; displayName?: string; social_links?: any }>,
@@ -82,11 +89,19 @@ export default function MessagesPage() {
   const { onlineUserIds, showOnline, setShowOnline } = useGlobalPresence();
   const { startCall, callState, activeCall } = useDMVoiceCall();
   const router = useRouter();
-  
+
   const [conversations, setConversations] = useState<any[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<any[]>([]);
   const [inputMessage, setInputMessage] = useState("");
+  const [dismissedSafetyKind, setDismissedSafetyKind] = useState<string | null>(null);
+  const dmSafetyDetection = useMemo(
+    () => detectSafetyConcern(inputMessage, "dm"),
+    [inputMessage]
+  );
+  useEffect(() => {
+    if (!dmSafetyDetection) setDismissedSafetyKind(null);
+  }, [dmSafetyDetection]);
   const [targetRelationship, setTargetRelationship] = useState<RelationshipStatus | null>(null);
   const [isRelationshipLoading, setIsRelationshipLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -152,6 +167,15 @@ export default function MessagesPage() {
   const [isClearingChat, setIsClearingChat] = useState(false);
   const [clearedChatsMap, setClearedChatsMap] = useState<Record<string, string>>({});
   const clearedChatsMapRef = useRef<Record<string, string>>({});
+
+  // --- 24h Casual Mode (Auto-clean old messages to keep conversation light) ---
+  const [casualModeMap, setCasualModeMap] = useState<Record<string, boolean>>({});
+  const isCasualModeActive = Boolean(activeConversationId && casualModeMap[activeConversationId]);
+  const displayMessages = useMemo(() => {
+    if (!isCasualModeActive) return messages;
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    return messages.filter((m) => new Date(m.created_at).getTime() >= cutoff);
+  }, [messages, isCasualModeActive]);
 
   // --- Dropdown Menu in Header ---
   const [isHeaderMenuOpen, setIsHeaderMenuOpen] = useState(false);
@@ -304,20 +328,26 @@ export default function MessagesPage() {
     }
   }, [isLoaded, isRegistered, router]);
 
-  // Load user's private cleared chats map (stored in profiles.social_links.cleared_chats_map & localStorage)
+  // Load user's private cleared chats & 24h casual mode map
   useEffect(() => {
     if (!user?.id) return;
     const storageKey = `yapclub_cleared_chats_${user.id}`;
     let localMap: Record<string, string> = {};
+    const casualKey = `yapclub_casual_mode_${user.id}`;
+    let localCasual: Record<string, boolean> = {};
+
     if (typeof window !== "undefined") {
       try {
         const stored = localStorage.getItem(storageKey);
         if (stored) localMap = JSON.parse(stored);
-      } catch {}
+        const storedCasual = localStorage.getItem(casualKey);
+        if (storedCasual) localCasual = JSON.parse(storedCasual);
+      } catch { }
     }
 
     clearedChatsMapRef.current = localMap;
     setClearedChatsMap(localMap);
+    setCasualModeMap(localCasual);
 
     Promise.resolve(
       supabase
@@ -330,13 +360,55 @@ export default function MessagesPage() {
       const merged = { ...remoteMap, ...localMap };
       clearedChatsMapRef.current = merged;
       setClearedChatsMap(merged);
+
+      const remoteCasual = (data?.social_links as any)?.casual_mode_conversations || {};
+      const mergedCasual = { ...remoteCasual, ...localCasual };
+      setCasualModeMap(mergedCasual);
+
       if (typeof window !== "undefined") {
         try {
           localStorage.setItem(storageKey, JSON.stringify(merged));
-        } catch {}
+          localStorage.setItem(casualKey, JSON.stringify(mergedCasual));
+        } catch { }
       }
-    }).catch(() => {});
+    }).catch(() => { });
   }, [user?.id]);
+
+  const toggleCasualMode = async (conversationId: string) => {
+    if (!conversationId) return;
+    const nextVal = !casualModeMap[conversationId];
+    const updated = {
+      ...casualModeMap,
+      [conversationId]: nextVal,
+    };
+    setCasualModeMap(updated);
+
+    if (typeof window !== "undefined" && user?.id) {
+      try {
+        localStorage.setItem(`yapclub_casual_mode_${user.id}`, JSON.stringify(updated));
+      } catch { }
+    }
+
+    if (isRegistered && user?.id) {
+      try {
+        const { data } = await supabase
+          .from("profiles")
+          .select("social_links")
+          .eq("id", user.id)
+          .maybeSingle();
+        const links = (data?.social_links as any) || {};
+        await supabase
+          .from("profiles")
+          .update({
+            social_links: {
+              ...links,
+              casual_mode_conversations: updated,
+            },
+          })
+          .eq("id", user.id);
+      } catch { }
+    }
+  };
 
   useEffect(() => {
     if (!user || !isRegistered) return;
@@ -360,7 +432,7 @@ export default function MessagesPage() {
 
         if (error) {
           console.warn("Nested query warning, using fallback query:", error.message);
-          
+
           // Resilient fallback query
           const { data: flatMembers } = await supabase
             .from("conversation_members")
@@ -414,7 +486,7 @@ export default function MessagesPage() {
 
         if (data) {
           const conversationIds = data.map(d => d.conversation_id);
-          
+
           if (conversationIds.length > 0) {
             const { data: membersData, error: membersErr } = await supabase
               .from("conversation_members")
@@ -437,7 +509,7 @@ export default function MessagesPage() {
               const otherMembers = membersData?.filter(m => m.conversation_id === d.conversation_id) || [];
               const otherProf = otherMembers[0]?.profiles;
               const profile = Array.isArray(otherProf) ? otherProf[0] : otherProf;
-              
+
               return {
                 id: d.conversation_id,
                 type: conv?.type,
@@ -494,7 +566,7 @@ export default function MessagesPage() {
               try {
                 const raw = localStorage.getItem(`yapclub_cleared_chats_${user.id}`);
                 if (raw) return JSON.parse(raw)[activeConversationId];
-              } catch {}
+              } catch { }
             }
             return null;
           })();
@@ -564,7 +636,7 @@ export default function MessagesPage() {
           online_at: Date.now(),
           last_read_at: safeReadTime,
         });
-      } catch (err) {}
+      } catch (err) { }
     }
 
     // 2. Persist to profiles.social_links as resilient primary storage across all devices/incognito
@@ -582,7 +654,7 @@ export default function MessagesPage() {
         .from("profiles")
         .update({ social_links: { ...links, last_read_map: lastReadMap } })
         .eq("id", user.id);
-    }).catch(() => {});
+    }).catch(() => { });
 
     // 3. Persist to conversation_members table (safely caught in case column does not exist)
     Promise.resolve(
@@ -591,7 +663,7 @@ export default function MessagesPage() {
         .update({ last_read_at: safeReadTime })
         .eq("conversation_id", activeConversationId)
         .eq("user_id", user.id)
-    ).catch(() => {});
+    ).catch(() => { });
   }, [activeConversationId, user?.id]);
 
   // Mark active conversation as read
@@ -831,7 +903,7 @@ export default function MessagesPage() {
       try {
         const saved = localStorage.getItem(`yapclub_nicknames_${user.id}`);
         if (saved) localMap = JSON.parse(saved);
-      } catch (e) {}
+      } catch (e) { }
 
       setNicknames(localMap);
 
@@ -871,7 +943,7 @@ export default function MessagesPage() {
     } else {
       delete updated[targetUserId];
     }
-    
+
     // 1. Update React state immediately
     setNicknames(updated);
 
@@ -905,10 +977,10 @@ export default function MessagesPage() {
     // 5. Send Instagram-style Real-time System Announcement into active conversation
     if (activeConversationId) {
       const otherUser = activeConversation?.other_user;
-      const targetDisplayName = otherUser?.id === targetUserId 
+      const targetDisplayName = otherUser?.id === targetUserId
         ? getProfileDisplayName(otherUser, otherUser?.username || "friend")
         : (user.id === targetUserId ? (user.name || user.displayName || user.username || "You") : (nicknameTargetName || "friend"));
-      
+
       const myDisplayName = getProfileDisplayName(user, user.username || "Someone");
 
       const nicknamePayload: NicknameUpdateData = {
@@ -999,7 +1071,7 @@ export default function MessagesPage() {
             is_blocked: !isCurrentlyBlocked,
           },
         });
-      } catch (err) {}
+      } catch (err) { }
     }
 
     // 3. Persist via backend API
@@ -1065,7 +1137,7 @@ export default function MessagesPage() {
       if (typeof window !== "undefined") {
         try {
           localStorage.setItem(`yapclub_cleared_chats_${user.id}`, JSON.stringify(updatedMap));
-        } catch {}
+        } catch { }
       }
 
       // 5. Persist to profiles.social_links so it persists across incognito/devices for THIS user only
@@ -1083,7 +1155,7 @@ export default function MessagesPage() {
           .from("profiles")
           .update({ social_links: { ...links, cleared_chats_map: remoteMap } })
           .eq("id", user.id);
-      }).catch(() => {});
+      }).catch(() => { });
 
       setIsClearChatModalOpen(false);
       setIsHeaderMenuOpen(false);
@@ -1119,10 +1191,10 @@ export default function MessagesPage() {
       const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
         ? "audio/webm;codecs=opus"
         : MediaRecorder.isTypeSupported("audio/webm")
-        ? "audio/webm"
-        : MediaRecorder.isTypeSupported("audio/mp4")
-        ? "audio/mp4"
-        : "";
+          ? "audio/webm"
+          : MediaRecorder.isTypeSupported("audio/mp4")
+            ? "audio/mp4"
+            : "";
 
       const mediaRecorder = mimeType
         ? new MediaRecorder(stream, { mimeType })
@@ -1365,7 +1437,7 @@ export default function MessagesPage() {
               displayName: dName,
             },
           });
-        } catch {}
+        } catch { }
       }
 
       // 3. Persist to DB via API
@@ -1655,9 +1727,9 @@ export default function MessagesPage() {
     if (!presenceChannelRef.current || !user?.id) return;
     if (showOnline) {
       const nowIso = new Date().toISOString();
-      presenceChannelRef.current.track({ user_id: user.id, online_at: Date.now(), last_read_at: nowIso }).catch(() => {});
+      presenceChannelRef.current.track({ user_id: user.id, online_at: Date.now(), last_read_at: nowIso }).catch(() => { });
     } else {
-      presenceChannelRef.current.untrack().catch(() => {});
+      presenceChannelRef.current.untrack().catch(() => { });
     }
   }, [showOnline, user?.id]);
 
@@ -1696,6 +1768,7 @@ export default function MessagesPage() {
     if (!activeConversationId || !user) return;
 
     if (!inputMessage.trim()) return;
+    if (hasBlockedMaliciousLink(inputMessage)) return;
 
     if (editingMessage) {
       await saveEditedMessage();
@@ -1865,16 +1938,15 @@ export default function MessagesPage() {
 
       <main className="flex-1 max-w-7xl w-full mx-auto p-0 sm:p-4 flex gap-4 min-h-0 overflow-hidden">
         {/* Sidebar (Conversations Inbox) */}
-        <div 
-          className={`w-full sm:w-80 md:w-96 flex flex-col bg-card border-0 sm:border border-white/5 sm:rounded-2xl overflow-hidden shrink-0 h-full min-h-0 transition-all ${
-            activeConversationId ? "hidden sm:flex" : "flex"
-          }`}
+        <div
+          className={`w-full sm:w-80 md:w-96 flex flex-col bg-card border-0 sm:border border-white/5 sm:rounded-2xl overflow-hidden shrink-0 h-full min-h-0 transition-all ${activeConversationId ? "hidden sm:flex" : "flex"
+            }`}
         >
           {/* Header */}
           <div className="px-3.5 py-2.5 sm:p-4 border-b border-white/5 bg-background/40 sm:bg-transparent">
             <div className="flex items-center justify-between gap-2 mb-2 sm:mb-3">
               <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-                <button 
+                <button
                   onClick={() => router.push("/junctions")}
                   className="p-1.5 -ml-1.5 rounded-full text-slate-400 hover:text-white hover:bg-white/10 active:scale-95 transition-all"
                   title="Back to Voice Rooms"
@@ -1901,29 +1973,26 @@ export default function MessagesPage() {
                       <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
                     )}
                     <span
-                      className={`relative inline-flex rounded-full h-2 w-2 ${
-                        showOnline ? "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]" : "bg-slate-500"
-                      }`}
+                      className={`relative inline-flex rounded-full h-2 w-2 ${showOnline ? "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]" : "bg-slate-500"
+                        }`}
                     />
                   </span>
                   <span className="text-[11px] font-medium text-slate-300 hidden sm:inline">
                     {showOnline ? "Online" : "Offline"}
                   </span>
                   <div
-                    className={`relative inline-flex h-4 w-7 shrink-0 rounded-full p-0.5 transition-colors duration-200 ease-in-out ${
-                      showOnline ? "bg-emerald-500" : "bg-slate-700/80"
-                    }`}
+                    className={`relative inline-flex h-4 w-7 shrink-0 rounded-full p-0.5 transition-colors duration-200 ease-in-out ${showOnline ? "bg-emerald-500" : "bg-slate-700/80"
+                      }`}
                   >
                     <span
-                      className={`pointer-events-none inline-block h-3 w-3 transform rounded-full bg-white shadow-sm transition-transform duration-200 ease-in-out ${
-                        showOnline ? "translate-x-3" : "translate-x-0"
-                      }`}
+                      className={`pointer-events-none inline-block h-3 w-3 transform rounded-full bg-white shadow-sm transition-transform duration-200 ease-in-out ${showOnline ? "translate-x-3" : "translate-x-0"
+                        }`}
                     />
                   </div>
                 </button>
 
                 {/* New Group Button */}
-                <button 
+                <button
                   onClick={() => setIsGroupModalOpen(true)}
                   className="flex items-center gap-1 sm:gap-1.5 px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-full bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white text-xs font-semibold transition-all shadow-md shrink-0"
                   title="New Group"
@@ -1937,15 +2006,15 @@ export default function MessagesPage() {
             {/* Search Bar */}
             <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-              <input 
-                type="text" 
+              <input
+                type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search conversations..." 
+                placeholder="Search conversations..."
                 className="w-full pl-9 pr-8 py-1.5 sm:py-2 bg-black/30 border border-white/10 rounded-xl text-xs sm:text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-500/50 transition-colors"
               />
               {searchQuery && (
-                <button 
+                <button
                   onClick={() => setSearchQuery("")}
                   className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
                 >
@@ -1959,11 +2028,10 @@ export default function MessagesPage() {
               <button
                 type="button"
                 onClick={() => setChatFilter("all")}
-                className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${
-                  chatFilter === "all"
-                    ? "bg-indigo-600 text-white shadow-sm shadow-indigo-600/30 ring-1 ring-indigo-400/40"
-                    : "bg-white/5 hover:bg-white/10 text-slate-400 hover:text-slate-200 border border-white/5"
-                }`}
+                className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${chatFilter === "all"
+                  ? "bg-indigo-600 text-white shadow-sm shadow-indigo-600/30 ring-1 ring-indigo-400/40"
+                  : "bg-white/5 hover:bg-white/10 text-slate-400 hover:text-slate-200 border border-white/5"
+                  }`}
               >
                 All
               </button>
@@ -1971,18 +2039,16 @@ export default function MessagesPage() {
               <button
                 type="button"
                 onClick={() => setChatFilter("direct")}
-                className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${
-                  chatFilter === "direct"
-                    ? "bg-indigo-600 text-white shadow-sm shadow-indigo-600/30 ring-1 ring-indigo-400/40"
-                    : "bg-white/5 hover:bg-white/10 text-slate-400 hover:text-slate-200 border border-white/5"
-                }`}
+                className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${chatFilter === "direct"
+                  ? "bg-indigo-600 text-white shadow-sm shadow-indigo-600/30 ring-1 ring-indigo-400/40"
+                  : "bg-white/5 hover:bg-white/10 text-slate-400 hover:text-slate-200 border border-white/5"
+                  }`}
               >
                 <span>Direct</span>
                 {directCount > 0 && (
                   <span
-                    className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
-                      chatFilter === "direct" ? "bg-white/20 text-white" : "bg-white/5 text-slate-400"
-                    }`}
+                    className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${chatFilter === "direct" ? "bg-white/20 text-white" : "bg-white/5 text-slate-400"
+                      }`}
                   >
                     {directCount}
                   </span>
@@ -1992,18 +2058,16 @@ export default function MessagesPage() {
               <button
                 type="button"
                 onClick={() => setChatFilter("groups")}
-                className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${
-                  chatFilter === "groups"
-                    ? "bg-indigo-600 text-white shadow-sm shadow-indigo-600/30 ring-1 ring-indigo-400/40"
-                    : "bg-white/5 hover:bg-white/10 text-slate-400 hover:text-slate-200 border border-white/5"
-                }`}
+                className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${chatFilter === "groups"
+                  ? "bg-indigo-600 text-white shadow-sm shadow-indigo-600/30 ring-1 ring-indigo-400/40"
+                  : "bg-white/5 hover:bg-white/10 text-slate-400 hover:text-slate-200 border border-white/5"
+                  }`}
               >
                 <span>Groups</span>
                 {groupsCount > 0 && (
                   <span
-                    className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
-                      chatFilter === "groups" ? "bg-white/20 text-white" : "bg-white/5 text-slate-400"
-                    }`}
+                    className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${chatFilter === "groups" ? "bg-white/20 text-white" : "bg-white/5 text-slate-400"
+                      }`}
                   >
                     {groupsCount}
                   </span>
@@ -2013,18 +2077,16 @@ export default function MessagesPage() {
               <button
                 type="button"
                 onClick={() => setChatFilter("unread")}
-                className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${
-                  chatFilter === "unread"
-                    ? "bg-indigo-600 text-white shadow-sm shadow-indigo-600/30 ring-1 ring-indigo-400/40"
-                    : "bg-white/5 hover:bg-white/10 text-slate-400 hover:text-slate-200 border border-white/5"
-                }`}
+                className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${chatFilter === "unread"
+                  ? "bg-indigo-600 text-white shadow-sm shadow-indigo-600/30 ring-1 ring-indigo-400/40"
+                  : "bg-white/5 hover:bg-white/10 text-slate-400 hover:text-slate-200 border border-white/5"
+                  }`}
               >
                 <span>Unread</span>
                 {unreadConversationsCount > 0 && (
                   <span
-                    className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
-                      chatFilter === "unread" ? "bg-white/20 text-white" : "bg-indigo-500/20 text-indigo-300"
-                    }`}
+                    className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${chatFilter === "unread" ? "bg-white/20 text-white" : "bg-indigo-500/20 text-indigo-300"
+                      }`}
                   >
                     {unreadConversationsCount}
                   </span>
@@ -2049,23 +2111,23 @@ export default function MessagesPage() {
                   {searchQuery
                     ? "No matches found"
                     : chatFilter === "groups"
-                    ? "No group chats"
-                    : chatFilter === "direct"
-                    ? "No direct chats"
-                    : chatFilter === "unread"
-                    ? "No unread messages"
-                    : "No conversations yet"}
+                      ? "No group chats"
+                      : chatFilter === "direct"
+                        ? "No direct chats"
+                        : chatFilter === "unread"
+                          ? "No unread messages"
+                          : "No conversations yet"}
                 </p>
                 <p className="text-xs text-slate-500 max-w-[220px]">
                   {searchQuery
                     ? "Try a different search keyword."
                     : chatFilter === "groups"
-                    ? "Create a group to chat and connect with multiple friends!"
-                    : chatFilter === "direct"
-                    ? "Connect with friends from voice junctions to chat directly."
-                    : chatFilter === "unread"
-                    ? "You are all caught up on your messages."
-                    : "Connect with friends from rooms or start a group chat!"}
+                      ? "Create a group to chat and connect with multiple friends!"
+                      : chatFilter === "direct"
+                        ? "Connect with friends from voice junctions to chat directly."
+                        : chatFilter === "unread"
+                          ? "You are all caught up on your messages."
+                          : "Connect with friends from rooms or start a group chat!"}
                 </p>
                 {chatFilter === "groups" && !searchQuery && (
                   <button
@@ -2091,8 +2153,8 @@ export default function MessagesPage() {
                 const otherUserId = conv.other_user?.id;
                 const customNickname = otherUserId ? nicknames[otherUserId] : null;
                 const shownName = getProfileDisplayName(conv.other_user, conv.other_user?.username || "Unknown");
-                const title = isGroup 
-                  ? (conv.name || "Group Chat") 
+                const title = isGroup
+                  ? (conv.name || "Group Chat")
                   : (customNickname || shownName || "Unknown");
                 const avatarUrl = isGroup ? null : conv.other_user?.avatar;
                 const isBlocked = otherUserId ? blockedUsers.includes(otherUserId) : false;
@@ -2100,7 +2162,7 @@ export default function MessagesPage() {
                 const isUserOnline = otherUserId ? onlineUserIds.has(otherUserId) : false;
 
                 return (
-                  <button 
+                  <button
                     key={conv.id}
                     onClick={() => {
                       if (typeof window !== "undefined") {
@@ -2113,11 +2175,10 @@ export default function MessagesPage() {
                       markAsRead(conv.id, conv.last_message_at);
                       broadcastReadReceipt(conv.last_message_at);
                     }}
-                    className={`w-full p-4 flex items-center gap-3.5 text-left transition-all active:bg-white/10 ${
-                      isSelected 
-                        ? 'bg-white/5 border-l-4 border-indigo-500' 
-                        : 'border-l-4 border-transparent hover:bg-white/[0.03]'
-                    }`}
+                    className={`w-full p-4 flex items-center gap-3.5 text-left transition-all active:bg-white/10 ${isSelected
+                      ? 'bg-white/5 border-l-4 border-indigo-500'
+                      : 'border-l-4 border-transparent hover:bg-white/[0.03]'
+                      }`}
                   >
                     <div className="relative w-12 h-12 rounded-full bg-slate-800/80 overflow-hidden shrink-0 flex items-center justify-center border border-white/10 shadow-sm">
                       {isGroup ? (
@@ -2155,8 +2216,8 @@ export default function MessagesPage() {
                         <p className="text-xs text-slate-400 truncate flex items-center gap-1.5">
                           <span className={`w-1.5 h-1.5 rounded-full ${isGroup ? 'bg-indigo-400' : isBlocked ? 'bg-rose-500' : isUserOnline ? 'bg-emerald-400' : 'bg-slate-500'}`} />
                           <span>
-                            {isGroup 
-                              ? "Group Conversation" 
+                            {isGroup
+                              ? "Group Conversation"
                               : isBlocked
                                 ? "Blocked"
                                 : isUserOnline
@@ -2179,7 +2240,7 @@ export default function MessagesPage() {
         </div>
 
         {/* Chat Area */}
-        <div 
+        <div
           onClick={() => {
             if (activeConversationId) {
               const lastMsgTime = messages[messages.length - 1]?.created_at;
@@ -2187,11 +2248,10 @@ export default function MessagesPage() {
               broadcastReadReceipt(lastMsgTime);
             }
           }}
-          className={`bg-card border-0 sm:border border-white/5 sm:rounded-2xl overflow-hidden min-h-0 ${
-            !activeConversationId
-              ? 'hidden sm:flex flex-1 sm:h-full items-center justify-center'
-              : 'flex flex-1 flex-col fixed inset-0 z-30 sm:relative sm:inset-auto sm:z-auto sm:h-full h-dvh max-h-dvh w-full'
-          }`}
+          className={`bg-card border-0 sm:border border-white/5 sm:rounded-2xl overflow-hidden min-h-0 ${!activeConversationId
+            ? 'hidden sm:flex flex-1 sm:h-full items-center justify-center'
+            : 'flex flex-1 flex-col fixed inset-0 z-30 sm:relative sm:inset-auto sm:z-auto sm:h-full h-dvh max-h-dvh w-full'
+            }`}
         >
           {!activeConversationId ? (
             <div className="text-center p-8">
@@ -2213,14 +2273,14 @@ export default function MessagesPage() {
                 const isBlocked = otherUserId ? blockedUsers.includes(otherUserId) : false;
                 const isBlockedByOther = otherUserId ? blockedMeUsers.includes(otherUserId) : false;
                 const shownName = getProfileDisplayName(activeConversation?.other_user, activeConversation?.other_user?.username || "Chat");
-                const headerTitle = isGroup 
-                  ? (activeConversation.name || "Group Chat") 
+                const headerTitle = isGroup
+                  ? (activeConversation.name || "Group Chat")
                   : isBlockedByOther
                     ? `${shownName || "User"} (Unavailable)`
                     : (customNickname || shownName || "Chat");
 
                 return (
-                  <div className="relative z-40 h-14 sm:h-16 border-b border-white/5 flex items-center justify-between px-2.5 sm:px-6 shrink-0 bg-[#090A0F]/95 backdrop-blur-xl shadow-sm pt-[env(safe-area-inset-top,0px)]">
+                  <div className="relative z-20 h-14 sm:h-16 border-b border-white/5 flex items-center justify-between px-2.5 sm:px-6 shrink-0 bg-[#090A0F]/95 backdrop-blur-xl shadow-sm pt-[env(safe-area-inset-top,0px)]">
                     <div className="flex items-center gap-2 sm:gap-3 min-w-0">
                       {/* Back Button */}
                       <button
@@ -2338,13 +2398,12 @@ export default function MessagesPage() {
                             });
                           }}
                           disabled={callState !== "idle" || isBlocked || isBlockedByOther || Boolean(targetRelationship && !targetRelationship.isAcceptedConnection && messages.length === 0)}
-                          className={`px-3 py-1.5 rounded-xl flex items-center gap-1.5 transition-all active:scale-95 text-xs font-semibold shadow-sm ${
-                            callState !== "idle" && activeCall?.conversationId === activeConversationId
-                              ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 animate-pulse"
-                              : isBlocked || isBlockedByOther || (targetRelationship && !targetRelationship.isAcceptedConnection && messages.length === 0)
+                          className={`px-3 py-1.5 rounded-xl flex items-center gap-1.5 transition-all active:scale-95 text-xs font-semibold shadow-sm ${callState !== "idle" && activeCall?.conversationId === activeConversationId
+                            ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 animate-pulse"
+                            : isBlocked || isBlockedByOther || (targetRelationship && !targetRelationship.isAcceptedConnection && messages.length === 0)
                               ? "opacity-50 cursor-not-allowed bg-white/5 text-slate-500 border border-white/5"
                               : "text-slate-200 hover:text-white bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/30"
-                          }`}
+                            }`}
                           title={isBlocked ? "Cannot call blocked contact" : isBlockedByOther ? "User is unavailable" : (targetRelationship && !targetRelationship.isAcceptedConnection && messages.length === 0) ? "Follow request must be accepted before calling" : "Start Voice Call"}
                         >
                           <PhoneCall size={15} className={isBlocked || isBlockedByOther || (targetRelationship && !targetRelationship.isAcceptedConnection && messages.length === 0) ? "text-slate-500" : "text-indigo-400"} />
@@ -2367,135 +2426,182 @@ export default function MessagesPage() {
                           <MoreVertical size={18} />
                         </button>
 
-                      {isHeaderMenuOpen && (
-                        <>
-                          {/* Invisible backdrop to dismiss menu on tap anywhere */}
-                          <div
-                            className="fixed inset-0 z-40 bg-transparent"
-                            onClick={() => setIsHeaderMenuOpen(false)}
-                          />
-                          <div className="absolute right-0 top-full mt-2 w-52 rounded-2xl bg-[#12131A] border border-white/15 shadow-2xl py-1.5 z-50 animate-in fade-in zoom-in-95 duration-150 backdrop-blur-2xl ring-1 ring-black/50">
-                            {isGroup && (
-                              <>
-                                <button
-                                  onClick={() => {
-                                    setIsGroupInfoOpen(true);
-                                    setIsHeaderMenuOpen(false);
-                                  }}
-                                  className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/5 transition-colors text-left cursor-pointer"
-                                >
-                                  <Users size={15} className="text-indigo-400" />
-                                  <span>Group Info</span>
-                                </button>
+                        {isHeaderMenuOpen && (
+                          <>
+                            {/* Invisible backdrop to dismiss menu on tap anywhere */}
+                            <div
+                              className="fixed inset-0 z-40 bg-transparent"
+                              onClick={() => setIsHeaderMenuOpen(false)}
+                            />
+                            <div className="absolute right-0 top-full mt-2 w-52 rounded-2xl bg-[#12131A] border border-white/15 shadow-2xl py-1.5 z-50 animate-in fade-in zoom-in-95 duration-150 backdrop-blur-2xl ring-1 ring-black/50">
+                              {isGroup && (
+                                <>
+                                  <button
+                                    onClick={() => {
+                                      setIsGroupInfoOpen(true);
+                                      setIsHeaderMenuOpen(false);
+                                    }}
+                                    className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/5 transition-colors text-left cursor-pointer"
+                                  >
+                                    <Users size={15} className="text-indigo-400" />
+                                    <span>Group Info</span>
+                                  </button>
 
-                                <button
-                                  onClick={() => {
-                                    setIsAddGroupMemberOpen(true);
-                                    setIsHeaderMenuOpen(false);
-                                  }}
-                                  className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/5 transition-colors text-left cursor-pointer"
-                                >
-                                  <UserPlus size={15} className="text-indigo-400" />
-                                  <span>Add Participants</span>
-                                </button>
+                                  <button
+                                    onClick={() => {
+                                      setIsAddGroupMemberOpen(true);
+                                      setIsHeaderMenuOpen(false);
+                                    }}
+                                    className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/5 transition-colors text-left cursor-pointer"
+                                  >
+                                    <UserPlus size={15} className="text-indigo-400" />
+                                    <span>Add Participants</span>
+                                  </button>
 
-                                <div className="h-px bg-white/5 my-1" />
-                              </>
-                            )}
-                            {!isGroup && otherUserId && (
-                              <>
-                                <button
-                                  onClick={() => {
-                                    setNicknameTargetUserId(otherUserId);
-                                    setNicknameTargetName(shownName || "Friend");
-                                    setNicknameInput(customNickname || "");
-                                    setIsNicknameModalOpen(true);
-                                    setIsHeaderMenuOpen(false);
-                                  }}
-                                  className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/5 transition-colors text-left cursor-pointer"
-                                >
-                                  <Edit3 size={15} className="text-indigo-400" />
-                                  <span>{customNickname ? "Edit Nickname" : "Set Nickname"}</span>
-                                </button>
+                                  <div className="h-px bg-white/5 my-1" />
+                                </>
+                              )}
+                              {!isGroup && otherUserId && (
+                                <>
+                                  <button
+                                    onClick={() => {
+                                      setNicknameTargetUserId(otherUserId);
+                                      setNicknameTargetName(shownName || "Friend");
+                                      setNicknameInput(customNickname || "");
+                                      setIsNicknameModalOpen(true);
+                                      setIsHeaderMenuOpen(false);
+                                    }}
+                                    className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/5 transition-colors text-left cursor-pointer"
+                                  >
+                                    <Edit3 size={15} className="text-indigo-400" />
+                                    <span>{customNickname ? "Edit Nickname" : "Set Nickname"}</span>
+                                  </button>
 
-                                <button
-                                  onClick={() => handleToggleBlock(otherUserId)}
-                                  className={`w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold transition-colors text-left cursor-pointer ${
-                                    isBlocked 
-                                      ? "text-emerald-400 hover:bg-emerald-500/10" 
+                                  <button
+                                    onClick={() => handleToggleBlock(otherUserId)}
+                                    className={`w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold transition-colors text-left cursor-pointer ${isBlocked
+                                      ? "text-emerald-400 hover:bg-emerald-500/10"
                                       : "text-amber-400 hover:bg-amber-500/10"
-                                  }`}
+                                      }`}
+                                  >
+                                    {isBlocked ? (
+                                      <>
+                                        <ShieldCheck size={15} />
+                                        <span>Unblock Contact</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <ShieldAlert size={15} />
+                                        <span>Block Contact</span>
+                                      </>
+                                    )}
+                                  </button>
+
+                                  <div className="my-1 border-t border-white/5" />
+                                </>
+                              )}
+
+                              <button
+                                onClick={() => {
+                                  setIsClearChatModalOpen(true);
+                                  setIsHeaderMenuOpen(false);
+                                }}
+                                className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/5 transition-colors text-left cursor-pointer"
+                              >
+                                <Eraser size={15} className="text-amber-400" />
+                                <span>Clear Chat</span>
+                              </button>
+
+                              <button
+                                onClick={() => {
+                                  if (activeConversationId) toggleCasualMode(activeConversationId);
+                                  setIsHeaderMenuOpen(false);
+                                }}
+                                className="w-full px-3.5 py-2.5 flex items-center justify-between text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/5 transition-colors text-left cursor-pointer"
+                              >
+                                <div className="flex items-center gap-2.5">
+                                  <Sparkles size={15} className={isCasualModeActive ? "text-amber-400" : "text-slate-400"} />
+                                  <span>24h Casual Mode</span>
+                                </div>
+                                <span
+                                  className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${isCasualModeActive
+                                    ? "bg-amber-400/20 text-amber-300 border border-amber-400/30"
+                                    : "bg-white/10 text-slate-400"
+                                    }`}
                                 >
-                                  {isBlocked ? (
-                                    <>
-                                      <ShieldCheck size={15} />
-                                      <span>Unblock Contact</span>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <ShieldAlert size={15} />
-                                      <span>Block Contact</span>
-                                    </>
-                                  )}
-                                </button>
+                                  {isCasualModeActive ? "ON" : "OFF"}
+                                </span>
+                              </button>
 
-                                <div className="my-1 border-t border-white/5" />
-                              </>
-                            )}
-
-                            <button
-                              onClick={() => {
-                                setIsClearChatModalOpen(true);
-                                setIsHeaderMenuOpen(false);
-                              }}
-                              className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/5 transition-colors text-left cursor-pointer"
-                            >
-                              <Eraser size={15} className="text-amber-400" />
-                              <span>Clear Chat</span>
-                            </button>
-
-                            <button
-                              onClick={() => {
-                                setIsDeleteModalOpen(true);
-                                setIsHeaderMenuOpen(false);
-                              }}
-                              className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-rose-400 hover:bg-rose-500/10 transition-colors text-left cursor-pointer"
-                            >
-                              <Trash2 size={15} />
-                              <span>Delete Chat</span>
-                            </button>
-                          </div>
-                        </>
-                      )}
+                              <button
+                                onClick={() => {
+                                  setIsDeleteModalOpen(true);
+                                  setIsHeaderMenuOpen(false);
+                                }}
+                                className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-xs font-semibold text-rose-400 hover:bg-rose-500/10 transition-colors text-left cursor-pointer"
+                              >
+                                <Trash2 size={15} />
+                                <span>Delete Chat</span>
+                              </button>
+                            </div>
+                          </>
+                        )}
                       </div>
                     </div>
                   </div>
                 );
               })()}
 
+              {/* 24h Casual Mode Active Notice Bar */}
+              {isCasualModeActive && (
+                <div className="bg-gradient-to-r from-amber-500/10 via-amber-500/15 to-amber-500/10 border-b border-amber-500/20 px-3.5 sm:px-4 py-1.5 flex items-center justify-between text-xs text-amber-300/90 shrink-0 animate-in fade-in">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Sparkles size={13} className="text-amber-400 shrink-0" />
+                    <span className="truncate">
+                      <strong>24h Casual Mode:</strong> Messages older than 24 hours vanish automatically.
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => activeConversationId && toggleCasualMode(activeConversationId)}
+                    className="text-[11px] underline text-amber-300 hover:text-white ml-2 cursor-pointer shrink-0 font-medium"
+                  >
+                    Turn off
+                  </button>
+                </div>
+              )}
+
               {/* Chat Messages */}
               <div className="relative flex-1 min-h-0 flex flex-col overflow-hidden">
-                <div 
+                <div
                   ref={chatContainerRef}
                   onScroll={handleChatScroll}
                   className="flex-1 min-h-0 overflow-y-auto px-2.5 py-3 sm:px-6 sm:py-5 flex flex-col gap-1 sm:gap-2 overscroll-contain"
                 >
-                  {messages.length === 0 ? (
+                  <NewChatChillBanner isGroup={activeConversation?.type === "group"} />
+                  {displayMessages.length === 0 ? (
                     <div className="my-auto text-center py-10">
-                      <p className="text-sm text-slate-400">No messages in this chat yet.</p>
-                      <p className="text-xs text-slate-600 mt-1">Send a message to break the ice! 💬</p>
+                      <p className="text-sm text-slate-400">
+                        {messages.length > 0 && isCasualModeActive
+                          ? "⚡ 24h Casual Mode: Older messages have faded to keep things light."
+                          : "No messages in this chat yet."}
+                      </p>
+                      <p className="text-xs text-slate-600 mt-1">
+                        {messages.length > 0 && isCasualModeActive
+                          ? "Send a fresh message! 💬"
+                          : "Send a message to break the ice! 💬"}
+                      </p>
                     </div>
                   ) : (
-                    messages.map((msg, index) => {
+                    displayMessages.map((msg, index) => {
                       const isMe = msg.sender_id === user.id;
-                      const senderDisplayName = isMe 
-                        ? "You" 
+                      const senderDisplayName = isMe
+                        ? "You"
                         : getProfileDisplayName(msg.profiles, msg.profiles?.username || "Someone");
                       const senderUsername = msg.profiles?.username;
                       const senderAvatar = msg.profiles?.avatar;
                       const parsed = parseMessageContent(msg.content);
 
-                      const prevMsg = index > 0 ? messages[index - 1] : null;
+                      const prevMsg = index > 0 ? displayMessages[index - 1] : null;
                       const isNewDay = !prevMsg || !isSameDay(prevMsg.created_at, msg.created_at);
                       const dateLabel = isNewDay ? formatChatDateDivider(msg.created_at) : null;
                       const isSameSenderAsPrev = !isNewDay && prevMsg && prevMsg.sender_id === msg.sender_id;
@@ -2530,10 +2636,10 @@ export default function MessagesPage() {
                         const targetIsMe = update ? update.targetUserId === user.id : false;
                         const isSet = update ? update.action === "set" && Boolean(update.nickname) : Boolean(parsed.text && !parsed.text.includes("removed"));
                         const nick = update?.nickname || "";
-                        
+
                         // Clean, concise display names (reduced context)
-                        const setterName = isSetter 
-                          ? "You" 
+                        const setterName = isSetter
+                          ? "You"
                           : getProfileDisplayName(msg.profiles, update?.setterUsername || msg.profiles?.username || "Someone");
 
                         let noticeText = "";
@@ -2601,314 +2707,379 @@ export default function MessagesPage() {
                               </div>
                             </div>
                           )}
-                          <div 
+                          <div
                             id={`msg-${msg.id}`}
-                            className={`group relative flex items-start gap-1.5 sm:gap-2 transition-all duration-300 rounded-2xl p-0.5 ${
-                              isMe ? 'justify-end' : 'justify-start'
-                            } ${isFirstInCluster ? 'mt-2.5 sm:mt-3' : 'mt-0.5 sm:mt-1'}`}
+                            className={`group relative flex items-start gap-1.5 sm:gap-2 transition-all duration-300 rounded-2xl p-0.5 ${isMe ? 'justify-end' : 'justify-start'
+                              } ${isFirstInCluster ? 'mt-2.5 sm:mt-3' : 'mt-0.5 sm:mt-1'}`}
                           >
-                          {/* Avatar in group for incoming messages: shown on first message of cluster, spacer on consecutive */}
-                          {!isMe && activeConversation?.type === "group" && (
-                            isFirstInCluster ? (
-                              <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-slate-800 overflow-hidden shrink-0 border border-white/10 mt-0.5 shadow-sm">
-                                {senderAvatar?.includes("http") ? (
-                                  <img src={senderAvatar} alt={senderDisplayName} className="w-full h-full object-cover" />
-                                ) : (
-                                  <UserAvatar avatar={senderAvatar} size="sm" className="!w-full !h-full" />
-                                )}
-                              </div>
-                            ) : (
-                              <div className="w-7 h-7 sm:w-8 sm:h-8 shrink-0 pointer-events-none" />
-                            )
-                          )}
+                            {/* Avatar in group for incoming messages: shown on first message of cluster, spacer on consecutive */}
+                            {!isMe && activeConversation?.type === "group" && (
+                              isFirstInCluster ? (
+                                <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-slate-800 overflow-hidden shrink-0 border border-white/10 mt-0.5 shadow-sm">
+                                  {senderAvatar?.includes("http") ? (
+                                    <img src={senderAvatar} alt={senderDisplayName} className="w-full h-full object-cover" />
+                                  ) : (
+                                    <UserAvatar avatar={senderAvatar} size="sm" className="!w-full !h-full" />
+                                  )}
+                                </div>
+                              ) : (
+                                <div className="w-7 h-7 sm:w-8 sm:h-8 shrink-0 pointer-events-none" />
+                              )
+                            )}
 
-                          {/* Floating Action Menu for own messages (floats above bubble, does NOT squish bubble) */}
-                          {isMe && (
-                            <div className={`absolute -top-9 right-2 z-30 transition-all duration-150 ${
-                              activeActionMsgId === msg.id
+                            {/* Floating Action Menu for own messages (floats above bubble, does NOT squish bubble) */}
+                            {isMe && (
+                              <div className={`absolute -top-9 right-2 z-30 transition-all duration-150 ${activeActionMsgId === msg.id
                                 ? "opacity-100 scale-100 pointer-events-auto"
                                 : "opacity-0 scale-95 pointer-events-none sm:group-hover:opacity-100 sm:group-hover:scale-100 sm:group-hover:pointer-events-auto"
-                            } flex items-center gap-0.5 bg-[#12131A]/95 border border-white/15 rounded-xl px-1.5 py-1 shadow-2xl backdrop-blur-xl`}>
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setActiveActionMsgId(null);
-                                  setReplyingTo({
-                                    id: msg.id,
-                                    sender: senderDisplayName,
-                                    text: parsed.type === "voice"
-                                      ? "Voice Note"
-                                      : parsed.type === "gif"
-                                      ? "GIF"
-                                      : parsed.type === "room_invite"
-                                      ? "Voice Hangout Invite"
-                                      : parsed.text || "",
-                                    isVoice: parsed.type === "voice",
-                                    isGif: parsed.type === "gif",
-                                    gifUrl: parsed.gifUrl,
-                                  });
-                                }}
-                                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
-                                title="Reply"
-                                aria-label="Reply"
-                              >
-                                <Reply size={13} />
-                              </button>
+                                } flex items-center gap-0.5 bg-[#12131A]/95 border border-white/15 rounded-xl px-1.5 py-1 shadow-2xl backdrop-blur-xl`}>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setActiveActionMsgId(null);
+                                    setReplyingTo({
+                                      id: msg.id,
+                                      sender: senderDisplayName,
+                                      text: parsed.type === "voice"
+                                        ? "Voice Note"
+                                        : parsed.type === "gif"
+                                          ? "GIF"
+                                          : parsed.type === "room_invite"
+                                            ? "Voice Hangout Invite"
+                                            : parsed.text || "",
+                                      isVoice: parsed.type === "voice",
+                                      isGif: parsed.type === "gif",
+                                      gifUrl: parsed.gifUrl,
+                                    });
+                                  }}
+                                  className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+                                  title="Reply"
+                                  aria-label="Reply"
+                                >
+                                  <Reply size={13} />
+                                </button>
 
-                              {parsed.type !== "voice" && parsed.type !== "room_invite" && parsed.type !== "gif" && (() => {
-                                const ageMs = Date.now() - new Date(msg.created_at).getTime();
-                                const isWithin5Minutes = ageMs <= 5 * 60 * 1000;
-                                if (!isWithin5Minutes) return null;
+                                {parsed.type !== "voice" && parsed.type !== "room_invite" && parsed.type !== "gif" && (() => {
+                                  const ageMs = Date.now() - new Date(msg.created_at).getTime();
+                                  const isWithin5Minutes = ageMs <= 5 * 60 * 1000;
+                                  if (!isWithin5Minutes) return null;
+                                  return (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setActiveActionMsgId(null);
+                                        startEditingMessage(msg.id, msg.content, msg.created_at);
+                                      }}
+                                      className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+                                      title="Edit message (available for 5 min)"
+                                      aria-label="Edit message"
+                                    >
+                                      <Edit3 size={13} />
+                                    </button>
+                                  );
+                                })()}
+
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setActiveActionMsgId(null);
+                                    setDeletingMessageId(msg.id);
+                                  }}
+                                  className="p-1 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
+                                  title="Delete message"
+                                  aria-label="Delete message"
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setActiveActionMsgId(null);
+                                    setMessageInfoTarget({
+                                      message: msg,
+                                      parsedMessage: parsed,
+                                    });
+                                  }}
+                                  className="p-1 rounded-lg text-slate-400 hover:text-sky-400 hover:bg-white/10 transition-colors"
+                                  title="Message info (Seen by)"
+                                  aria-label="Message info"
+                                >
+                                  <Info size={13} />
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setActiveReactionPickerMsgId((prev) => (prev === msg.id ? null : msg.id));
+                                  }}
+                                  className={`p-1 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-white/10 transition-colors ${activeReactionPickerMsgId === msg.id ? "text-amber-400 bg-white/10" : ""
+                                    }`}
+                                  title="React"
+                                  aria-label="React"
+                                >
+                                  <Smile size={13} />
+                                </button>
+                              </div>
+                            )}
+
+                            <div className={`max-w-[85%] sm:max-w-[70%] min-w-[64px] flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
+                              {/* Message Bubble Container */}
+                              {(() => {
+                                const isGif = parsed.type === "gif" && !!parsed.gifUrl;
+                                const msgTime = new Date(msg.created_at).getTime();
+                                const otherReadTime = otherUserLastReadAt ? new Date(otherUserLastReadAt).getTime() : 0;
+                                const effectiveOtherReadTime = Math.max(otherReadTime, otherUserLatestMsgTime);
+                                const isMsgSeen = Boolean(effectiveOtherReadTime > 0 && effectiveOtherReadTime >= msgTime - 3000);
+                                const isMsgDelivered = Boolean(isOtherUserOnline || isMsgSeen);
                                 return (
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      setActiveActionMsgId(null);
-                                      startEditingMessage(msg.id, msg.content, msg.created_at);
-                                    }}
-                                    className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
-                                    title="Edit message (available for 5 min)"
-                                    aria-label="Edit message"
-                                  >
-                                    <Edit3 size={13} />
-                                  </button>
-                                );
-                              })()}
-
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setActiveActionMsgId(null);
-                                  setDeletingMessageId(msg.id);
-                                }}
-                                className="p-1 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
-                                title="Delete message"
-                                aria-label="Delete message"
-                              >
-                                <Trash2 size={13} />
-                              </button>
-
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setActiveActionMsgId(null);
-                                  setMessageInfoTarget({
-                                    message: msg,
-                                    parsedMessage: parsed,
-                                  });
-                                }}
-                                className="p-1 rounded-lg text-slate-400 hover:text-sky-400 hover:bg-white/10 transition-colors"
-                                title="Message info (Seen by)"
-                                aria-label="Message info"
-                              >
-                                <Info size={13} />
-                              </button>
-
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setActiveReactionPickerMsgId((prev) => (prev === msg.id ? null : msg.id));
-                                }}
-                                className={`p-1 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-white/10 transition-colors ${
-                                  activeReactionPickerMsgId === msg.id ? "text-amber-400 bg-white/10" : ""
-                                }`}
-                                title="React"
-                                aria-label="React"
-                              >
-                                <Smile size={13} />
-                              </button>
-                            </div>
-                          )}
-
-                          <div className={`max-w-[85%] sm:max-w-[70%] min-w-[64px] flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
-                            {/* Message Bubble Container */}
-                            {(() => {
-                              const isGif = parsed.type === "gif" && !!parsed.gifUrl;
-                              const msgTime = new Date(msg.created_at).getTime();
-                              const otherReadTime = otherUserLastReadAt ? new Date(otherUserLastReadAt).getTime() : 0;
-                              const effectiveOtherReadTime = Math.max(otherReadTime, otherUserLatestMsgTime);
-                              const isMsgSeen = Boolean(effectiveOtherReadTime > 0 && effectiveOtherReadTime >= msgTime - 3000);
-                              const isMsgDelivered = Boolean(isOtherUserOnline || isMsgSeen);
-                              return (
-                                <div 
-                                  onClick={() => setActiveActionMsgId(prev => prev === msg.id ? null : msg.id)}
-                                  className={`w-fit rounded-2xl shadow-md break-words min-w-[64px] max-w-full overflow-hidden cursor-pointer transition-all ${
-                                    isGif
+                                  <div
+                                    onClick={() => setActiveActionMsgId(prev => prev === msg.id ? null : msg.id)}
+                                    className={`w-fit rounded-2xl shadow-md break-words min-w-[64px] max-w-full overflow-hidden cursor-pointer transition-all ${isGif
                                       ? isMe
                                         ? 'p-1 bg-gradient-to-r from-indigo-600 to-indigo-500 text-white rounded-tr-xs'
                                         : 'p-1 bg-[#1e202c] text-slate-100 border border-white/5 rounded-tl-xs backdrop-blur-sm'
-                                      : isMe 
-                                        ? `px-3 py-1.5 sm:px-3.5 sm:py-2 text-sm leading-relaxed bg-gradient-to-r from-indigo-600 to-indigo-500 text-white ${
-                                            isFirstInCluster ? 'rounded-tr-xs' : ''
-                                          }` 
-                                        : `px-3 py-1.5 sm:px-3.5 sm:py-2 text-sm leading-relaxed bg-[#1e202c] text-slate-100 border border-white/5 ${
-                                            isFirstInCluster ? 'rounded-tl-xs' : ''
-                                          } backdrop-blur-sm`
-                                  }`}
-                                >
-                                  {/* WhatsApp-Style Group Chat Sender Name INSIDE the bubble (first in cluster only, NO @username) */}
-                                  {!isMe && activeConversation?.type === "group" && isFirstInCluster && (
-                                    <div className="mb-0.5 select-none pointer-events-none">
-                                      <span className={`text-[11px] font-bold tracking-tight truncate block ${getSenderColor(senderDisplayName)}`}>
-                                        {senderDisplayName}
-                                      </span>
-                                    </div>
-                                  )}
-                                  {/* Quoted Reply reference if this message was in reply to another */}
-                                  {parsed.replyTo && (
-                                    <div
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        scrollToMessage(parsed.replyTo?.id);
-                                      }}
-                                      className={`mb-1.5 px-2.5 py-1.5 rounded-xl text-xs border-l-2 cursor-pointer transition-colors w-full min-w-0 overflow-hidden ${
-                                        isMe
+                                      : isMe
+                                        ? `px-3 py-1.5 sm:px-3.5 sm:py-2 text-sm leading-relaxed bg-gradient-to-r from-indigo-600 to-indigo-500 text-white ${isFirstInCluster ? 'rounded-tr-xs' : ''
+                                        }`
+                                        : `px-3 py-1.5 sm:px-3.5 sm:py-2 text-sm leading-relaxed bg-[#1e202c] text-slate-100 border border-white/5 ${isFirstInCluster ? 'rounded-tl-xs' : ''
+                                        } backdrop-blur-sm`
+                                      }`}
+                                  >
+                                    {/* WhatsApp-Style Group Chat Sender Name INSIDE the bubble (first in cluster only, NO @username) */}
+                                    {!isMe && activeConversation?.type === "group" && isFirstInCluster && (
+                                      <div className="mb-0.5 select-none pointer-events-none">
+                                        <span className={`text-[11px] font-bold tracking-tight truncate block ${getSenderColor(senderDisplayName)}`}>
+                                          {senderDisplayName}
+                                        </span>
+                                      </div>
+                                    )}
+                                    {/* Quoted Reply reference if this message was in reply to another */}
+                                    {parsed.replyTo && (
+                                      <div
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          scrollToMessage(parsed.replyTo?.id);
+                                        }}
+                                        className={`mb-1.5 px-2.5 py-1.5 rounded-xl text-xs border-l-2 cursor-pointer transition-colors w-full min-w-0 overflow-hidden ${isMe
                                           ? "bg-indigo-950/70 border-white/70 hover:bg-indigo-950/90 text-white/90"
                                           : "bg-white/5 border-indigo-400 hover:bg-white/10 text-slate-300"
-                                      }`}
-                                    >
-                                      <div className="flex items-center gap-1 font-semibold text-[11px] mb-0.5 text-indigo-300 min-w-0">
-                                        <Reply size={11} className="rotate-180 shrink-0" />
-                                        <span className="truncate">{parsed.replyTo.sender}</span>
-                                      </div>
-                                      <p className="line-clamp-2 text-[11px] opacity-80 break-words w-full overflow-hidden text-ellipsis">
-                                        {parsed.replyTo.isVoice ? "🎵 Voice Note" : parsed.replyTo.isGif ? "🖼️ GIF" : parsed.replyTo.text}
-                                      </p>
-                                    </div>
-                                  )}
-
-                                  {/* Room Invite, Voice Note, GIF, or Text */}
-                                  {parsed.type === "room_invite" && parsed.roomInvite ? (
-                                    <RoomInviteCard invite={parsed.roomInvite} isMe={isMe} />
-                                  ) : parsed.type === "voice" ? (
-                                    <VoiceNotePlayer
-                                      audioUrl={parsed.audioUrl || ""}
-                                      duration={parsed.duration}
-                                      isMe={isMe}
-                                    />
-                                  ) : isGif ? (
-                                    <div className="relative rounded-xl overflow-hidden max-w-[240px] sm:max-w-[300px] bg-black/40 group/gif">
-                                      {/* Quick React Smile button on GIF */}
-                                      <button
-                                        type="button"
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          setActiveReactionPickerMsgId((prev) => (prev === msg.id ? null : msg.id));
-                                        }}
-                                        className="absolute top-1.5 right-1.5 z-20 p-1.5 rounded-full bg-black/60 hover:bg-black/85 text-white/80 hover:text-amber-300 border border-white/15 backdrop-blur-md transition-all active:scale-95 cursor-pointer shadow-lg flex items-center justify-center opacity-85 hover:opacity-100"
-                                        title="React to GIF"
-                                        aria-label="React to GIF"
+                                          }`}
                                       >
-                                        <Smile size={13} />
-                                      </button>
-                                      <img
-                                        src={parsed.gifUrl}
-                                        alt={parsed.gifTitle || "GIF"}
-                                        className="w-full h-auto max-h-[260px] sm:max-h-[300px] object-cover rounded-xl cursor-pointer hover:opacity-95 transition-opacity"
-                                        loading="lazy"
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          setExpandedMediaUrl(parsed.gifUrl!);
-                                          setExpandedMediaTitle(parsed.gifTitle || "GIF");
-                                          setLightboxMessageId(msg.id);
-                                        }}
-                                      />
-                                      <div className="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded-md bg-black/70 backdrop-blur-md text-[9px] font-black text-white/90 border border-white/10 pointer-events-none tracking-wider">
-                                        GIF
+                                        <div className="flex items-center gap-1 font-semibold text-[11px] mb-0.5 text-indigo-300 min-w-0">
+                                          <Reply size={11} className="rotate-180 shrink-0" />
+                                          <span className="truncate">{parsed.replyTo.sender}</span>
+                                        </div>
+                                        <p className="line-clamp-2 text-[11px] opacity-80 break-words w-full overflow-hidden text-ellipsis">
+                                          {parsed.replyTo.isVoice ? "🎵 Voice Note" : parsed.replyTo.isGif ? "🖼️ GIF" : parsed.replyTo.text}
+                                        </p>
                                       </div>
-                                      <div className="absolute bottom-1.5 right-1.5 px-2 py-0.5 rounded-md bg-black/75 backdrop-blur-md text-[9px] font-medium text-white/90 border border-white/10 flex items-center gap-1 select-none pointer-events-none">
-                                        <span>{new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                                        {isMe && activeConversation?.type !== "group" && (
-                                          <span className="inline-flex items-center gap-0.5 ml-0.5">
-                                            {isMsgSeen ? (
-                                              <span className="text-sky-400 font-bold flex items-center" title="Seen">
-                                                <CheckCheck size={12} className="stroke-[2.5]" />
-                                              </span>
-                                            ) : isMsgDelivered ? (
-                                              <span className="text-indigo-200/80 flex items-center" title="Delivered">
-                                                <CheckCheck size={12} className="stroke-[1.8]" />
-                                              </span>
-                                            ) : (
-                                              <span className="text-indigo-200/60 flex items-center" title="Sent">
-                                                <Check size={11} className="stroke-[2]" />
-                                              </span>
-                                            )}
-                                          </span>
-                                        )}
-                                        {isMe && activeConversation?.type === "group" && (() => {
-                                          const otherMembers = activeGroupMembers.filter((m) => m.id !== user.id);
-                                          const totalRecipients = otherMembers.length;
-                                          if (totalRecipients === 0) return null;
-                                          const readCount = otherMembers.filter((m) => isMemberRead(m.id, msgTime)).length;
-                                          const isAllSeen = readCount === totalRecipients;
+                                    )}
 
-                                          return (
-                                            <span
-                                              onClick={(e) => {
-                                                e.stopPropagation();
-                                                setMessageInfoTarget({ message: msg, parsedMessage: parsed });
-                                              }}
-                                              className={`inline-flex items-center gap-1 ml-1 px-1.5 py-0.5 rounded cursor-pointer pointer-events-auto hover:opacity-90 transition-all font-semibold ${
-                                                isAllSeen
-                                                  ? "text-sky-400"
-                                                  : readCount > 0
-                                                  ? "text-sky-300"
-                                                  : "text-slate-300"
-                                              }`}
-                                              title="Click to view message info"
-                                            >
-                                              {isAllSeen ? (
-                                                <>
-                                                  <CheckCheck size={11} className="stroke-[2.5] text-sky-400" />
-                                                  <span>All</span>
-                                                </>
-                                              ) : readCount > 0 ? (
-                                                <>
-                                                  <CheckCheck size={11} className="stroke-[2] text-sky-400" />
-                                                  <span>{readCount}/{totalRecipients}</span>
-                                                </>
+                                    {/* Room Invite, Voice Note, GIF, or Text */}
+                                    {parsed.type === "room_invite" && parsed.roomInvite ? (
+                                      <RoomInviteCard invite={parsed.roomInvite} isMe={isMe} />
+                                    ) : parsed.type === "voice" ? (
+                                      <VoiceNotePlayer
+                                        audioUrl={parsed.audioUrl || ""}
+                                        duration={parsed.duration}
+                                        isMe={isMe}
+                                      />
+                                    ) : isGif ? (
+                                      <div className="relative rounded-xl overflow-hidden max-w-[240px] sm:max-w-[300px] bg-black/40 group/gif">
+                                        {/* Quick React Smile button on GIF */}
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            setActiveReactionPickerMsgId((prev) => (prev === msg.id ? null : msg.id));
+                                          }}
+                                          className="absolute top-1.5 right-1.5 z-20 p-1.5 rounded-full bg-black/60 hover:bg-black/85 text-white/80 hover:text-amber-300 border border-white/15 backdrop-blur-md transition-all active:scale-95 cursor-pointer shadow-lg flex items-center justify-center opacity-85 hover:opacity-100"
+                                          title="React to GIF"
+                                          aria-label="React to GIF"
+                                        >
+                                          <Smile size={13} />
+                                        </button>
+                                        <img
+                                          src={parsed.gifUrl}
+                                          alt={parsed.gifTitle || "GIF"}
+                                          className="w-full h-auto max-h-[260px] sm:max-h-[300px] object-cover rounded-xl cursor-pointer hover:opacity-95 transition-opacity"
+                                          loading="lazy"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            setExpandedMediaUrl(parsed.gifUrl!);
+                                            setExpandedMediaTitle(parsed.gifTitle || "GIF");
+                                            setLightboxMessageId(msg.id);
+                                          }}
+                                        />
+                                        <div className="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded-md bg-black/70 backdrop-blur-md text-[9px] font-black text-white/90 border border-white/10 pointer-events-none tracking-wider">
+                                          GIF
+                                        </div>
+                                        <div className="absolute bottom-1.5 right-1.5 px-2 py-0.5 rounded-md bg-black/75 backdrop-blur-md text-[9px] font-medium text-white/90 border border-white/10 flex items-center gap-1 select-none pointer-events-none">
+                                          <span>{new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                                          {isMe && activeConversation?.type !== "group" && (
+                                            <span className="inline-flex items-center gap-0.5 ml-0.5">
+                                              {isMsgSeen ? (
+                                                <span className="text-sky-400 font-bold flex items-center" title="Seen">
+                                                  <CheckCheck size={12} className="stroke-[2.5]" />
+                                                </span>
+                                              ) : isMsgDelivered ? (
+                                                <span className="text-indigo-200/80 flex items-center" title="Delivered">
+                                                  <CheckCheck size={12} className="stroke-[1.8]" />
+                                                </span>
                                               ) : (
-                                                <>
-                                                  <Check size={10} className="stroke-[2]" />
-                                                </>
+                                                <span className="text-indigo-200/60 flex items-center" title="Sent">
+                                                  <Check size={11} className="stroke-[2]" />
+                                                </span>
                                               )}
                                             </span>
-                                          );
-                                        })()}
+                                          )}
+                                          {isMe && activeConversation?.type === "group" && (() => {
+                                            const otherMembers = activeGroupMembers.filter((m) => m.id !== user.id);
+                                            const totalRecipients = otherMembers.length;
+                                            if (totalRecipients === 0) return null;
+                                            const readCount = otherMembers.filter((m) => isMemberRead(m.id, msgTime)).length;
+                                            const isAllSeen = readCount === totalRecipients;
+
+                                            return (
+                                              <span
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  setMessageInfoTarget({ message: msg, parsedMessage: parsed });
+                                                }}
+                                                className={`inline-flex items-center gap-1 ml-1 px-1.5 py-0.5 rounded cursor-pointer pointer-events-auto hover:opacity-90 transition-all font-semibold ${isAllSeen
+                                                  ? "text-sky-400"
+                                                  : readCount > 0
+                                                    ? "text-sky-300"
+                                                    : "text-slate-300"
+                                                  }`}
+                                                title="Click to view message info"
+                                              >
+                                                {isAllSeen ? (
+                                                  <>
+                                                    <CheckCheck size={11} className="stroke-[2.5] text-sky-400" />
+                                                    <span>All</span>
+                                                  </>
+                                                ) : readCount > 0 ? (
+                                                  <>
+                                                    <CheckCheck size={11} className="stroke-[2] text-sky-400" />
+                                                    <span>{readCount}/{totalRecipients}</span>
+                                                  </>
+                                                ) : (
+                                                  <>
+                                                    <Check size={10} className="stroke-[2]" />
+                                                  </>
+                                                )}
+                                              </span>
+                                            );
+                                          })()}
+                                        </div>
                                       </div>
-                                    </div>
-                                  ) : (
-                                    <div className="flex flex-wrap items-end justify-between gap-x-2.5 gap-y-0.5">
-                                      <p className="whitespace-pre-wrap select-text text-[13.5px] leading-relaxed break-words min-w-0">
-                                        {parsed.text}
-                                      </p>
-                                      <div 
-                                        className={`text-[9.5px] flex items-center gap-1 select-none shrink-0 ml-auto pb-0.5 ${
-                                          isMe ? 'text-indigo-200/80' : 'text-slate-400'
-                                        }`}
+                                    ) : (
+                                      <div className="flex flex-wrap items-end justify-between gap-x-2.5 gap-y-0.5">
+                                        <p className="whitespace-pre-wrap select-text text-[13.5px] leading-relaxed break-words min-w-0">
+                                          <SafeMessageText text={parsed.text || ""} isMe={isMe} />
+                                        </p>
+                                        <div
+                                          className={`text-[9.5px] flex items-center gap-1 select-none shrink-0 ml-auto pb-0.5 ${isMe ? 'text-indigo-200/80' : 'text-slate-400'
+                                            }`}
+                                        >
+                                          {parsed.isEdited && <span className="italic opacity-80">(edited)</span>}
+                                          <span>{new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+
+                                          {/* WhatsApp-Style Sent / Delivered / Seen read receipts */}
+                                          {isMe && activeConversation?.type !== "group" && (
+                                            <span className="ml-0.5 inline-flex items-center gap-0.5">
+                                              {isMsgSeen ? (
+                                                <span className="text-sky-300 font-bold flex items-center gap-0.5" title="Seen">
+                                                  <CheckCheck size={12} className="stroke-[2.5] text-sky-400" />
+                                                </span>
+                                              ) : isMsgDelivered ? (
+                                                <span className="text-indigo-200/80 flex items-center gap-0.5" title="Delivered">
+                                                  <CheckCheck size={12} className="stroke-[1.8]" />
+                                                </span>
+                                              ) : (
+                                                <span className="text-indigo-200/60 flex items-center gap-0.5" title="Sent">
+                                                  <Check size={11} className="stroke-[2]" />
+                                                </span>
+                                              )}
+                                            </span>
+                                          )}
+
+                                          {/* WhatsApp-Style Group Seen by Badge */}
+                                          {isMe && activeConversation?.type === "group" && (() => {
+                                            const otherMembers = activeGroupMembers.filter((m) => m.id !== user.id);
+                                            const totalRecipients = otherMembers.length;
+                                            if (totalRecipients === 0) return null;
+                                            const readCount = otherMembers.filter((m) => isMemberRead(m.id, msgTime)).length;
+                                            const isAllSeen = readCount === totalRecipients;
+
+                                            return (
+                                              <button
+                                                type="button"
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  setMessageInfoTarget({ message: msg, parsedMessage: parsed });
+                                                }}
+                                                className={`ml-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-semibold transition-all hover:scale-105 cursor-pointer select-none ${isAllSeen
+                                                  ? "bg-sky-500/20 text-sky-300 border border-sky-500/30 hover:bg-sky-500/30"
+                                                  : readCount > 0
+                                                    ? "bg-indigo-900/60 text-indigo-200 border border-indigo-400/30 hover:bg-indigo-900/80"
+                                                    : "bg-white/10 text-white/70 border border-white/10 hover:bg-white/15"
+                                                  }`}
+                                                title="Click to view who read this message"
+                                              >
+                                                {isAllSeen ? (
+                                                  <>
+                                                    <CheckCheck size={11} className="stroke-[2.5] text-sky-400" />
+                                                    <span>Seen by all</span>
+                                                  </>
+                                                ) : readCount > 0 ? (
+                                                  <>
+                                                    <CheckCheck size={11} className="stroke-[2] text-sky-400" />
+                                                    <span>Seen by {readCount}/{totalRecipients}</span>
+                                                  </>
+                                                ) : (
+                                                  <>
+                                                    <Check size={10} className="stroke-[2] text-white/60" />
+                                                    <span>Delivered</span>
+                                                  </>
+                                                )}
+                                              </button>
+                                            );
+                                          })()}
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {/* Timestamp, (edited) and Read Receipts for Voice & Invite messages */}
+                                    {(parsed.type === "voice" || parsed.type === "room_invite") && (
+                                      <div
+                                        className={`text-[9px] mt-1 flex items-center gap-1 select-none ${isMe ? 'text-indigo-200/80 justify-end' : 'text-slate-400 justify-end'
+                                          }`}
                                       >
                                         {parsed.isEdited && <span className="italic opacity-80">(edited)</span>}
                                         <span>{new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
 
                                         {/* WhatsApp-Style Sent / Delivered / Seen read receipts */}
                                         {isMe && activeConversation?.type !== "group" && (
-                                          <span className="ml-0.5 inline-flex items-center gap-0.5">
+                                          <span className="ml-1 inline-flex items-center gap-0.5">
                                             {isMsgSeen ? (
                                               <span className="text-sky-300 font-bold flex items-center gap-0.5" title="Seen">
-                                                <CheckCheck size={12} className="stroke-[2.5] text-sky-400" />
+                                                <CheckCheck size={13} className="stroke-[2.5] text-sky-400" />
                                               </span>
                                             ) : isMsgDelivered ? (
                                               <span className="text-indigo-200/80 flex items-center gap-0.5" title="Delivered">
-                                                <CheckCheck size={12} className="stroke-[1.8]" />
+                                                <CheckCheck size={13} className="stroke-[1.8]" />
                                               </span>
                                             ) : (
                                               <span className="text-indigo-200/60 flex items-center gap-0.5" title="Sent">
-                                                <Check size={11} className="stroke-[2]" />
+                                                <Check size={12} className="stroke-[2]" />
                                               </span>
                                             )}
                                           </span>
@@ -2929,13 +3100,12 @@ export default function MessagesPage() {
                                                 e.stopPropagation();
                                                 setMessageInfoTarget({ message: msg, parsedMessage: parsed });
                                               }}
-                                              className={`ml-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-semibold transition-all hover:scale-105 cursor-pointer select-none ${
-                                                isAllSeen
-                                                  ? "bg-sky-500/20 text-sky-300 border border-sky-500/30 hover:bg-sky-500/30"
-                                                  : readCount > 0
+                                              className={`ml-1.5 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-semibold transition-all hover:scale-105 cursor-pointer select-none ${isAllSeen
+                                                ? "bg-sky-500/20 text-sky-300 border border-sky-500/30 hover:bg-sky-500/30"
+                                                : readCount > 0
                                                   ? "bg-indigo-900/60 text-indigo-200 border border-indigo-400/30 hover:bg-indigo-900/80"
                                                   : "bg-white/10 text-white/70 border border-white/10 hover:bg-white/15"
-                                              }`}
+                                                }`}
                                               title="Click to view who read this message"
                                             >
                                               {isAllSeen ? (
@@ -2958,185 +3128,107 @@ export default function MessagesPage() {
                                           );
                                         })()}
                                       </div>
-                                    </div>
-                                  )}
+                                    )}
+                                  </div>
+                                );
+                              })()}
 
-                                  {/* Timestamp, (edited) and Read Receipts for Voice & Invite messages */}
-                                  {(parsed.type === "voice" || parsed.type === "room_invite") && (
-                                    <div 
-                                      className={`text-[9px] mt-1 flex items-center gap-1 select-none ${
-                                        isMe ? 'text-indigo-200/80 justify-end' : 'text-slate-400 justify-end'
-                                      }`}
-                                    >
-                                      {parsed.isEdited && <span className="italic opacity-80">(edited)</span>}
-                                      <span>{new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-
-                                      {/* WhatsApp-Style Sent / Delivered / Seen read receipts */}
-                                      {isMe && activeConversation?.type !== "group" && (
-                                        <span className="ml-1 inline-flex items-center gap-0.5">
-                                          {isMsgSeen ? (
-                                            <span className="text-sky-300 font-bold flex items-center gap-0.5" title="Seen">
-                                              <CheckCheck size={13} className="stroke-[2.5] text-sky-400" />
-                                            </span>
-                                          ) : isMsgDelivered ? (
-                                            <span className="text-indigo-200/80 flex items-center gap-0.5" title="Delivered">
-                                              <CheckCheck size={13} className="stroke-[1.8]" />
-                                            </span>
-                                          ) : (
-                                            <span className="text-indigo-200/60 flex items-center gap-0.5" title="Sent">
-                                              <Check size={12} className="stroke-[2]" />
-                                            </span>
-                                          )}
-                                        </span>
-                                      )}
-
-                                      {/* WhatsApp-Style Group Seen by Badge */}
-                                      {isMe && activeConversation?.type === "group" && (() => {
-                                        const otherMembers = activeGroupMembers.filter((m) => m.id !== user.id);
-                                        const totalRecipients = otherMembers.length;
-                                        if (totalRecipients === 0) return null;
-                                        const readCount = otherMembers.filter((m) => isMemberRead(m.id, msgTime)).length;
-                                        const isAllSeen = readCount === totalRecipients;
-
-                                        return (
-                                          <button
-                                            type="button"
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              setMessageInfoTarget({ message: msg, parsedMessage: parsed });
-                                            }}
-                                            className={`ml-1.5 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-semibold transition-all hover:scale-105 cursor-pointer select-none ${
-                                              isAllSeen
-                                                ? "bg-sky-500/20 text-sky-300 border border-sky-500/30 hover:bg-sky-500/30"
-                                                : readCount > 0
-                                                ? "bg-indigo-900/60 text-indigo-200 border border-indigo-400/30 hover:bg-indigo-900/80"
-                                                : "bg-white/10 text-white/70 border border-white/10 hover:bg-white/15"
-                                            }`}
-                                            title="Click to view who read this message"
-                                          >
-                                            {isAllSeen ? (
-                                              <>
-                                                <CheckCheck size={11} className="stroke-[2.5] text-sky-400" />
-                                                <span>Seen by all</span>
-                                              </>
-                                            ) : readCount > 0 ? (
-                                              <>
-                                                <CheckCheck size={11} className="stroke-[2] text-sky-400" />
-                                                <span>Seen by {readCount}/{totalRecipients}</span>
-                                              </>
-                                            ) : (
-                                              <>
-                                                <Check size={10} className="stroke-[2] text-white/60" />
-                                                <span>Delivered</span>
-                                              </>
-                                            )}
-                                          </button>
-                                        );
-                                      })()}
-                                    </div>
-                                  )}
-                                </div>
-                              );
-                            })()}
-
-                            {/* Reaction Badges below the message bubble */}
-                            <ReactionBadges
-                              reactions={parsed.reactions}
-                              currentUserId={user?.id}
-                              onToggleReaction={(emoji) => handleToggleReaction(msg.id, emoji)}
-                              onOpenPicker={() => setActiveReactionPickerMsgId(msg.id)}
-                              isMe={isMe}
-                            />
-                          </div>
-
-                          {/* Quick Reaction Floating Picker */}
-                          {activeReactionPickerMsgId === msg.id && (
-                            <div className={`absolute ${index === 0 ? 'top-full mt-1.5' : '-top-11'} ${isMe ? 'right-2' : 'left-2'} z-40`}>
-                              <QuickReactionPicker
-                                onSelect={(emoji) => {
-                                  handleToggleReaction(msg.id, emoji);
-                                  setActiveReactionPickerMsgId(null);
-                                  setActiveActionMsgId(null);
-                                }}
-                                onClose={() => setActiveReactionPickerMsgId(null)}
+                              {/* Reaction Badges below the message bubble */}
+                              <ReactionBadges
+                                reactions={parsed.reactions}
+                                currentUserId={user?.id}
+                                onToggleReaction={(emoji) => handleToggleReaction(msg.id, emoji)}
+                                onOpenPicker={() => setActiveReactionPickerMsgId(msg.id)}
                                 isMe={isMe}
                               />
                             </div>
-                          )}
 
-                          {/* Floating Action Menu for incoming messages (floats above bubble, does NOT squish bubble) */}
-                          {!isMe && (
-                            <div className={`absolute -top-9 ${activeConversation?.type === "group" ? "left-9 sm:left-10" : "left-2"} z-30 transition-all duration-150 ${
-                              activeActionMsgId === msg.id
+                            {/* Quick Reaction Floating Picker */}
+                            {activeReactionPickerMsgId === msg.id && (
+                              <div className={`absolute ${index === 0 ? 'top-full mt-1.5' : '-top-11'} ${isMe ? 'right-2' : 'left-2'} z-40`}>
+                                <QuickReactionPicker
+                                  onSelect={(emoji) => {
+                                    handleToggleReaction(msg.id, emoji);
+                                    setActiveReactionPickerMsgId(null);
+                                    setActiveActionMsgId(null);
+                                  }}
+                                  onClose={() => setActiveReactionPickerMsgId(null)}
+                                  isMe={isMe}
+                                />
+                              </div>
+                            )}
+
+                            {/* Floating Action Menu for incoming messages (floats above bubble, does NOT squish bubble) */}
+                            {!isMe && (
+                              <div className={`absolute -top-9 ${activeConversation?.type === "group" ? "left-9 sm:left-10" : "left-2"} z-30 transition-all duration-150 ${activeActionMsgId === msg.id
                                 ? "opacity-100 scale-100 pointer-events-auto"
                                 : "opacity-0 scale-95 pointer-events-none sm:group-hover:opacity-100 sm:group-hover:scale-100 sm:group-hover:pointer-events-auto"
-                            } flex items-center gap-0.5 bg-[#12131A]/95 border border-white/15 rounded-xl px-1.5 py-1 shadow-2xl backdrop-blur-xl shrink-0`}>
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setActiveActionMsgId(null);
-                                  setReplyingTo({
-                                    id: msg.id,
-                                    sender: senderDisplayName,
-                                    text: parsed.type === "voice"
-                                      ? "Voice Note"
-                                      : parsed.type === "gif"
-                                      ? "GIF"
-                                      : parsed.type === "room_invite"
-                                      ? "Voice Hangout Invite"
-                                      : parsed.text || "",
-                                    isVoice: parsed.type === "voice",
-                                    isGif: parsed.type === "gif",
-                                    gifUrl: parsed.gifUrl,
-                                  });
-                                }}
-                                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 active:scale-95 transition-all cursor-pointer"
-                                title="Reply"
-                                aria-label="Reply"
-                              >
-                                <Reply size={13} />
-                              </button>
-
-                              {activeConversation?.type === "group" && (
+                                } flex items-center gap-0.5 bg-[#12131A]/95 border border-white/15 rounded-xl px-1.5 py-1 shadow-2xl backdrop-blur-xl shrink-0`}>
                                 <button
                                   type="button"
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     setActiveActionMsgId(null);
-                                    setMessageInfoTarget({
-                                      message: msg,
-                                      parsedMessage: parsed,
+                                    setReplyingTo({
+                                      id: msg.id,
+                                      sender: senderDisplayName,
+                                      text: parsed.type === "voice"
+                                        ? "Voice Note"
+                                        : parsed.type === "gif"
+                                          ? "GIF"
+                                          : parsed.type === "room_invite"
+                                            ? "Voice Hangout Invite"
+                                            : parsed.text || "",
+                                      isVoice: parsed.type === "voice",
+                                      isGif: parsed.type === "gif",
+                                      gifUrl: parsed.gifUrl,
                                     });
                                   }}
-                                  className="p-1.5 rounded-lg text-slate-400 hover:text-sky-400 hover:bg-white/10 active:scale-95 transition-all cursor-pointer"
-                                  title="Message info (Seen by)"
-                                  aria-label="Message info"
+                                  className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 active:scale-95 transition-all cursor-pointer"
+                                  title="Reply"
+                                  aria-label="Reply"
                                 >
-                                  <Info size={13} />
+                                  <Reply size={13} />
                                 </button>
-                              )}
 
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setActiveReactionPickerMsgId((prev) => (prev === msg.id ? null : msg.id));
-                                }}
-                                className={`p-1.5 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-white/10 active:scale-95 transition-all cursor-pointer ${
-                                  activeReactionPickerMsgId === msg.id ? "text-amber-400 bg-white/10" : ""
-                                }`}
-                                title="React"
-                                aria-label="React"
-                              >
-                                <Smile size={13} />
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      </Fragment>
-                    );
-                  })
+                                {activeConversation?.type === "group" && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setActiveActionMsgId(null);
+                                      setMessageInfoTarget({
+                                        message: msg,
+                                        parsedMessage: parsed,
+                                      });
+                                    }}
+                                    className="p-1.5 rounded-lg text-slate-400 hover:text-sky-400 hover:bg-white/10 active:scale-95 transition-all cursor-pointer"
+                                    title="Message info (Seen by)"
+                                    aria-label="Message info"
+                                  >
+                                    <Info size={13} />
+                                  </button>
+                                )}
+
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setActiveReactionPickerMsgId((prev) => (prev === msg.id ? null : msg.id));
+                                  }}
+                                  className={`p-1.5 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-white/10 active:scale-95 transition-all cursor-pointer ${activeReactionPickerMsgId === msg.id ? "text-amber-400 bg-white/10" : ""
+                                    }`}
+                                  title="React"
+                                  aria-label="React"
+                                >
+                                  <Smile size={13} />
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </Fragment>
+                      );
+                    })
                   )}
 
                   {/* Bouncing Typing Bubble */}
@@ -3185,8 +3277,8 @@ export default function MessagesPage() {
               {(() => {
                 const isGroup = activeConversation?.type === "group";
                 const otherUserId = activeConversation?.other_user?.id;
-                const isBlocked = otherUserId && !isGroup 
-                  ? blockedUsers.includes(otherUserId) 
+                const isBlocked = otherUserId && !isGroup
+                  ? blockedUsers.includes(otherUserId)
                   : false;
                 const isBlockedByOther = otherUserId && !isGroup
                   ? blockedMeUsers.includes(otherUserId)
@@ -3246,8 +3338,8 @@ export default function MessagesPage() {
                           {targetRelationship?.hasPendingRequestFromMe
                             ? "Follow request sent. Messaging is locked until they accept."
                             : targetRelationship?.hasPendingRequestFromThem
-                            ? "This user sent you a follow request. Accept to start messaging."
-                            : "Follow request must be accepted before you can send messages."}
+                              ? "This user sent you a follow request. Accept to start messaging."
+                              : "Follow request must be accepted before you can send messages."}
                         </span>
                       </div>
                       {targetRelationship?.hasPendingRequestFromThem ? (
@@ -3373,6 +3465,18 @@ export default function MessagesPage() {
                       </div>
                     )}
 
+                    {/* Smart PII / Link Safety Nudge */}
+                    <SafetyComposerNudge
+                      detection={dmSafetyDetection}
+                      dismissed={Boolean(
+                        dmSafetyDetection && dismissedSafetyKind === dmSafetyDetection.kind
+                      )}
+                      onDismiss={() =>
+                        dmSafetyDetection && setDismissedSafetyKind(dmSafetyDetection.kind)
+                      }
+                      className="mb-2 max-w-4xl mx-auto"
+                    />
+
                     {/* Active Voice Recording Bar */}
                     {isRecordingVoice ? (
                       <div className="w-full flex items-center justify-between gap-3 px-3.5 py-2.5 bg-rose-950/40 border border-rose-500/30 rounded-full animate-in fade-in duration-200">
@@ -3413,18 +3517,17 @@ export default function MessagesPage() {
                       <div className="flex items-center gap-2 w-full max-w-4xl mx-auto">
                         {/* Unified WhatsApp-style Message Input Capsule */}
                         <div className="relative flex-1 flex items-center min-w-0 bg-[#12131D]/90 hover:bg-[#151724] focus-within:bg-[#151724] border border-white/10 focus-within:border-indigo-500/50 focus-within:ring-2 focus-within:ring-indigo-500/20 rounded-full pl-1.5 pr-2 sm:pl-2 sm:pr-3 py-1 sm:py-1.5 transition-all shadow-inner">
-                          
+
                           {/* Media Button: GIF */}
                           <div className="flex items-center gap-1 shrink-0">
                             {/* Sleek GIF Badge Button */}
                             <button
                               type="button"
                               onClick={() => setIsGifPickerOpen(!isGifPickerOpen)}
-                              className={`h-7 px-2.5 rounded-full font-black text-[11px] tracking-wider uppercase transition-all flex items-center justify-center cursor-pointer ${
-                                isGifPickerOpen
-                                  ? "bg-indigo-600 text-white shadow-sm shadow-indigo-600/40 ring-1 ring-indigo-400"
-                                  : "bg-white/[0.08] hover:bg-white/[0.16] text-slate-300 hover:text-white border border-white/10 hover:border-indigo-400/40 active:scale-95"
-                              }`}
+                              className={`h-7 px-2.5 rounded-full font-black text-[11px] tracking-wider uppercase transition-all flex items-center justify-center cursor-pointer ${isGifPickerOpen
+                                ? "bg-indigo-600 text-white shadow-sm shadow-indigo-600/40 ring-1 ring-indigo-400"
+                                : "bg-white/[0.08] hover:bg-white/[0.16] text-slate-300 hover:text-white border border-white/10 hover:border-indigo-400/40 active:scale-95"
+                                }`}
                               title="Search & Send GIFs"
                               aria-label="Send GIF"
                             >
@@ -3473,7 +3576,8 @@ export default function MessagesPage() {
                           ) : (
                             <button
                               type="submit"
-                              className="w-10 h-10 sm:w-11 sm:h-11 flex items-center justify-center rounded-full bg-gradient-to-tr from-indigo-600 via-indigo-500 to-violet-500 hover:from-indigo-500 hover:to-violet-400 active:scale-95 text-white transition-all shadow-lg shadow-indigo-600/35 cursor-pointer animate-in zoom-in-75 duration-150"
+                              disabled={dmSafetyDetection?.severity === "block"}
+                              className="w-10 h-10 sm:w-11 sm:h-11 flex items-center justify-center rounded-full bg-gradient-to-tr from-indigo-600 via-indigo-500 to-violet-500 hover:from-indigo-500 hover:to-violet-400 active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-all shadow-lg shadow-indigo-600/35 cursor-pointer animate-in zoom-in-75 duration-150"
                               aria-label={editingMessage ? "Save Edit" : "Send Message"}
                               title={editingMessage ? "Save Edit" : "Send Message"}
                             >
@@ -3666,7 +3770,7 @@ export default function MessagesPage() {
       )}
 
       {/* Create Group Modal */}
-      <CreateGroupModal 
+      <CreateGroupModal
         isOpen={isGroupModalOpen}
         onClose={() => setIsGroupModalOpen(false)}
         currentUser={user}

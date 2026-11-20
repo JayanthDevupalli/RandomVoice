@@ -32,7 +32,7 @@ export function Navbar({ totalOnline: propTotalOnline, className = "" }: NavbarP
 
   return (
     <>
-      <header className={`sticky top-0 z-40 w-full border-b border-white/5 bg-background/50 backdrop-blur-xl shrink-0 ${className}`}>
+      <header className={`sticky top-0 z-[80] w-full border-b border-white/5 bg-background/50 backdrop-blur-xl shrink-0 ${className}`}>
         <div className="max-w-7xl mx-auto px-3 sm:px-6 h-14 sm:h-16 flex items-center justify-between">
           {/* Brand Logo */}
           <Link href="/junctions" className="flex items-center gap-2 sm:gap-2.5 group opacity-95 hover:opacity-100 transition-opacity select-none">

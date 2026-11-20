@@ -141,7 +141,7 @@ export function NotificationsDropdown() {
 
       {/* Dropdown Menu */}
       {isOpen && (
-        <div className="fixed sm:absolute top-[3.5rem] sm:top-12 left-4 right-4 sm:left-auto sm:right-0 sm:w-80 bg-[#12131A] border border-white/10 rounded-2xl shadow-2xl overflow-hidden z-50 animate-fadeIn">
+        <div className="fixed sm:absolute top-[3.5rem] sm:top-12 left-4 right-4 sm:left-auto sm:right-0 sm:w-80 bg-[#12131A] border border-white/10 rounded-2xl shadow-2xl overflow-hidden z-[90] animate-fadeIn">
           <div className="px-4 py-3 border-b border-white/5 flex items-center justify-between">
             <h3 className="text-sm font-bold text-white">Notifications</h3>
             {requests.length > 0 && (
