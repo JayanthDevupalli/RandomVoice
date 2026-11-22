@@ -664,10 +664,10 @@ export function JunctionRoom({
   const musicStateRef = useRef(musicState);
   musicStateRef.current = musicState;
   const [isMusicModalOpen, setIsMusicModalOpen] = useState(false);
-  const [musicModalInitialTab, setMusicModalInitialTab] = useState<"youtube" | "queue">("youtube");
+  const [musicModalInitialTab, setMusicModalInitialTab] = useState<"youtube" | "queue" | "pass_dj">("youtube");
   const [isMusicExpanded, setIsMusicExpanded] = useState(false);
 
-  const handleOpenMusicModal = useCallback((tab: "youtube" | "queue" = "youtube") => {
+  const handleOpenMusicModal = useCallback((tab: "youtube" | "queue" | "pass_dj" = "youtube") => {
     setMusicModalInitialTab(tab);
     setIsMusicModalOpen(true);
   }, []);
@@ -1448,6 +1448,7 @@ export function JunctionRoom({
       auxHolderName: myDisplayName,
       auxStartedAt: Date.now(),
     };
+    musicStateRef.current = update;
     setMusicState(update);
     broadcastRoomUpdate({
       type: "music_aux_claim",
@@ -1468,6 +1469,7 @@ export function JunctionRoom({
       auxHolderName: null,
       auxStartedAt: null,
     };
+    musicStateRef.current = update;
     setMusicState(update);
     broadcastRoomUpdate({
       type: "music_aux_release",
@@ -1488,6 +1490,7 @@ export function JunctionRoom({
       auxHolderName: targetName,
       auxStartedAt: Date.now(),
     };
+    musicStateRef.current = update;
     setMusicState(update);
     broadcastRoomUpdate({
       type: "music_aux_pass",
@@ -1499,16 +1502,17 @@ export function JunctionRoom({
     const currentHolder = musicStateRef.current.auxHolderIdentity;
     const hasModClearance = isCurrentModerator || isStaff;
     const isHolder = Boolean(currentHolder && isLocalIdentity(currentHolder));
+    const holderInRoom = isAuxHolderInRoom();
+    const isDJFree = !currentHolder || !holderInRoom;
 
-    // STRICT RULE: Unless someone grab AUX... No one has access to play music!
-    // First need to grab AUX, then that user can play music, others can't.
-    if (!isHolder && !hasModClearance) {
-      console.warn("You must grab the AUX cord first to play music");
+    // Allowed if user is current DJ, OR if DJ is free, OR user has mod clearance
+    if (!isHolder && !isDJFree && !hasModClearance) {
+      console.warn("AUX cord is already held by another participant");
       return;
     }
 
-    const activeHolderId = currentHolder || myIdentity;
-    const activeHolderName = musicStateRef.current.auxHolderName || myDisplayName;
+    const activeHolderId = isHolder ? currentHolder : myIdentity;
+    const activeHolderName = isHolder ? musicStateRef.current.auxHolderName : myDisplayName;
     const update: RoomMusicState = {
       isActive: true,
       auxHolderIdentity: activeHolderId,
@@ -1520,39 +1524,52 @@ export function JunctionRoom({
       lastSyncTime: Date.now(),
       queue: musicStateRef.current.queue || [],
     };
+    musicStateRef.current = update;
     setMusicState(update);
     broadcastRoomUpdate({
       type: "music_track_change",
       payload: { track, auxHolderIdentity: activeHolderId, auxHolderName: activeHolderName },
     });
-  }, [myIdentity, myDisplayName, broadcastRoomUpdate, isLocalIdentity, isCurrentModerator, isStaff]);
+  }, [myIdentity, myDisplayName, broadcastRoomUpdate, isLocalIdentity, isAuxHolderInRoom, isCurrentModerator, isStaff]);
 
   const handleToggleMusicPlayback = useCallback((isPlaying: boolean, currentSeek: number) => {
     const currentHolder = musicStateRef.current.auxHolderIdentity;
     const hasModClearance = isCurrentModerator || isStaff;
     const isHolder = Boolean(currentHolder && isLocalIdentity(currentHolder));
-    if (!isHolder && !hasModClearance) {
+    const holderInRoom = isAuxHolderInRoom();
+    const isDJFree = !currentHolder || !holderInRoom;
+
+    if (!isHolder && !isDJFree && !hasModClearance) {
       return;
     }
 
+    const activeHolderId = isHolder ? currentHolder : myIdentity;
+    const activeHolderName = isHolder ? musicStateRef.current.auxHolderName : myDisplayName;
+
     const update: RoomMusicState = {
       ...musicStateRef.current,
+      auxHolderIdentity: activeHolderId,
+      auxHolderName: activeHolderName,
       isPlaying,
       seekTime: currentSeek,
       lastSyncTime: Date.now(),
     };
+    musicStateRef.current = update;
     setMusicState(update);
     broadcastRoomUpdate({
       type: "music_playback_toggle",
       payload: { isPlaying, seekTime: currentSeek, timestamp: Date.now(), senderIdentity: myIdentity },
     });
-  }, [myIdentity, broadcastRoomUpdate, isLocalIdentity, isCurrentModerator, isStaff]);
+  }, [myIdentity, myDisplayName, broadcastRoomUpdate, isLocalIdentity, isAuxHolderInRoom, isCurrentModerator, isStaff]);
 
   const handleSeekMusic = useCallback((seekTime: number) => {
     const currentHolder = musicStateRef.current.auxHolderIdentity;
     const hasModClearance = isCurrentModerator || isStaff;
     const isHolder = Boolean(currentHolder && isLocalIdentity(currentHolder));
-    if (!isHolder && !hasModClearance) {
+    const holderInRoom = isAuxHolderInRoom();
+    const isDJFree = !currentHolder || !holderInRoom;
+
+    if (!isHolder && !isDJFree && !hasModClearance) {
       return;
     }
 
@@ -1561,12 +1578,13 @@ export function JunctionRoom({
       seekTime,
       lastSyncTime: Date.now(),
     };
+    musicStateRef.current = update;
     setMusicState(update);
     broadcastRoomUpdate({
       type: "music_seek",
       payload: { seekTime, timestamp: Date.now(), senderIdentity: myIdentity },
     });
-  }, [myIdentity, broadcastRoomUpdate, isLocalIdentity, isCurrentModerator, isStaff]);
+  }, [myIdentity, broadcastRoomUpdate, isLocalIdentity, isAuxHolderInRoom, isCurrentModerator, isStaff]);
 
   const handleStopMusic = useCallback(() => {
     const currentHolder = musicStateRef.current.auxHolderIdentity;
@@ -1591,6 +1609,7 @@ export function JunctionRoom({
       lastSyncTime: Date.now(),
       queue: musicStateRef.current.queue || [],
     };
+    musicStateRef.current = update;
     setMusicState(update);
     broadcastRoomUpdate({
       type: "music_stop",
@@ -1713,6 +1732,7 @@ export function JunctionRoom({
       queue: updatedQueue,
     };
 
+    musicStateRef.current = updatedMusicState;
     setMusicState(updatedMusicState);
     broadcastRoomUpdate({
       type: "music_queue_play",
@@ -1727,16 +1747,25 @@ export function JunctionRoom({
   const handleAutoAdvanceQueue = useCallback(() => {
     const currentHolder = musicStateRef.current.auxHolderIdentity;
     const isDJ = Boolean(currentHolder && isLocalIdentity(currentHolder));
-    if (!isDJ) return;
+    const holderInRoom = isAuxHolderInRoom();
+    const isDJFree = !currentHolder || !holderInRoom;
+
+    // Allowed if current user is DJ, OR if AUX is free (any peer in room can auto-advance queue)
+    if (!isDJ && !isDJFree) return;
 
     const currentQueue = musicStateRef.current.queue || [];
     if (currentQueue.length > 0) {
       const nextTrack = currentQueue[0];
       const remainingQueue = currentQueue.slice(1);
 
+      const activeHolderId = isDJ ? (currentHolder || myIdentity) : (nextTrack.addedByIdentity || myIdentity);
+      const activeHolderName = isDJ ? (musicStateRef.current.auxHolderName || myDisplayName) : (nextTrack.addedByName || myDisplayName);
+
       const update: RoomMusicState = {
         ...musicStateRef.current,
         isActive: true,
+        auxHolderIdentity: activeHolderId,
+        auxHolderName: activeHolderName,
         currentTrack: nextTrack,
         isPlaying: true,
         seekTime: 0,
@@ -1744,6 +1773,7 @@ export function JunctionRoom({
         queue: remainingQueue,
       };
 
+      musicStateRef.current = update;
       setMusicState(update);
       broadcastRoomUpdate({
         type: "music_queue_play",
@@ -1754,17 +1784,20 @@ export function JunctionRoom({
         },
       });
     } else {
-      setMusicState((prev) => ({
-        ...prev,
+      const update: RoomMusicState = {
+        ...musicStateRef.current,
         isPlaying: false,
         seekTime: 0,
-      }));
+        lastSyncTime: Date.now(),
+      };
+      musicStateRef.current = update;
+      setMusicState(update);
       broadcastRoomUpdate({
         type: "music_playback_toggle",
         payload: { isPlaying: false, seekTime: 0, timestamp: Date.now(), senderIdentity: myIdentity },
       });
     }
-  }, [myIdentity, isLocalIdentity, broadcastRoomUpdate]);
+  }, [myIdentity, myDisplayName, isLocalIdentity, isAuxHolderInRoom, broadcastRoomUpdate]);
 
   // Profile Preview Modal State
   const [previewParticipant, setPreviewParticipant] = useState<JunctionParticipant | null>(null);
@@ -2518,7 +2551,14 @@ export function JunctionRoom({
       } else if (type === "room_participants_updated") {
         pollJunction(true);
       } else if (type === "music_sync_request") {
-        if (musicStateRef.current.isActive && isLocalIdentity(musicStateRef.current.auxHolderIdentity || "")) {
+        const isHolder = isLocalIdentity(musicStateRef.current.auxHolderIdentity || "");
+        const holderInRoom = isAuxHolderInRoom();
+        const shouldRespond =
+          musicStateRef.current.isActive &&
+          Boolean(musicStateRef.current.currentTrack) &&
+          (isHolder || !holderInRoom);
+
+        if (shouldRespond) {
           const now = Date.now();
           const elapsed = musicStateRef.current.isPlaying
             ? (now - (musicStateRef.current.lastSyncTime || now)) / 1000
@@ -2535,6 +2575,7 @@ export function JunctionRoom({
           });
         }
       } else if (type === "music_sync" && payload) {
+        if (!payload.currentTrack) return;
         const holderIdent = payload.auxHolderIdentity;
         const holderName = payload.auxHolderName;
         const cleanHolderId = (holderIdent || "").toLowerCase().trim();
@@ -2554,18 +2595,26 @@ export function JunctionRoom({
               );
             });
 
-        setMusicState((prev) => ({
+        const syncedState: RoomMusicState = {
           ...payload,
-          queue: Array.isArray(payload.queue) ? payload.queue : (prev.queue || []),
+          isActive: Boolean(payload.isActive && payload.currentTrack),
+          queue: Array.isArray(payload.queue) ? payload.queue : (musicStateRef.current.queue || []),
           auxHolderIdentity: isHolderPresent ? payload.auxHolderIdentity : null,
           auxHolderName: isHolderPresent ? payload.auxHolderName : null,
           auxStartedAt: isHolderPresent ? payload.auxStartedAt : null,
           lastSyncTime: payload.lastSyncTime || Date.now(),
-        }));
+        };
+        musicStateRef.current = syncedState;
+        setMusicState(syncedState);
       } else if (type === "music_sync_heartbeat" && payload) {
         const currentHolder = musicStateRef.current.auxHolderIdentity;
         // Verify heartbeat is from AUX holder
         if (currentHolder && payload.senderIdentity && currentHolder.toLowerCase().trim() === payload.senderIdentity.toLowerCase().trim()) {
+          musicStateRef.current = {
+            ...musicStateRef.current,
+            seekTime: payload.seekTime,
+            lastSyncTime: payload.timestamp || Date.now(),
+          };
           setMusicState((prev) => ({
             ...prev,
             seekTime: payload.seekTime,
@@ -2577,27 +2626,33 @@ export function JunctionRoom({
         const currentHolder = musicStateRef.current.auxHolderIdentity;
         const holderInRoom = isAuxHolderInRoom();
         if (!currentHolder || !holderInRoom || currentHolder.toLowerCase().trim() === payload.identity?.toLowerCase().trim()) {
-          setMusicState((prev) => ({
-            ...prev,
+          const nextState: RoomMusicState = {
+            ...musicStateRef.current,
             auxHolderIdentity: payload.identity,
             auxHolderName: payload.name,
             auxStartedAt: Date.now(),
-          }));
+          };
+          musicStateRef.current = nextState;
+          setMusicState(nextState);
         }
       } else if (type === "music_aux_release") {
-        setMusicState((prev) => ({
-          ...prev,
+        const nextState: RoomMusicState = {
+          ...musicStateRef.current,
           auxHolderIdentity: null,
           auxHolderName: null,
           auxStartedAt: null,
-        }));
+        };
+        musicStateRef.current = nextState;
+        setMusicState(nextState);
       } else if (type === "music_aux_pass" && payload) {
-        setMusicState((prev) => ({
-          ...prev,
+        const nextState: RoomMusicState = {
+          ...musicStateRef.current,
           auxHolderIdentity: payload.targetIdentity,
           auxHolderName: payload.targetName,
           auxStartedAt: Date.now(),
-        }));
+        };
+        musicStateRef.current = nextState;
+        setMusicState(nextState);
       } else if (type === "music_track_change" && payload) {
         const currentHolder = musicStateRef.current.auxHolderIdentity;
         const holderInRoom = isAuxHolderInRoom();
@@ -2605,39 +2660,45 @@ export function JunctionRoom({
         if (currentHolder && holderInRoom && payload.auxHolderIdentity && currentHolder.toLowerCase().trim() !== payload.auxHolderIdentity.toLowerCase().trim()) {
           console.warn("Ignored unauthorized music change from non-AUX holder");
         } else {
-          setMusicState((prev) => ({
-            ...prev,
+          const nextState: RoomMusicState = {
+            ...musicStateRef.current,
             isActive: true,
-            auxHolderIdentity: payload.auxHolderIdentity || prev.auxHolderIdentity,
-            auxHolderName: payload.auxHolderName || prev.auxHolderName,
+            auxHolderIdentity: payload.auxHolderIdentity || musicStateRef.current.auxHolderIdentity,
+            auxHolderName: payload.auxHolderName || musicStateRef.current.auxHolderName,
             currentTrack: payload.track,
             isPlaying: true,
             seekTime: 0,
             lastSyncTime: Date.now(),
-          }));
+          };
+          musicStateRef.current = nextState;
+          setMusicState(nextState);
         }
       } else if (type === "music_playback_toggle" && payload) {
         const currentHolder = musicStateRef.current.auxHolderIdentity;
         if (currentHolder && payload.senderIdentity && currentHolder.toLowerCase().trim() !== payload.senderIdentity.toLowerCase().trim()) {
           console.warn("Ignored playback toggle from non-AUX holder");
         } else {
-          setMusicState((prev) => ({
-            ...prev,
+          const nextState: RoomMusicState = {
+            ...musicStateRef.current,
             isPlaying: payload.isPlaying,
             seekTime: payload.seekTime,
             lastSyncTime: payload.timestamp || Date.now(),
-          }));
+          };
+          musicStateRef.current = nextState;
+          setMusicState(nextState);
         }
       } else if (type === "music_seek" && payload) {
         const currentHolder = musicStateRef.current.auxHolderIdentity;
         if (currentHolder && payload.senderIdentity && currentHolder.toLowerCase().trim() !== payload.senderIdentity.toLowerCase().trim()) {
           console.warn("Ignored seek from non-AUX holder");
         } else {
-          setMusicState((prev) => ({
-            ...prev,
+          const nextState: RoomMusicState = {
+            ...musicStateRef.current,
             seekTime: payload.seekTime,
             lastSyncTime: payload.timestamp || Date.now(),
-          }));
+          };
+          musicStateRef.current = nextState;
+          setMusicState(nextState);
         }
       } else if (type === "music_queue_add" && payload?.track) {
         setMusicState((prev) => {
@@ -2645,31 +2706,41 @@ export function JunctionRoom({
           if (currentQueue.some((q) => q.queueId === payload.track.queueId)) {
             return prev;
           }
-          return {
+          const updated = {
             ...prev,
             queue: [...currentQueue, payload.track],
           };
+          musicStateRef.current = updated;
+          return updated;
         });
       } else if (type === "music_queue_remove" && payload?.queueId) {
-        setMusicState((prev) => ({
-          ...prev,
-          queue: (prev.queue || []).filter((q) => q.queueId !== payload.queueId),
-        }));
+        setMusicState((prev) => {
+          const updated = {
+            ...prev,
+            queue: (prev.queue || []).filter((q) => q.queueId !== payload.queueId),
+          };
+          musicStateRef.current = updated;
+          return updated;
+        });
       } else if (type === "music_queue_play" && payload?.track) {
-        setMusicState((prev) => ({
-          ...prev,
+        const nextState: RoomMusicState = {
+          ...musicStateRef.current,
           isActive: true,
           currentTrack: payload.track,
           isPlaying: true,
           seekTime: 0,
           lastSyncTime: Date.now(),
-          queue: (prev.queue || []).filter((q) => q.queueId !== payload.queueId),
-        }));
+          queue: (musicStateRef.current.queue || []).filter((q) => q.queueId !== payload.queueId),
+        };
+        musicStateRef.current = nextState;
+        setMusicState(nextState);
       } else if (type === "music_queue_clear") {
-        setMusicState((prev) => ({
-          ...prev,
+        const nextState: RoomMusicState = {
+          ...musicStateRef.current,
           queue: [],
-        }));
+        };
+        musicStateRef.current = nextState;
+        setMusicState(nextState);
       } else if (type === "music_stop") {
         const currentHolder = musicStateRef.current.auxHolderIdentity;
         const holderInRoom = isAuxHolderInRoom();
@@ -2677,7 +2748,7 @@ export function JunctionRoom({
         if (currentHolder && !isDJFree && payload?.senderIdentity && currentHolder.toLowerCase().trim() !== payload.senderIdentity.toLowerCase().trim()) {
           console.warn("Ignored stop from non-DJ participant");
         } else {
-          setMusicState((prev) => ({
+          const nextState: RoomMusicState = {
             isActive: false,
             auxHolderIdentity: null,
             auxHolderName: null,
@@ -2686,8 +2757,10 @@ export function JunctionRoom({
             isPlaying: false,
             seekTime: 0,
             lastSyncTime: Date.now(),
-            queue: prev.queue || [],
-          }));
+            queue: musicStateRef.current.queue || [],
+          };
+          musicStateRef.current = nextState;
+          setMusicState(nextState);
           setIsMusicExpanded(false);
         }
       }
@@ -4575,7 +4648,7 @@ export function JunctionRoom({
         </div>
       )}
 
-      {isMinimized ? (
+      {isMinimized && (
         /* Floating Picture-in-Picture Mini-Player Capsule (Draggable & Circled Fluid) */
         <div
           ref={minimizedPillRef}
@@ -4698,6 +4771,35 @@ export function JunctionRoom({
                 {isDeafened ? <VolumeX size={13} /> : <Volume2 size={13} />}
               </button>
 
+              {/* Minimized Music Button & Playing Indicator */}
+              <button
+                type="button"
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleOpenMusicModal(musicState.isActive ? "queue" : "youtube");
+                }}
+                className={`w-8 h-8 rounded-full flex items-center justify-center transition-all active:scale-90 cursor-pointer relative ${
+                  musicState.isActive
+                    ? "bg-indigo-600 text-white shadow-[0_0_12px_rgba(99,102,241,0.6)] ring-1 ring-indigo-400/70"
+                    : "bg-white/5 text-slate-400 hover:text-white hover:bg-white/10 border border-white/5"
+                }`}
+                title={
+                  musicState.isActive
+                    ? `Music: ${musicState.currentTrack?.title || "Playing"}`
+                    : "Music Player"
+                }
+              >
+                {musicState.isPlaying ? (
+                  <Disc3 size={14} className="animate-spin [animation-duration:3s] text-emerald-300" />
+                ) : (
+                  <Headphones size={13} className={musicState.isActive ? "text-indigo-300" : "text-slate-400"} />
+                )}
+                {musicState.isActive && (
+                  <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-emerald-400 rounded-full ring-1 ring-[#0B0C15] animate-pulse" />
+                )}
+              </button>
+
               {/* Room Chat Button with Live Unread Badge */}
               <button
                 type="button"
@@ -4745,8 +4847,10 @@ export function JunctionRoom({
             </div>
           </div>
         </div>
-      ) : (
-        <div className="relative h-[calc(100vh-3.5rem)] sm:h-[calc(100vh-4rem)] flex flex-col lg:flex-row overflow-hidden bg-background">
+      )}
+
+      {/* Main Full Room Layout — permanently mounted in DOM so Music Player & WebRTC connections never get destroyed */}
+      <div className={isMinimized ? "hidden" : "relative h-[calc(100vh-3.5rem)] sm:h-[calc(100vh-4rem)] flex flex-col lg:flex-row overflow-hidden bg-background"}>
 
           {/* Mod Mute Alert Banner - Floating Centered Toast Notification */}
           {isMutedByMod && (
@@ -5048,14 +5152,18 @@ export function JunctionRoom({
                   {/* Music Mode Trigger Button */}
                   <button
                     type="button"
-                    onClick={() => handleOpenMusicModal("youtube")}
+                    onClick={() => handleOpenMusicModal(musicState.isActive ? "queue" : "youtube")}
                     className={`w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95 relative ${musicState.isActive
                       ? "bg-indigo-600 text-white border border-indigo-400/50 shadow-[0_0_15px_rgba(99,102,241,0.5)]"
                       : "bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10"
                       }`}
-                    title={musicState.isActive ? `DJ Music: ${musicState.currentTrack?.title || "Playing"}` : "DJ & Music"}
+                    title={musicState.isActive ? `Music: ${musicState.currentTrack?.title || "Playing"}` : "Music Player & DJ"}
                   >
-                    <Headphones size={15} className={musicState.isPlaying ? "text-white animate-pulse" : "text-indigo-400"} />
+                    {musicState.isPlaying ? (
+                      <Disc3 size={15} className="text-white animate-spin [animation-duration:3s]" />
+                    ) : (
+                      <Headphones size={15} className={musicState.isActive ? "text-white" : "text-indigo-400"} />
+                    )}
                     {musicState.isActive && (
                       <span className="absolute top-0 right-0 w-2.5 h-2.5 bg-emerald-400 rounded-full ring-2 ring-[#0E0F17] animate-pulse" />
                     )}
@@ -5125,14 +5233,18 @@ export function JunctionRoom({
                     {/* Music DJ button */}
                     <button
                       type="button"
-                      onClick={() => handleOpenMusicModal("youtube")}
+                      onClick={() => handleOpenMusicModal(musicState.isActive ? "queue" : "youtube")}
                       className={`w-8 h-8 rounded-full flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95 relative ${musicState.isActive
                         ? "bg-indigo-600 text-white border border-indigo-400/50 shadow-[0_0_15px_rgba(99,102,241,0.5)]"
                         : "bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10"
                         }`}
-                      title="DJ & Music"
+                      title="Music Player & DJ"
                     >
-                      <Headphones size={13} className={musicState.isPlaying ? "text-white animate-pulse" : "text-indigo-400"} />
+                      {musicState.isPlaying ? (
+                        <Disc3 size={13} className="text-white animate-spin [animation-duration:3s]" />
+                      ) : (
+                        <Headphones size={13} className={musicState.isActive ? "text-white" : "text-indigo-400"} />
+                      )}
                       {musicState.isActive && (
                         <span className="absolute top-0 right-0 w-2 h-2 bg-emerald-400 rounded-full ring-2 ring-[#0E0F17] animate-pulse" />
                       )}
@@ -5274,6 +5386,8 @@ export function JunctionRoom({
                 currentName={myDisplayName}
                 canModerateAux={isCurrentModerator || isStaff}
                 isExpanded={isMusicExpanded}
+                isDeafened={isDeafened}
+                isRoomMinimized={isMinimized}
                 onToggleExpand={() => setIsMusicExpanded((prev) => !prev)}
                 onOpenMusicModal={handleOpenMusicModal}
                 onTogglePlayback={handleToggleMusicPlayback}
@@ -6998,7 +7112,6 @@ export function JunctionRoom({
             </div>
           )}
         </div>
-      )}
 
       {/* Leave Voice Junction Confirmation Modal - Rendered at Root (Works in Both Full & Minimized Mode) */}
       {isLeaveModalOpen && (

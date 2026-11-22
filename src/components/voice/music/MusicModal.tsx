@@ -1,26 +1,27 @@
 "use client";
 
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   X,
   Headphones,
+  Search,
+  Loader2,
   ExternalLink,
   ListMusic,
   Plus,
   Play,
   Trash2,
-  UserCheck,
   Sparkles,
   AlertCircle,
   ArrowLeft,
   Disc3,
   Check,
   Square,
+  Clock,
 } from "lucide-react";
-import { MusicTrack, RoomMusicState, QueuedTrack } from "@/lib/music-types";
-import { extractYouTubeId } from "@/lib/curated-stations";
+import { MusicTrack, RoomMusicState, QueuedTrack, extractYouTubeId } from "@/lib/music-types";
 import { JunctionParticipant } from "@/lib/types";
 
 export interface MusicModalProps {
@@ -39,8 +40,17 @@ export interface MusicModalProps {
   onAddToQueue: (track: MusicTrack) => void;
   onRemoveFromQueue: (queueId: string) => void;
   onPlayQueuedTrack: (queueId: string) => void;
-  initialTab?: "youtube" | "queue";
+  initialTab?: "youtube" | "queue" | "pass_dj";
 }
+
+const QUICK_SEARCH_TAGS = [
+  "Chill Lofi",
+  "Synthwave",
+  "Top Hits",
+  "Acoustic Pop",
+  "Piano Chill",
+  "Gaming OST",
+];
 
 export function MusicModal({
   isOpen,
@@ -61,16 +71,29 @@ export function MusicModal({
   initialTab = "youtube",
 }: MusicModalProps) {
   const [activeTab, setActiveTab] = useState<"youtube" | "queue" | "pass_dj">(initialTab);
-  const [customUrl, setCustomUrl] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
   const [customTitle, setCustomTitle] = useState("");
+  const [searchResults, setSearchResults] = useState<MusicTrack[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [hasSearched, setHasSearched] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [inputError, setInputError] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const searchDebounceRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     if (isOpen && initialTab) {
       setActiveTab(initialTab);
     }
   }, [isOpen, initialTab]);
+
+  useEffect(() => {
+    return () => {
+      if (searchDebounceRef.current) {
+        clearTimeout(searchDebounceRef.current);
+      }
+    };
+  }, []);
 
   const isDJ =
     Boolean(musicState.auxHolderIdentity) &&
@@ -96,7 +119,7 @@ export function MusicModal({
 
   // If nobody holds DJ or the person who claimed it is no longer in the room, DJ control is open!
   const isDJFree = !musicState.auxHolderIdentity || !isHolderInRoom;
-  const canControlMusic = isDJ;
+  const canControlMusic = isDJ || isDJFree || canModerateAux;
 
   // Filter other participants for passing DJ
   const otherParticipants = participants.filter(
@@ -114,29 +137,106 @@ export function MusicModal({
   const isQueueLimitReached = !isDJ && userQueuedCount >= 2;
 
   const detectedVideoId = useMemo(() => {
-    if (!customUrl.trim()) return null;
-    return extractYouTubeId(customUrl.trim());
-  }, [customUrl]);
+    if (!searchQuery.trim()) return null;
+    return extractYouTubeId(searchQuery.trim());
+  }, [searchQuery]);
 
-  const handlePlayNow = (e?: React.FormEvent) => {
+  const performSearch = useCallback(async (query: string) => {
+    const trimmed = query.trim();
+    if (trimmed.length < 2) {
+      setSearchResults([]);
+      setHasSearched(false);
+      return;
+    }
+
+    if (extractYouTubeId(trimmed)) {
+      return;
+    }
+
+    setIsSearching(true);
+    setSearchError(null);
+
+    try {
+      const res = await fetch(`/api/music/search?q=${encodeURIComponent(trimmed)}`);
+      if (!res.ok) {
+        throw new Error(`Search failed with status ${res.status}`);
+      }
+      const data = await res.json();
+      setSearchResults(data.results || []);
+      setHasSearched(true);
+    } catch (err: any) {
+      console.error("Music search error:", err);
+      setSearchError("Failed to search. You can also paste a direct YouTube video URL.");
+    } finally {
+      setIsSearching(false);
+    }
+  }, []);
+
+  const handleQueryChange = (val: string) => {
+    setSearchQuery(val);
+    setInputError(null);
+    setSearchError(null);
+
+    if (searchDebounceRef.current) {
+      clearTimeout(searchDebounceRef.current);
+    }
+
+    const trimmed = val.trim();
+    if (trimmed.length >= 2 && !extractYouTubeId(trimmed)) {
+      searchDebounceRef.current = setTimeout(() => {
+        performSearch(trimmed);
+      }, 450);
+    } else if (!trimmed) {
+      setSearchResults([]);
+      setHasSearched(false);
+    }
+  };
+
+  const handleSelectQuickTag = (tag: string) => {
+    setSearchQuery(tag);
+    performSearch(tag);
+  };
+
+  const handlePlayTrack = (track: MusicTrack) => {
+    if (!isDJ && isDJFree) {
+      onClaimAux();
+    }
+    onSelectTrack(track);
+    setToastMessage(`Now playing: ${track.title}`);
+    setTimeout(() => setToastMessage(null), 3000);
+    onClose();
+  };
+
+  const handleQueueTrack = (track: MusicTrack) => {
+    if (isQueueLimitReached) {
+      setInputError("Queue limit reached! You can have at most 2 songs in the queue at a time.");
+      return;
+    }
+    onAddToQueue(track);
+    setToastMessage(`Added "${track.title}" to queue!`);
+    setTimeout(() => setToastMessage(null), 3000);
+    setActiveTab("queue");
+  };
+
+  const handlePlayDirect = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setInputError(null);
 
-    const videoId = detectedVideoId || extractYouTubeId(customUrl);
+    const videoId = detectedVideoId || extractYouTubeId(searchQuery);
     if (!videoId) {
       setInputError("Please enter a valid YouTube video or song link");
       return;
     }
 
-    if (!canControlMusic && isDJFree) {
+    if (!isDJ && isDJFree) {
       onClaimAux();
     }
 
-    const title = customTitle.trim() || `YouTube Song (${videoId.substring(0, 6)}...)`;
+    const title = customTitle.trim() || `YouTube Track (${videoId.substring(0, 6)}...)`;
     const newTrack: MusicTrack = {
       id: videoId,
       source: "youtube",
-      url: customUrl.trim(),
+      url: searchQuery.trim(),
       title,
       artist: `Started by ${currentName}`,
       thumbnail: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
@@ -144,31 +244,31 @@ export function MusicModal({
     };
 
     onSelectTrack(newTrack);
-    setCustomUrl("");
+    setSearchQuery("");
     setCustomTitle("");
     onClose();
   };
 
-  const handleAddToQueue = (e?: React.FormEvent) => {
+  const handleQueueDirect = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setInputError(null);
 
-    const videoId = detectedVideoId || extractYouTubeId(customUrl);
+    const videoId = detectedVideoId || extractYouTubeId(searchQuery);
     if (!videoId) {
       setInputError("Please enter a valid YouTube video or song link");
       return;
     }
 
     if (isQueueLimitReached) {
-      setInputError("Queue limit reached! You can have at most 2 songs in the queue at a time. Once your song plays, you can add another.");
+      setInputError("Queue limit reached! You can have at most 2 songs in the queue at a time.");
       return;
     }
 
-    const title = customTitle.trim() || `YouTube Song (${videoId.substring(0, 6)}...)`;
+    const title = customTitle.trim() || `YouTube Track (${videoId.substring(0, 6)}...)`;
     const newTrack: MusicTrack = {
       id: videoId,
       source: "youtube",
-      url: customUrl.trim(),
+      url: searchQuery.trim(),
       title,
       artist: `Requested by ${currentName}`,
       thumbnail: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
@@ -176,7 +276,7 @@ export function MusicModal({
     };
 
     onAddToQueue(newTrack);
-    setCustomUrl("");
+    setSearchQuery("");
     setCustomTitle("");
     setToastMessage("Added to queue!");
     setTimeout(() => setToastMessage(null), 3000);
@@ -197,7 +297,7 @@ export function MusicModal({
           exit={{ opacity: 0, y: 40, scale: 0.98 }}
           transition={{ duration: 0.2, ease: "easeOut" }}
           onClick={(e) => e.stopPropagation()}
-          className="relative w-full sm:max-w-lg bg-[#0E1017] border border-white/10 rounded-t-[2rem] sm:rounded-3xl shadow-[0_20px_60px_rgba(0,0,0,0.85)] overflow-hidden flex flex-col max-h-[88vh] pb-3 sm:pb-0"
+          className="relative w-full sm:max-w-xl bg-[#0E1017] border border-white/10 rounded-t-[2rem] sm:rounded-3xl shadow-[0_20px_60px_rgba(0,0,0,0.85)] overflow-hidden flex flex-col max-h-[90vh] pb-3 sm:pb-0"
         >
           {/* Mobile Drag Indicator */}
           <div className="sm:hidden w-12 h-1 rounded-full bg-white/20 mx-auto mt-2.5 mb-1" />
@@ -210,10 +310,10 @@ export function MusicModal({
               </div>
               <div>
                 <h3 className="text-sm font-bold text-white tracking-wide">
-                  Music Player
+                  Music & Media Player
                 </h3>
                 <p className="text-[11px] text-slate-400">
-                  Synchronized room YouTube player
+                  Synchronized room audio & video
                 </p>
               </div>
             </div>
@@ -229,7 +329,7 @@ export function MusicModal({
 
           {/* Toast Notice */}
           {toastMessage && (
-            <div className="px-4 py-2 bg-emerald-500/20 border-b border-emerald-500/30 text-emerald-300 text-xs font-semibold flex items-center gap-2 animate-fadeIn">
+            <div className="px-4 py-2 bg-emerald-500/20 border-b border-emerald-500/30 text-emerald-300 text-xs font-semibold flex items-center gap-2 animate-in fade-in">
               <Check size={14} className="text-emerald-400" />
               <span>{toastMessage}</span>
             </div>
@@ -243,7 +343,7 @@ export function MusicModal({
                 {isDJFree ? (
                   <span className="text-emerald-400 font-medium flex items-center gap-1.5">
                     <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
-                    No DJ active — anyone can play or queue music
+                    DJ is free — anyone can play or queue music
                   </span>
                 ) : isDJ ? (
                   <span className="text-indigo-300 font-semibold flex items-center gap-1.5">
@@ -320,9 +420,9 @@ export function MusicModal({
             </div>
           </div>
 
-          {/* Segmented Tabs (YouTube Link & Song Queue) */}
+          {/* Segmented Tabs (Search & Add | Queue) */}
           <div className="flex items-center justify-between p-1 bg-white/[0.02] border-b border-white/5 px-4 sm:px-5">
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1 sm:gap-1.5 flex-wrap">
               <button
                 type="button"
                 onClick={() => setActiveTab("youtube")}
@@ -332,8 +432,8 @@ export function MusicModal({
                     : "text-slate-400 hover:text-slate-200"
                 }`}
               >
-                <ExternalLink size={13} />
-                <span>YouTube Link</span>
+                <Search size={13} />
+                <span>Search & Add</span>
               </button>
 
               <button
@@ -364,148 +464,304 @@ export function MusicModal({
             {/* Listener personal queue indicator */}
             {!isDJ && (
               <span
-                className={`text-[10px] font-medium px-2 py-0.5 rounded-md border ${
+                className={`text-[10px] font-medium px-2 py-0.5 rounded-md border shrink-0 ${
                   userQueuedCount >= 2
                     ? "bg-amber-500/15 border-amber-500/30 text-amber-300"
                     : "bg-white/5 border-white/10 text-slate-400"
                 }`}
                 title="Non-DJ listeners can keep up to 2 songs in the queue"
               >
-                Your Queue: <strong className="text-white">{userQueuedCount}/2</strong>
+                Queue: <strong className="text-white">{userQueuedCount}/2</strong>
               </span>
             )}
           </div>
 
           {/* Tab Content */}
-          <div className="p-4 sm:p-5 overflow-y-auto space-y-3 min-h-[260px]">
-            {/* 1. YouTube Link Tab */}
+          <div className="p-4 sm:p-5 overflow-y-auto space-y-3 min-h-[280px]">
+            {/* 1. Search & Direct YouTube Tab */}
             {activeTab === "youtube" && (
-              <div className="space-y-3.5 animate-fadeIn">
+              <div className="space-y-3.5 animate-in fade-in duration-150">
+                {/* Search / URL input bar */}
                 <form
                   onSubmit={(e) => {
                     e.preventDefault();
-                    if (isDJ || isDJFree) {
-                      handlePlayNow(e);
-                    } else {
-                      handleAddToQueue(e);
+                    if (searchDebounceRef.current) {
+                      clearTimeout(searchDebounceRef.current);
+                    }
+                    if (detectedVideoId) {
+                      if (isDJ || isDJFree) {
+                        handlePlayDirect(e);
+                      } else {
+                        handleQueueDirect(e);
+                      }
+                    } else if (searchQuery.trim().length >= 2) {
+                      performSearch(searchQuery.trim());
                     }
                   }}
                   className="space-y-3"
                 >
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                      YouTube Link
-                    </label>
+                  <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
+                      {isSearching ? (
+                        <Loader2 size={16} className="animate-spin text-indigo-400" />
+                      ) : (
+                        <Search size={16} />
+                      )}
+                    </div>
                     <input
                       type="text"
-                      placeholder="https://www.youtube.com/watch?v=..."
-                      value={customUrl}
-                      onChange={(e) => {
-                        setCustomUrl(e.target.value);
-                        setInputError(null);
-                      }}
-                      className="w-full px-3 py-2.5 rounded-xl bg-black/40 border border-white/10 text-white placeholder-slate-500 text-xs focus:outline-none focus:border-indigo-500 transition-colors"
+                      placeholder="Search songs, artists, or paste YouTube link..."
+                      value={searchQuery}
+                      onChange={(e) => handleQueryChange(e.target.value)}
+                      className="w-full pl-9 pr-9 py-2.5 rounded-xl bg-black/40 border border-white/10 text-white placeholder-slate-500 text-xs focus:outline-none focus:border-indigo-500 transition-colors"
+                      autoFocus
                     />
-                  </div>
-
-                  {/* Video Preview Card if URL is valid */}
-                  {detectedVideoId && (
-                    <div className="p-3 rounded-2xl bg-white/[0.03] border border-white/10 flex items-center gap-3 animate-fadeIn">
-                      <div className="relative w-20 h-14 rounded-lg overflow-hidden bg-black shrink-0 border border-white/10">
-                        <img
-                          src={`https://img.youtube.com/vi/${detectedVideoId}/hqdefault.jpg`}
-                          alt="YouTube Preview"
-                          className="w-full h-full object-cover"
-                        />
-                        <div className="absolute inset-0 bg-black/20 flex items-center justify-center">
-                          <Play size={16} className="text-white drop-shadow" />
-                        </div>
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <p className="text-xs font-semibold text-white truncate">
-                          {customTitle.trim() || `YouTube Track (${detectedVideoId.substring(0, 8)})`}
-                        </p>
-                        <p className="text-[10px] text-emerald-400 mt-0.5">
-                          ✓ Valid YouTube Video
-                        </p>
-                      </div>
-                    </div>
-                  )}
-
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                      Song Title <span className="text-slate-500 font-normal">(Optional)</span>
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="Enter a friendly title for the room..."
-                      value={customTitle}
-                      onChange={(e) => setCustomTitle(e.target.value)}
-                      className="w-full px-3 py-2.5 rounded-xl bg-black/40 border border-white/10 text-white placeholder-slate-500 text-xs focus:outline-none focus:border-indigo-500 transition-colors"
-                    />
-                  </div>
-
-                  {inputError && (
-                    <div className="p-2.5 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
-                      <AlertCircle size={14} className="shrink-0 text-rose-400" />
-                      <span>{inputError}</span>
-                    </div>
-                  )}
-
-                  {/* Action Buttons */}
-                  <div className="pt-2 flex items-center gap-2">
-                    {/* Play Now button: for DJ, or anyone when DJ is free */}
-                    {(isDJ || isDJFree) && (
+                    {searchQuery && (
                       <button
                         type="button"
-                        onClick={handlePlayNow}
-                        disabled={!detectedVideoId}
-                        className="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold transition-all shadow-md shadow-indigo-600/30 cursor-pointer flex items-center justify-center gap-1.5"
+                        onClick={() => {
+                          setSearchQuery("");
+                          setSearchResults([]);
+                          setHasSearched(false);
+                          setInputError(null);
+                          setSearchError(null);
+                        }}
+                        className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-white cursor-pointer"
+                        title="Clear"
                       >
-                        <Play size={14} />
-                        <span>Play Now</span>
+                        <X size={14} />
                       </button>
                     )}
-
-                    {/* Add to Queue button: available for everyone */}
-                    <button
-                      type="button"
-                      onClick={handleAddToQueue}
-                      disabled={!detectedVideoId || isQueueLimitReached}
-                      className={`flex-1 py-2.5 rounded-xl border text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
-                        isQueueLimitReached
-                          ? "bg-amber-500/10 border-amber-500/25 text-amber-300 opacity-60 cursor-not-allowed"
-                          : isDJ || isDJFree
-                            ? "bg-white/5 hover:bg-white/10 border-white/10 text-white"
-                            : "bg-indigo-600 hover:bg-indigo-500 border-indigo-500/40 text-white shadow-md shadow-indigo-600/30"
-                      }`}
-                    >
-                      <Plus size={14} />
-                      <span>{isQueueLimitReached ? "Queue Full (2/2)" : "Add to Queue"}</span>
-                    </button>
                   </div>
 
-                  {/* Explanatory note for non-DJ listeners */}
-                  {!isDJ && (
-                    <p className="text-[11px] text-slate-400 text-center pt-1">
-                      {isQueueLimitReached ? (
-                        <span className="text-amber-300">
-                          You have 2 songs waiting in queue. Once one plays, you can add another.
-                        </span>
-                      ) : (
-                        <span>
-                          You can queue up to 2 songs. The DJ will play them for the room!
-                        </span>
-                      )}
-                    </p>
+                  {/* Direct YouTube Video Preview Card */}
+                  {detectedVideoId && (
+                    <div className="space-y-3 animate-in fade-in duration-150">
+                      <div className="p-3 rounded-2xl bg-indigo-950/30 border border-indigo-500/30 flex items-center gap-3">
+                        <div className="relative w-20 h-14 rounded-lg overflow-hidden bg-black shrink-0 border border-white/10">
+                          <img
+                            src={`https://img.youtube.com/vi/${detectedVideoId}/hqdefault.jpg`}
+                            alt="YouTube Preview"
+                            className="w-full h-full object-cover"
+                          />
+                          <div className="absolute inset-0 bg-black/20 flex items-center justify-center">
+                            <Play size={16} className="text-white drop-shadow" />
+                          </div>
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs font-semibold text-white truncate">
+                            {customTitle.trim() || `YouTube Track (${detectedVideoId.substring(0, 8)})`}
+                          </p>
+                          <p className="text-[10px] text-emerald-400 mt-0.5">
+                            ✓ Direct YouTube Video Detected
+                          </p>
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                          Song Title <span className="text-slate-500 font-normal">(Optional)</span>
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="Enter a friendly title for the room..."
+                          value={customTitle}
+                          onChange={(e) => setCustomTitle(e.target.value)}
+                          className="w-full px-3 py-2 rounded-xl bg-black/40 border border-white/10 text-white placeholder-slate-500 text-xs focus:outline-none focus:border-indigo-500 transition-colors"
+                        />
+                      </div>
+
+                      {/* Action buttons for Direct Link */}
+                      <div className="flex items-center gap-2 pt-1">
+                        {(isDJ || isDJFree) && (
+                          <button
+                            type="button"
+                            onClick={handlePlayDirect}
+                            className="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-all shadow-md shadow-indigo-600/30 cursor-pointer flex items-center justify-center gap-1.5 active:scale-95"
+                          >
+                            <Play size={14} />
+                            <span>Play Now</span>
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={handleQueueDirect}
+                          disabled={isQueueLimitReached}
+                          className={`flex-1 py-2.5 rounded-xl border text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-95 ${
+                            isQueueLimitReached
+                              ? "bg-amber-500/10 border-amber-500/25 text-amber-300 opacity-60 cursor-not-allowed"
+                              : isDJ || isDJFree
+                                ? "bg-white/5 hover:bg-white/10 border-white/10 text-white"
+                                : "bg-indigo-600 hover:bg-indigo-500 border-indigo-500/40 text-white shadow-md shadow-indigo-600/30"
+                          }`}
+                        >
+                          <Plus size={14} />
+                          <span>{isQueueLimitReached ? "Queue Full (2/2)" : "Add to Queue"}</span>
+                        </button>
+                      </div>
+                    </div>
                   )}
                 </form>
+
+                {inputError && (
+                  <div className="p-2.5 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
+                    <AlertCircle size={14} className="shrink-0 text-rose-400" />
+                    <span>{inputError}</span>
+                  </div>
+                )}
+
+                {searchError && (
+                  <div className="p-2.5 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-300 text-xs flex items-center gap-2">
+                    <AlertCircle size={14} className="shrink-0 text-amber-400" />
+                    <span>{searchError}</span>
+                  </div>
+                )}
+
+                {/* Search Results List (when not in direct URL mode) */}
+                {!detectedVideoId && (
+                  <div className="space-y-2">
+                    {/* Searching Loader Skeletons */}
+                    {isSearching && (
+                      <div className="space-y-2">
+                        {[1, 2, 3].map((i) => (
+                          <div
+                            key={i}
+                            className="p-2.5 rounded-2xl bg-white/[0.03] border border-white/5 flex items-center gap-3 animate-pulse"
+                          >
+                            <div className="w-16 h-11 rounded-xl bg-white/10 shrink-0" />
+                            <div className="flex-1 space-y-1.5 min-w-0">
+                              <div className="h-3 bg-white/10 rounded-md w-3/4" />
+                              <div className="h-2.5 bg-white/5 rounded-md w-1/3" />
+                            </div>
+                            <div className="w-16 h-8 bg-white/10 rounded-xl shrink-0" />
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Results Available */}
+                    {!isSearching && searchResults.length > 0 && (
+                      <div className="space-y-2 max-h-[310px] overflow-y-auto pr-1">
+                        <div className="flex items-center justify-between pb-1">
+                          <span className="text-[11px] font-semibold text-slate-400">
+                            Search Results ({searchResults.length})
+                          </span>
+                          <span className="text-[10px] text-slate-500">
+                            1-click play or queue
+                          </span>
+                        </div>
+
+                        {searchResults.map((track) => (
+                          <div
+                            key={track.id}
+                            className="p-2.5 rounded-2xl bg-white/[0.03] hover:bg-white/[0.06] border border-white/10 flex items-center justify-between gap-3 transition-colors group"
+                          >
+                            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                              <div className="relative w-14 h-10 sm:w-16 sm:h-11 rounded-xl overflow-hidden bg-black shrink-0 border border-white/10">
+                                <img
+                                  src={track.thumbnail || `https://img.youtube.com/vi/${track.id}/hqdefault.jpg`}
+                                  alt={track.title}
+                                  className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                                />
+                                {track.durationFormatted && (
+                                  <span
+                                    className={`absolute bottom-1 right-1 px-1 py-0.2 rounded text-[9px] font-mono font-bold leading-none ${
+                                      track.isLive ? "bg-rose-600 text-white" : "bg-black/80 text-slate-200"
+                                    }`}
+                                  >
+                                    {track.durationFormatted}
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="min-w-0 flex-1">
+                                <h5 className="text-xs font-bold text-white truncate group-hover:text-indigo-300 transition-colors leading-tight">
+                                  {track.title}
+                                </h5>
+                                <p className="text-[10px] text-slate-400 truncate mt-0.5">
+                                  {track.artist || "YouTube Track"}
+                                </p>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              {(isDJ || isDJFree) && (
+                                <button
+                                  type="button"
+                                  onClick={() => handlePlayTrack(track)}
+                                  className="px-2.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-[11px] transition-all flex items-center gap-1 shadow-sm active:scale-95 cursor-pointer"
+                                  title="Play Now"
+                                >
+                                  <Play size={12} className="ml-0.5" />
+                                  <span>Play</span>
+                                </button>
+                              )}
+
+                              <button
+                                type="button"
+                                onClick={() => handleQueueTrack(track)}
+                                disabled={isQueueLimitReached}
+                                className={`px-2.5 py-1.5 rounded-xl border text-[11px] font-semibold transition-all flex items-center gap-1 active:scale-95 cursor-pointer ${
+                                  isQueueLimitReached
+                                    ? "bg-white/5 text-slate-500 border-white/5 cursor-not-allowed"
+                                    : isDJ || isDJFree
+                                      ? "bg-white/5 hover:bg-white/10 text-slate-200 border-white/10"
+                                      : "bg-indigo-600 hover:bg-indigo-500 border-indigo-500/40 text-white shadow-sm"
+                                }`}
+                                title="Add to upcoming songs queue"
+                              >
+                                <Plus size={12} />
+                                <span>{isQueueLimitReached ? "Limit (2/2)" : "Queue"}</span>
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* No Results Empty State */}
+                    {!isSearching && hasSearched && searchResults.length === 0 && (
+                      <div className="text-center py-8 px-4 bg-white/[0.02] rounded-2xl border border-white/5">
+                        <Search size={24} className="mx-auto text-slate-500 mb-2" />
+                        <p className="text-xs font-semibold text-slate-300">
+                          No songs found for &ldquo;{searchQuery}&rdquo;
+                        </p>
+                        <p className="text-[11px] text-slate-500 mt-1 max-w-xs mx-auto">
+                          Try searching by artist name, or paste a direct YouTube video link.
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Quick Inspiration Tags (when query is empty) */}
+                    {!searchQuery && !hasSearched && (
+                      <div className="pt-2">
+                        <div className="flex items-center gap-1.5 text-[11px] font-medium text-slate-400 mb-2">
+                          <Sparkles size={12} className="text-amber-400" />
+                          <span>Popular quick searches:</span>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {QUICK_SEARCH_TAGS.map((tag) => (
+                            <button
+                              key={tag}
+                              type="button"
+                              onClick={() => handleSelectQuickTag(tag)}
+                              className="px-2.5 py-1 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 hover:border-indigo-500/40 text-[11px] text-slate-300 hover:text-white transition-all cursor-pointer active:scale-95 flex items-center gap-1"
+                            >
+                              <Search size={10} className="text-indigo-400" />
+                              <span>{tag}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
-            {/* 2. Queue Tab */}
+            {/* 3. Queue Tab */}
             {activeTab === "queue" && (
-              <div className="space-y-2.5 animate-fadeIn">
+              <div className="space-y-2.5 animate-in fade-in duration-150">
                 <div className="flex items-center justify-between pb-1 border-b border-white/5">
                   <span className="text-xs font-bold text-white flex items-center gap-1.5">
                     <ListMusic size={14} className="text-indigo-400" />
@@ -526,16 +782,18 @@ export function MusicModal({
                     </div>
                     <h4 className="text-xs font-bold text-white">Queue is Empty</h4>
                     <p className="text-[11px] text-slate-400 mt-1 max-w-xs">
-                      Anyone in the room can paste a YouTube link to add songs to the queue!
+                      Search for any song or paste a YouTube link to queue music for the room!
                     </p>
-                    <button
-                      type="button"
-                      onClick={() => setActiveTab("youtube")}
-                      className="mt-3 px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-md shadow-indigo-600/30"
-                    >
-                      <Plus size={13} />
-                      <span>Add a Song</span>
-                    </button>
+                    <div className="flex items-center gap-2 mt-3.5">
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab("youtube")}
+                        className="px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-md shadow-indigo-600/30"
+                      >
+                        <Search size={13} />
+                        <span>Search & Add Songs</span>
+                      </button>
+                    </div>
                   </div>
                 ) : (
                   <div className="space-y-2 max-h-[340px] overflow-y-auto pr-0.5">
@@ -585,8 +843,8 @@ export function MusicModal({
 
                           {/* Right: DJ Play Button & Remove Controls */}
                           <div className="flex items-center gap-1.5 shrink-0">
-                            {/* DJ Play button */}
-                            {isDJ && (
+                            {/* Play button: for DJ or anyone when DJ is free */}
+                            {(isDJ || isDJFree) && (
                               <button
                                 type="button"
                                 onClick={() => onPlayQueuedTrack(track.queueId)}
@@ -599,7 +857,7 @@ export function MusicModal({
                             )}
 
                             {/* Remove button: DJ can remove any track; users can remove their own */}
-                            {(isDJ || isOwner || canModerateAux) && (
+                            {(isDJ || isOwner || canModerateAux || isDJFree) && (
                               <button
                                 type="button"
                                 onClick={() => onRemoveFromQueue(track.queueId)}
@@ -620,7 +878,7 @@ export function MusicModal({
 
             {/* 3. Pass DJ Sub-View */}
             {activeTab === "pass_dj" && isDJ && (
-              <div className="space-y-3 animate-fadeIn">
+              <div className="space-y-3 animate-in fade-in duration-150">
                 <div className="flex items-center gap-2">
                   <button
                     type="button"

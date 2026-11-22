@@ -10,22 +10,17 @@ import {
   Headphones,
   Maximize2,
   Minimize2,
-  Share2,
-  Radio,
   Sparkles,
-  UserCheck,
   X,
-  ChevronDown,
-  ChevronUp,
-  Sliders,
   ExternalLink,
   ListMusic,
   Square,
   Plus,
+  AlertCircle,
+  Volume1,
 } from "lucide-react";
 import { MusicTrack, RoomMusicState } from "@/lib/music-types";
 import { JunctionParticipant } from "@/lib/types";
-import { extractYouTubeId } from "@/lib/curated-stations";
 
 interface MusicDeckProps {
   musicState: RoomMusicState;
@@ -34,6 +29,8 @@ interface MusicDeckProps {
   currentName: string;
   canModerateAux?: boolean;
   isExpanded: boolean;
+  isDeafened?: boolean;
+  isRoomMinimized?: boolean;
   onToggleExpand: () => void;
   onOpenMusicModal: (tab?: "youtube" | "queue") => void;
   onTogglePlayback: (isPlaying: boolean, currentSeek: number) => void;
@@ -59,6 +56,8 @@ export function MusicDeck({
   currentName,
   canModerateAux = false,
   isExpanded,
+  isDeafened = false,
+  isRoomMinimized = false,
   onToggleExpand,
   onOpenMusicModal,
   onTogglePlayback,
@@ -79,10 +78,12 @@ export function MusicDeck({
   });
   const [isLocalMuted, setIsLocalMuted] = useState<boolean>(false);
   const [isVolumeSliderOpen, setIsVolumeSliderOpen] = useState(false);
+  const [autoplayBlocked, setAutoplayBlocked] = useState(false);
+  const [playbackNotice, setPlaybackNotice] = useState<string | null>(null);
 
   // YouTube player state
   const playerRef = useRef<any>(null);
-  const iframeContainerRef = useRef<HTMLDivElement>(null);
+  const activeVideoIdRef = useRef<string>("");
   const onTogglePlaybackRef = useRef(onTogglePlayback);
   onTogglePlaybackRef.current = onTogglePlayback;
   const onHeartbeatSyncRef = useRef(onHeartbeatSync);
@@ -116,10 +117,14 @@ export function MusicDeck({
     });
   }, [musicState.auxHolderIdentity, musicState.auxHolderName, isAuxHolder, participants]);
 
-  // If nobody holds the AUX or the person who held it left the room, AUX is free
+  // If nobody holds AUX or the holder left the room, AUX cord is open for anyone
   const isAuxFree = !musicState.auxHolderIdentity || !isHolderPresent;
-  // STRICT RULE: Only the person who grabbed the AUX cord can control playback!
-  const canControlPlayback = isAuxHolder;
+  const canControlPlayback = isAuxHolder || isAuxFree || canModerateAux;
+
+  const isAuxHolderRef = useRef(isAuxHolder);
+  isAuxHolderRef.current = isAuxHolder;
+  const canControlPlaybackRef = useRef(canControlPlayback);
+  canControlPlaybackRef.current = canControlPlayback;
 
   // Persist volume in local storage
   const handleVolumeChange = (newVol: number) => {
@@ -134,15 +139,18 @@ export function MusicDeck({
     setIsLocalMuted((prev) => !prev);
   };
 
+  // Effective muted state (local mute OR room deafened)
+  const isEffectiveMuted = isLocalMuted || isDeafened;
+
   // Sync volume to YouTube Player
   useEffect(() => {
     if (playerRef.current && isPlayerReady) {
       try {
         if (typeof playerRef.current.setVolume === "function") {
-          playerRef.current.setVolume(isLocalMuted ? 0 : localVolume);
+          playerRef.current.setVolume(isEffectiveMuted ? 0 : localVolume);
         }
         if (typeof playerRef.current.isMuted === "function") {
-          if (isLocalMuted) {
+          if (isEffectiveMuted) {
             playerRef.current.mute();
           } else {
             playerRef.current.unMute();
@@ -150,31 +158,73 @@ export function MusicDeck({
         }
       } catch (e) {}
     }
-  }, [localVolume, isLocalMuted, isPlayerReady]);
+  }, [localVolume, isEffectiveMuted, isPlayerReady]);
 
-  // Load YouTube IFrame API script once
+  // Load YouTube IFrame API script once safely
   useEffect(() => {
     if (typeof window === "undefined") return;
 
     if (!window.YT) {
-      const tag = document.createElement("script");
-      tag.src = "https://www.youtube.com/iframe_api";
-      const firstScriptTag = document.getElementsByTagName("script")[0];
-      firstScriptTag?.parentNode?.insertBefore(tag, firstScriptTag);
+      const existingScript = document.getElementById("yapclub_yt_iframe_api");
+      if (!existingScript) {
+        const tag = document.createElement("script");
+        tag.id = "yapclub_yt_iframe_api";
+        tag.src = "https://www.youtube.com/iframe_api";
+        const firstScriptTag = document.getElementsByTagName("script")[0];
+        firstScriptTag?.parentNode?.insertBefore(tag, firstScriptTag);
+      }
     }
   }, []);
 
-  const videoId = musicState.currentTrack?.id || "";
+  const videoId = musicState.isActive && musicState.currentTrack?.id ? musicState.currentTrack.id : "";
 
-  // Initialize or update YouTube Player
+  // Initialize or update YouTube Player seamlessly without destroying container
   useEffect(() => {
-    if (!videoId) return;
+    if (!videoId) {
+      // Pause or stop playback if active track is cleared
+      if (playerRef.current && isPlayerReady) {
+        try {
+          playerRef.current.pauseVideo?.();
+        } catch {}
+      }
+      activeVideoIdRef.current = "";
+      return;
+    }
 
     let destroyed = false;
 
+    // If player already exists and videoId changes, smoothly load the new video without rebuilding iframe!
+    if (playerRef.current && isPlayerReady && typeof playerRef.current.loadVideoById === "function") {
+      if (activeVideoIdRef.current !== videoId) {
+        activeVideoIdRef.current = videoId;
+        const isLive = Boolean(musicState.currentTrack?.isLive);
+        const now = Date.now();
+        const elapsed = musicState.isPlaying
+          ? (now - (musicState.lastSyncTime || now)) / 1000
+          : 0;
+        const expectedTime = Math.max(0, (musicState.seekTime || 0) + elapsed);
+
+        try {
+          if (isLive) {
+            playerRef.current.loadVideoById({ videoId });
+          } else {
+            playerRef.current.loadVideoById({ videoId, startSeconds: expectedTime });
+          }
+          if (!musicState.isPlaying) {
+            playerRef.current.pauseVideo?.();
+          }
+        } catch (err) {
+          console.warn("Smooth video load notice:", err);
+        }
+      }
+      return;
+    }
+
+    // First-time player initialization
     const initPlayer = () => {
+      if (destroyed) return;
       if (!window.YT || !window.YT.Player) {
-        setTimeout(initPlayer, 200);
+        setTimeout(initPlayer, 150);
         return;
       }
 
@@ -186,14 +236,16 @@ export function MusicDeck({
           try {
             playerRef.current.destroy();
           } catch {}
+          playerRef.current = null;
         }
+
+        activeVideoIdRef.current = videoId;
 
         playerRef.current = new window.YT.Player("yapclub_yt_player_host", {
           videoId,
           playerVars: {
             autoplay: 1,
-            controls: isAuxHolder ? 1 : 0, // only AUX holder has native controls if interactive
-            disablekb: isAuxHolder ? 0 : 1,
+            controls: 1,
             modestbranding: 1,
             rel: 0,
             playsinline: 1,
@@ -205,21 +257,17 @@ export function MusicDeck({
               if (destroyed) return;
               setIsPlayerReady(true);
               const target = event.target;
-              target.setVolume(isLocalMuted ? 0 : localVolume);
-              if (isLocalMuted) target.mute();
+              target.setVolume(isEffectiveMuted ? 0 : localVolume);
+              if (isEffectiveMuted) target.mute();
 
               const isLive = Boolean(musicState.currentTrack?.isLive);
 
               if (isLive) {
-                // Live streams: Snap directly to the live broadcast head
                 try {
                   const dur = target.getDuration?.() || 0;
-                  if (dur > 0) {
-                    target.seekTo(dur, true);
-                  }
+                  if (dur > 0) target.seekTo(dur, true);
                 } catch {}
               } else {
-                // Recorded videos/tracks: Calculate expected playback time from room state
                 const now = Date.now();
                 const elapsed = musicState.isPlaying
                   ? (now - (musicState.lastSyncTime || now)) / 1000
@@ -229,7 +277,11 @@ export function MusicDeck({
               }
 
               if (musicState.isPlaying) {
-                target.playVideo();
+                try {
+                  target.playVideo();
+                } catch {
+                  setAutoplayBlocked(true);
+                }
               } else {
                 target.pauseVideo();
               }
@@ -239,7 +291,6 @@ export function MusicDeck({
               } catch {}
             },
             onStateChange: (event: any) => {
-              if (!isAuxHolder) return;
               // YT.PlayerState: 0=ENDED, 1=PLAYING, 2=PAUSED
               const state = event.data;
               const target = event.target;
@@ -249,15 +300,31 @@ export function MusicDeck({
                 // Track finished! Auto-advance to next song in queue if available
                 if (onAutoAdvanceQueueRef.current) {
                   onAutoAdvanceQueueRef.current();
-                } else {
+                } else if (canControlPlaybackRef.current) {
                   onTogglePlaybackRef.current(false, 0);
                 }
-              } else if (state === 1 && !musicState.isPlaying) {
-                // AUX holder started playback via YouTube native controls
-                onTogglePlaybackRef.current(true, currentPos);
-              } else if (state === 2 && musicState.isPlaying) {
-                // AUX holder paused playback via YouTube native controls
-                onTogglePlaybackRef.current(false, currentPos);
+              } else if (state === 1) {
+                setAutoplayBlocked(false);
+                if (isAuxHolderRef.current && !musicState.isPlaying) {
+                  onTogglePlaybackRef.current(true, currentPos);
+                }
+              } else if (state === 2) {
+                if (isAuxHolderRef.current && musicState.isPlaying) {
+                  onTogglePlaybackRef.current(false, currentPos);
+                }
+              }
+            },
+            onError: (event: any) => {
+              const code = event.data;
+              console.warn("YouTube player error code:", code);
+              if (code === 100 || code === 101 || code === 150) {
+                setPlaybackNotice("This track is restricted by YouTube publisher for embeds. Skipping...");
+                setTimeout(() => setPlaybackNotice(null), 4000);
+                if (onAutoAdvanceQueueRef.current) {
+                  setTimeout(() => {
+                    onAutoAdvanceQueueRef.current?.();
+                  }, 1200);
+                }
               }
             },
           },
@@ -271,15 +338,8 @@ export function MusicDeck({
 
     return () => {
       destroyed = true;
-      if (playerRef.current) {
-        try {
-          playerRef.current.destroy();
-        } catch {}
-        playerRef.current = null;
-      }
-      setIsPlayerReady(false);
     };
-  }, [videoId, isAuxHolder]);
+  }, [videoId, isPlayerReady, isEffectiveMuted, localVolume, musicState.isPlaying, musicState.currentTrack?.isLive, musicState.lastSyncTime, musicState.seekTime]);
 
   // Synchronize playback state changes from room
   useEffect(() => {
@@ -292,7 +352,7 @@ export function MusicDeck({
         playerRef.current.pauseVideo();
       }
 
-      // Only adjust seeking for listeners to keep them locked to the AUX holder
+      // Gentle drift correction for listeners to stay locked to DJ head
       if (!isAuxHolder && !musicState.currentTrack?.isLive) {
         const now = Date.now();
         const elapsed = musicState.isPlaying
@@ -301,7 +361,6 @@ export function MusicDeck({
         const expectedTime = Math.max(0, (musicState.seekTime || 0) + elapsed);
         const actualTime = playerRef.current.getCurrentTime?.() || 0;
 
-        // If drift is over 1.2s, gently snap to expectedTime
         if (Math.abs(actualTime - expectedTime) > 1.2) {
           playerRef.current.seekTo(expectedTime, true);
         }
@@ -342,12 +401,10 @@ export function MusicDeck({
           if (!isAuxHolder) {
             const isLive = Boolean(musicState.currentTrack?.isLive);
             if (isLive) {
-              // Live streams: snap if listener falls behind the live edge by > 4s
               if (dur > 0 && dur - current > 4) {
                 playerRef.current.seekTo(dur, true);
               }
             } else {
-              // Recorded videos: snap if listener drifts by > 1.2s
               const now = Date.now();
               const elapsed = (now - (musicState.lastSyncTime || now)) / 1000;
               const expectedTime = Math.max(0, (musicState.seekTime || 0) + elapsed);
@@ -385,30 +442,42 @@ export function MusicDeck({
 
   const handleTogglePlay = () => {
     if (!canControlPlayback) return;
+    if (isAuxFree) {
+      onClaimAux();
+    }
     const nextPlay = !musicState.isPlaying;
     const current = playerRef.current?.getCurrentTime() || currentTime;
     onTogglePlayback(nextPlay, current);
   };
 
-  if (!musicState.isActive || !musicState.currentTrack) {
-    return null;
-  }
+  const handleUnblockAudio = () => {
+    try {
+      if (playerRef.current) {
+        playerRef.current.unMute?.();
+        playerRef.current.setVolume?.(localVolume);
+        playerRef.current.playVideo?.();
+      }
+    } catch {}
+    setAutoplayBlocked(false);
+  };
 
+  const isMusicActive = Boolean(musicState.isActive && musicState.currentTrack);
   const track = musicState.currentTrack;
 
   return (
     <div className="w-full transition-all duration-300 relative z-30">
-      {/* ─── SINGLE STABLE YOUTUBE PLAYER CONTAINER ─── */}
-      {/* Kept permanently mounted in DOM to prevent React removeChild collision with YouTube Iframe API */}
+      {/* ─── PERMANENT YOUTUBE PLAYER CONTAINER ─── */}
+      {/* ALWAYS kept mounted in the DOM so React never unmounts the YouTube iframe */}
       <div
         className={
-          isExpanded
-            ? "relative z-30 w-full max-w-4xl mx-auto px-2 sm:px-4 mt-2 sm:mt-4 mb-2.5 sm:mb-3 block"
+          isMusicActive && isExpanded && !isRoomMinimized
+            ? "relative z-30 w-full max-w-4xl mx-auto px-2 sm:px-4 mt-2 sm:mt-4 mb-2.5 sm:mb-3 block animate-in fade-in zoom-in-95 duration-200"
             : "w-0 h-0 overflow-hidden opacity-0 pointer-events-none absolute -z-50"
         }
+        aria-hidden={!isMusicActive || !isExpanded || isRoomMinimized}
       >
         <div className="bg-[#0B0C12]/95 border border-indigo-500/25 rounded-2xl sm:rounded-3xl overflow-hidden shadow-[0_12px_45px_rgba(0,0,0,0.7)] backdrop-blur-2xl">
-          {/* Expanded Theatre Header — Clean & Uncrowded */}
+          {/* Expanded Theatre Header */}
           <div className="px-3 sm:px-4 py-2 sm:py-2.5 bg-white/[0.03] border-b border-white/5 flex items-center justify-between gap-2">
             {/* Left: DJ Status Pill */}
             <div className="flex items-center gap-2 min-w-0">
@@ -443,8 +512,20 @@ export function MusicDeck({
               )}
             </div>
 
-            {/* Right: Personal Volume & Minimize Stage (Only 2 small controls, never overflowing) */}
+            {/* Right: Personal Volume & Minimize Stage */}
             <div className="flex items-center gap-1.5 shrink-0">
+              {/* Autoplay unblock button */}
+              {autoplayBlocked && (
+                <button
+                  type="button"
+                  onClick={handleUnblockAudio}
+                  className="px-2 py-1 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-[11px] font-bold flex items-center gap-1 animate-pulse"
+                >
+                  <Volume1 size={13} />
+                  <span>Tap to Listen</span>
+                </button>
+              )}
+
               {/* Personal Volume Dropdown */}
               <div className="relative shrink-0">
                 <button
@@ -453,12 +534,14 @@ export function MusicDeck({
                   className="h-7.5 px-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer border border-white/5"
                   title="My Music Volume"
                 >
-                  {isLocalMuted || localVolume === 0 ? (
+                  {isEffectiveMuted || localVolume === 0 ? (
                     <VolumeX size={13} className="text-rose-400 shrink-0" />
                   ) : (
                     <Volume2 size={13} className="text-indigo-400 shrink-0" />
                   )}
-                  <span className="text-[11px] font-mono text-slate-400">{isLocalMuted ? "0%" : `${localVolume}%`}</span>
+                  <span className="text-[11px] font-mono text-slate-400">
+                    {isEffectiveMuted ? "0%" : `${localVolume}%`}
+                  </span>
                 </button>
 
                 {isVolumeSliderOpen && (
@@ -473,7 +556,7 @@ export function MusicDeck({
                         <button
                           type="button"
                           onClick={toggleMute}
-                          className="text-[10px] text-indigo-400 hover:underline"
+                          className="text-[10px] text-indigo-400 hover:underline cursor-pointer font-medium"
                         >
                           {isLocalMuted ? "Unmute" : "Mute"}
                         </button>
@@ -482,16 +565,21 @@ export function MusicDeck({
                         type="range"
                         min="0"
                         max="100"
-                        value={isLocalMuted ? 0 : localVolume}
+                        value={isEffectiveMuted ? 0 : localVolume}
                         onChange={(e) => handleVolumeChange(Number(e.target.value))}
                         className="w-full accent-indigo-500 h-1.5 bg-white/10 rounded-lg cursor-pointer"
                       />
+                      {isDeafened && (
+                        <p className="text-[10px] text-amber-300 mt-1.5 text-center">
+                          Room audio is deafened
+                        </p>
+                      )}
                     </div>
                   </>
                 )}
               </div>
 
-              {/* Minimize Stage */}
+              {/* Minimize Theatre to Audio Bar */}
               <button
                 type="button"
                 onClick={onToggleExpand}
@@ -508,8 +596,16 @@ export function MusicDeck({
             <div id="yapclub_yt_player_host" className="w-full h-full" />
           </div>
 
-          {/* Scrub / Progress Bar (Interactive for DJ, visual sync for listeners) */}
-          {!track.isLive && duration > 0 && (
+          {/* Error Notice */}
+          {playbackNotice && (
+            <div className="p-2.5 bg-amber-500/20 border-t border-amber-500/30 text-amber-300 text-xs flex items-center gap-2">
+              <AlertCircle size={14} className="shrink-0 text-amber-400" />
+              <span>{playbackNotice}</span>
+            </div>
+          )}
+
+          {/* Scrub / Progress Bar */}
+          {track && !track.isLive && duration > 0 && (
             <div className="w-full px-3 sm:px-4 pt-2.5 pb-1 bg-[#0E1017] flex items-center gap-2">
               <span className="text-[10px] text-slate-400 font-mono w-8 sm:w-9 text-right shrink-0">
                 {formatSeconds(currentTime)}
@@ -520,9 +616,9 @@ export function MusicDeck({
                 max={duration}
                 value={currentTime}
                 onChange={handleSeekChange}
-                disabled={!isAuxHolder}
+                disabled={!canControlPlayback}
                 className={`w-full h-1.5 rounded-lg accent-indigo-500 bg-white/10 ${
-                  isAuxHolder ? "cursor-pointer" : "cursor-default opacity-80"
+                  canControlPlayback ? "cursor-pointer" : "cursor-default opacity-80"
                 }`}
               />
               <span className="text-[10px] text-slate-400 font-mono w-8 sm:w-9 shrink-0">
@@ -532,50 +628,55 @@ export function MusicDeck({
           )}
 
           {/* Expanded Theatre Track Info Row */}
-          <div className="px-3 sm:px-4 py-2 sm:py-2.5 bg-[#0E1017] border-t border-white/5 flex items-center justify-between gap-2.5">
-            <div className="flex items-center gap-2 sm:gap-2.5 min-w-0 flex-1">
-              {canControlPlayback ? (
-                <button
-                  type="button"
-                  onClick={handleTogglePlay}
-                  className="w-8 h-8 rounded-full bg-indigo-600 hover:bg-indigo-500 text-white flex items-center justify-center transition-all shadow-md shadow-indigo-600/30 active:scale-95 shrink-0 cursor-pointer"
-                  title={musicState.isPlaying ? "Pause" : "Play"}
-                >
-                  {musicState.isPlaying ? <Pause size={14} /> : <Play size={14} className="ml-0.5" />}
-                </button>
-              ) : (
-                <div className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center text-slate-400 shrink-0">
-                  <Disc3 size={16} className={musicState.isPlaying ? "animate-spin [animation-duration:4s] text-indigo-400" : ""} />
-                </div>
-              )}
+          {track && (
+            <div className="px-3 sm:px-4 py-2 sm:py-2.5 bg-[#0E1017] border-t border-white/5 flex items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2 sm:gap-2.5 min-w-0 flex-1">
+                {canControlPlayback ? (
+                  <button
+                    type="button"
+                    onClick={handleTogglePlay}
+                    className="w-8 h-8 rounded-full bg-indigo-600 hover:bg-indigo-500 text-white flex items-center justify-center transition-all shadow-md shadow-indigo-600/30 active:scale-95 shrink-0 cursor-pointer"
+                    title={musicState.isPlaying ? "Pause" : "Play"}
+                  >
+                    {musicState.isPlaying ? <Pause size={14} /> : <Play size={14} className="ml-0.5" />}
+                  </button>
+                ) : (
+                  <div className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center text-slate-400 shrink-0">
+                    <Disc3
+                      size={16}
+                      className={musicState.isPlaying ? "animate-spin [animation-duration:4s] text-indigo-400" : ""}
+                    />
+                  </div>
+                )}
 
-              <div className="min-w-0 flex-1">
-                <h4 className="text-xs sm:text-sm font-semibold text-white truncate" title={track.title}>
-                  {track.title}
-                </h4>
-                <p className="text-[10px] sm:text-xs text-slate-400 truncate">
-                  {track.artist || "Shared Media"}
-                </p>
+                <div className="min-w-0 flex-1">
+                  <h4 className="text-xs sm:text-sm font-semibold text-white truncate" title={track.title}>
+                    {track.title}
+                  </h4>
+                  <p className="text-[10px] sm:text-xs text-slate-400 truncate">
+                    {track.artist || "Shared Media"}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-1.5 shrink-0">
+                <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-indigo-500/15 text-indigo-300 border border-indigo-500/25">
+                  {track.isLive ? "LIVE" : "SYNC"}
+                </span>
+                {track.url && (
+                  <a
+                    href={track.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="w-7 h-7 rounded-lg bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white flex items-center justify-center transition-all"
+                    title="Open on YouTube"
+                  >
+                    <ExternalLink size={12} />
+                  </a>
+                )}
               </div>
             </div>
-
-            <div className="flex items-center gap-1.5 shrink-0">
-              <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-indigo-500/15 text-indigo-300 border border-indigo-500/25">
-                {track.isLive ? "LIVE" : "SYNC"}
-              </span>
-              {track.url && (
-                <a
-                  href={track.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-7 h-7 rounded-lg bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white flex items-center justify-center transition-all"
-                  title="Open on YouTube"
-                >
-                  <ExternalLink size={12} />
-                </a>
-              )}
-            </div>
-          </div>
+          )}
 
           {/* Stage Action Bar — Queue, Add Song, and End Music */}
           <div className="px-3 sm:px-4 py-2 sm:py-2.5 bg-[#090A0E] border-t border-white/5 flex items-center gap-2">
@@ -595,7 +696,7 @@ export function MusicDeck({
               )}
             </button>
 
-            {/* Add / Change Song Button */}
+            {/* Add Song Button */}
             <button
               type="button"
               onClick={() => onOpenMusicModal("youtube")}
@@ -611,7 +712,7 @@ export function MusicDeck({
               <button
                 type="button"
                 onClick={onStopMusic}
-                className="h-8 sm:h-9 px-2.5 sm:px-3 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 hover:text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-all active:scale-95 cursor-pointer shrink-0"
+                className="h-8 sm:h-9 px-2.5 sm:px-3 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 hover:text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-all active:scale-95 cursor-pointer shrink-0 ml-auto"
                 title="Turn off music player for the room"
               >
                 <Square size={11} className="fill-current text-rose-400 shrink-0" />
@@ -619,21 +720,19 @@ export function MusicDeck({
               </button>
             )}
           </div>
-
-
         </div>
       </div>
 
       {/* ─── COMPACT MINI-BAR / ADAPTIVE AUDIO DECK ─── */}
-      {/* Visible only when isExpanded is FALSE */}
-      {!isExpanded && (
-        <div className="relative z-30 w-full max-w-7xl mx-auto px-2 sm:px-6 mt-2.5 sm:mt-4 mb-2">
+      {/* Visible when isMusicActive is true, isExpanded is FALSE, and room is NOT minimized */}
+      {isMusicActive && !isExpanded && !isRoomMinimized && track && (
+        <div className="relative z-30 w-full max-w-7xl mx-auto px-2 sm:px-6 mt-2.5 sm:mt-4 mb-2 animate-in fade-in duration-200">
           <div className="relative z-30 bg-[#0E1017]/95 backdrop-blur-2xl border border-white/10 rounded-2xl sm:rounded-full px-2 py-1.5 sm:px-4 sm:py-2 shadow-[0_8px_30px_rgba(0,0,0,0.6)] flex items-center justify-between gap-1.5 sm:gap-3">
             {/* Track Info (Clickable to open Music Modal) */}
             <div
-              onClick={() => onOpenMusicModal?.("youtube")}
+              onClick={() => onOpenMusicModal?.("queue")}
               className="flex items-center gap-2 min-w-0 flex-1 cursor-pointer group/track"
-              title="Click to view queue or add YouTube songs"
+              title="Click to view queue or change songs"
             >
               {/* Thumbnail / Animated Equalizer Bars */}
               <div className="relative w-8 h-8 sm:w-9 sm:h-9 rounded-xl sm:rounded-full overflow-hidden shrink-0 bg-indigo-950/40 border border-indigo-500/30 flex items-center justify-center">
@@ -683,8 +782,21 @@ export function MusicDeck({
 
             {/* Right Controls */}
             <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+              {/* Autoplay unblock button */}
+              {autoplayBlocked && (
+                <button
+                  type="button"
+                  onClick={handleUnblockAudio}
+                  className="px-2 py-0.5 rounded-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-[10px] font-bold flex items-center gap-1 animate-pulse shadow-xs"
+                >
+                  <Volume1 size={11} />
+                  <span>Unmute</span>
+                </button>
+              )}
+
               {/* Queue Button */}
               <button
+                type="button"
                 onClick={(e) => {
                   e.stopPropagation();
                   onOpenMusicModal("queue");
@@ -702,6 +814,7 @@ export function MusicDeck({
               {/* Become DJ Quick Action (when DJ is free) */}
               {isAuxFree && (
                 <button
+                  type="button"
                   onClick={(e) => {
                     e.stopPropagation();
                     onClaimAux();
@@ -715,9 +828,10 @@ export function MusicDeck({
                 </button>
               )}
 
-              {/* Play/Pause (only AUX holder can play/pause) */}
+              {/* Play/Pause (only AUX holder or free DJ can play/pause) */}
               {canControlPlayback && (
                 <button
+                  type="button"
                   onClick={handleTogglePlay}
                   className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-indigo-600 hover:bg-indigo-500 text-white flex items-center justify-center transition-all active:scale-95 shadow-md shadow-indigo-600/30 shrink-0 cursor-pointer"
                   title={musicState.isPlaying ? "Pause" : "Play"}
@@ -729,11 +843,12 @@ export function MusicDeck({
               {/* Personal Volume Dropdown */}
               <div className="relative z-40">
                 <button
+                  type="button"
                   onClick={() => setIsVolumeSliderOpen(!isVolumeSliderOpen)}
                   className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white transition-all flex items-center justify-center shrink-0 cursor-pointer"
                   title="My Music Volume"
                 >
-                  {isLocalMuted || localVolume === 0 ? (
+                  {isEffectiveMuted || localVolume === 0 ? (
                     <VolumeX size={14} className="text-rose-400" />
                   ) : (
                     <Volume2 size={14} className="text-indigo-400" />
@@ -750,6 +865,7 @@ export function MusicDeck({
                       <div className="flex items-center justify-between text-[11px] mb-2 text-slate-300">
                         <span>My Music Volume</span>
                         <button
+                          type="button"
                           onClick={toggleMute}
                           className="text-[10px] text-indigo-400 hover:underline cursor-pointer font-medium"
                         >
@@ -760,15 +876,22 @@ export function MusicDeck({
                         type="range"
                         min="0"
                         max="100"
-                        value={isLocalMuted ? 0 : localVolume}
+                        value={isEffectiveMuted ? 0 : localVolume}
                         onChange={(e) => handleVolumeChange(Number(e.target.value))}
                         className="w-full accent-indigo-500 h-1.5 bg-white/10 rounded-lg cursor-pointer"
                       />
                       <div className="flex justify-between text-[9px] text-slate-500 mt-1 font-mono">
                         <span>0%</span>
-                        <span className="text-indigo-300 font-semibold">{isLocalMuted ? "Muted" : `${localVolume}%`}</span>
+                        <span className="text-indigo-300 font-semibold">
+                          {isEffectiveMuted ? "Muted" : `${localVolume}%`}
+                        </span>
                         <span>100%</span>
                       </div>
+                      {isDeafened && (
+                        <p className="text-[10px] text-amber-300 mt-1.5 text-center">
+                          Room audio is deafened
+                        </p>
+                      )}
                     </div>
                   </>
                 )}
@@ -776,6 +899,7 @@ export function MusicDeck({
 
               {/* Expand to Video Stage */}
               <button
+                type="button"
                 onClick={onToggleExpand}
                 className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white transition-all flex items-center justify-center shrink-0 cursor-pointer"
                 title="Expand Theatre Video"
@@ -786,6 +910,7 @@ export function MusicDeck({
               {/* End Music Button */}
               {(isAuxHolder || canModerateAux || isAuxFree) && (
                 <button
+                  type="button"
                   onClick={(e) => {
                     e.stopPropagation();
                     onStopMusic();
@@ -797,11 +922,12 @@ export function MusicDeck({
                 </button>
               )}
 
-              {/* Browse Tracks / Queue Modal Button (Desktop/Tablet) */}
+              {/* Browse Tracks / Queue Modal Button */}
               <button
+                type="button"
                 onClick={() => onOpenMusicModal?.("youtube")}
                 className="hidden sm:flex w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/30 text-indigo-300 hover:text-white items-center justify-center transition-all shrink-0 cursor-pointer"
-                title="Open Music Modal & Queue"
+                title="Open Music Player & Queue"
               >
                 <Headphones size={13} />
               </button>

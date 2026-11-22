@@ -8,6 +8,7 @@ export interface MusicTrack {
   artist?: string;
   thumbnail?: string;
   duration?: number; // duration in seconds, 0 or undefined for live streams
+  durationFormatted?: string;
   isLive?: boolean;
 }
 
@@ -30,17 +31,6 @@ export interface RoomMusicState {
   queue: QueuedTrack[]; // Live collaborative song queue
 }
 
-export interface CuratedStation {
-  id: string;
-  name: string;
-  description: string;
-  category: string;
-  icon: string;
-  accentColor: string;
-  gradient: string;
-  track: MusicTrack;
-}
-
 export type MusicDataPacket =
   | { type: 'music_sync_request' }
   | { type: 'music_sync'; payload: RoomMusicState }
@@ -56,4 +46,24 @@ export type MusicDataPacket =
   | { type: 'music_queue_remove'; payload: { queueId: string; senderIdentity: string } }
   | { type: 'music_queue_play'; payload: { queueId: string; track: MusicTrack; senderIdentity: string } }
   | { type: 'music_queue_clear'; payload: { senderIdentity: string } };
+
+/**
+ * Helper to parse any YouTube URL or string into an embeddable video ID
+ */
+export function extractYouTubeId(urlOrId: string): string | null {
+  if (!urlOrId) return null;
+  const clean = urlOrId.trim();
+
+  // If already an 11-char ID
+  if (/^[a-zA-Z0-9_-]{11}$/.test(clean)) {
+    return clean;
+  }
+
+  // Common YouTube URL regex
+  const regExp =
+    /(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=|shorts\/|live\/))([\w-]{11})/;
+  const match = clean.match(regExp);
+  return match ? match[1] : null;
+}
+
 
