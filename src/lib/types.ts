@@ -64,6 +64,7 @@ export interface GuestUser {
 export interface RoomChatMessage {
   id: string;
   senderId: string;
+  senderIdentity?: string;
   senderName: string;
   senderAvatar: string;
   senderColor: string;

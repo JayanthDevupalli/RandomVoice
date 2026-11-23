@@ -91,6 +91,7 @@ import {
 } from "@/components/voice/reactions/friendsEmojis";
 import { FloatingReactionOverlay } from "@/components/voice/reactions/FloatingReactionOverlay";
 import { FriendReactionPicker } from "@/components/voice/reactions/FriendReactionPicker";
+import { socialService } from "@/lib/social-service";
 
 interface JunctionRoomProps {
   junctionId: string;
@@ -118,9 +119,11 @@ const EMOJI_REACTIONS = FRIENDS_EMOJI_REACTIONS;
 function RemoteAudioPipeline({
   participantVolumes,
   isDeafened,
+  roomBlockedSet,
 }: {
   participantVolumes: Record<string, number>;
   isDeafened: boolean;
+  roomBlockedSet: Set<string>;
 }) {
   const room = useRoomContext();
 
@@ -130,19 +133,32 @@ function RemoteAudioPipeline({
     { onlySubscribed: true }
   ).filter((trackRef) => !trackRef.participant.isLocal && trackRef.publication?.kind === Track.Kind.Audio);
 
-  const getSafeVolume = (identity?: string, name?: string) => {
+  const getSafeVolume = (identity?: string, ...uniqueIds: (string | undefined)[]) => {
     if (isDeafened) return 0;
-    const cleanId = (identity || "").trim();
-    const cleanName = (name || "").trim();
+    const cleanId = (identity || "").trim().toLowerCase();
+
+    // Strictly mute blocked users in room by unique ID/identity (NEVER casual display name)
+    if (roomBlockedSet.size > 0) {
+      if (cleanId && roomBlockedSet.has(cleanId)) return 0;
+      for (const extra of uniqueIds) {
+        if (extra && roomBlockedSet.has(extra.trim().toLowerCase())) return 0;
+      }
+    }
+
     let vol = 100;
     if (cleanId && participantVolumes[cleanId] !== undefined) {
       vol = participantVolumes[cleanId];
     } else if (cleanId && participantVolumes[cleanId.toLowerCase()] !== undefined) {
       vol = participantVolumes[cleanId.toLowerCase()];
-    } else if (cleanName && participantVolumes[cleanName] !== undefined) {
-      vol = participantVolumes[cleanName];
-    } else if (cleanName && participantVolumes[cleanName.toLowerCase()] !== undefined) {
-      vol = participantVolumes[cleanName.toLowerCase()];
+    }
+    for (const extra of uniqueIds) {
+      if (extra) {
+        const cExtra = extra.trim().toLowerCase();
+        if (participantVolumes[cExtra] !== undefined) {
+          vol = participantVolumes[cExtra];
+          break;
+        }
+      }
     }
     return Math.min(1, Math.max(0, vol / 100));
   };
@@ -153,7 +169,17 @@ function RemoteAudioPipeline({
 
     try {
       room.remoteParticipants.forEach((remoteParticipant) => {
-        const safeVolume = getSafeVolume(remoteParticipant.identity, remoteParticipant.name);
+        let meta: any = {};
+        if (remoteParticipant.metadata) {
+          try {
+            meta = JSON.parse(remoteParticipant.metadata);
+          } catch { }
+        }
+        const safeVolume = getSafeVolume(
+          remoteParticipant.identity,
+          meta.id,
+          meta.username
+        );
 
         // 1. Direct LiveKit RemoteParticipant setVolume API (Microphone & ScreenShare)
         try {
@@ -191,14 +217,19 @@ function RemoteAudioPipeline({
     } catch (err) {
       console.warn("LiveKit native volume sync error:", err);
     }
-  }, [room, participantVolumes, isDeafened, audioTracks]);
+  }, [room, participantVolumes, isDeafened, audioTracks, roomBlockedSet]);
 
   return (
     <div style={{ display: "none" }} aria-hidden="true">
       {audioTracks.map((trackRef) => {
         const id = trackRef.participant.identity;
-        const name = trackRef.participant.name;
-        const safeVolume = getSafeVolume(id, name);
+        let meta: any = {};
+        if (trackRef.participant.metadata) {
+          try {
+            meta = JSON.parse(trackRef.participant.metadata);
+          } catch { }
+        }
+        const safeVolume = getSafeVolume(id, meta.id, meta.username);
         return (
           <AudioTrack
             key={trackRef.publication?.trackSid || `${id}_${trackRef.source}`}
@@ -778,6 +809,141 @@ export function JunctionRoom({
     } catch (e) { }
   }, [participantVolumes]);
 
+  // In-Room Blocked Users state (mutes voice, messages, and reactions for this user across all junctions)
+  const [roomBlockedIdentities, setRoomBlockedIdentities] = useState<string[]>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const stored = localStorage.getItem(`yapclub_room_blocks_${myId}`);
+        const globalStored = localStorage.getItem("yapclub_room_blocks_global");
+        const set = new Set<string>();
+        if (stored) {
+          const arr = JSON.parse(stored);
+          if (Array.isArray(arr)) arr.forEach((i: string) => i && set.add(i.toLowerCase()));
+        }
+        if (globalStored) {
+          const arr = JSON.parse(globalStored);
+          if (Array.isArray(arr)) arr.forEach((i: string) => i && set.add(i.toLowerCase()));
+        }
+        return Array.from(set);
+      } catch (e) { }
+    }
+    return [];
+  });
+
+  // Re-sync local storage whenever myId changes or resolves
+  useEffect(() => {
+    if (typeof window === "undefined" || !myId) return;
+    try {
+      const stored = localStorage.getItem(`yapclub_room_blocks_${myId}`);
+      if (stored) {
+        const arr: string[] = JSON.parse(stored);
+        if (Array.isArray(arr) && arr.length > 0) {
+          setRoomBlockedIdentities((prev) => {
+            const nextSet = new Set(prev.map((k) => k.toLowerCase()));
+            let changed = false;
+            arr.forEach((item) => {
+              if (item && !nextSet.has(item.toLowerCase())) {
+                nextSet.add(item.toLowerCase());
+                changed = true;
+              }
+            });
+            return changed ? Array.from(nextSet) : prev;
+          });
+        }
+      }
+    } catch (e) { }
+  }, [myId]);
+
+  // Sync with social block lists if authenticated user, fetching their full profiles so all aliases are covered
+  useEffect(() => {
+    if (!user?.id || !isRegistered) return;
+    socialService
+      .getBlockLists(user.id)
+      .then(async ({ blockedByMeIds }) => {
+        if (blockedByMeIds && blockedByMeIds.length > 0) {
+          let blockedProfiles: any[] = [];
+          try {
+            const { data } = await supabase
+              .from("profiles")
+              .select("id, username")
+              .in("id", blockedByMeIds);
+            if (data) blockedProfiles = data;
+          } catch (e) { }
+
+          setRoomBlockedIdentities((prev) => {
+            const nextSet = new Set(prev.map((k) => k.toLowerCase()));
+            let changed = false;
+            blockedByMeIds.forEach((id) => {
+              const lower = id.toLowerCase();
+              if (!nextSet.has(lower)) {
+                nextSet.add(lower);
+                changed = true;
+              }
+            });
+            blockedProfiles.forEach((p) => {
+              if (p.username && !nextSet.has(p.username.toLowerCase())) {
+                nextSet.add(p.username.toLowerCase());
+                changed = true;
+              }
+            });
+            return changed ? Array.from(nextSet) : prev;
+          });
+        }
+      })
+      .catch(() => { });
+  }, [user?.id, isRegistered]);
+
+  // Persist room blocked users in localStorage both per-user and globally across junctions
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      try {
+        if (myId) {
+          localStorage.setItem(`yapclub_room_blocks_${myId}`, JSON.stringify(roomBlockedIdentities));
+        }
+        localStorage.setItem("yapclub_room_blocks_global", JSON.stringify(roomBlockedIdentities));
+      } catch (e) { }
+    }
+  }, [roomBlockedIdentities, myId]);
+
+  const roomBlockedSet = useMemo(() => {
+    return new Set(roomBlockedIdentities.map((k) => k.trim().toLowerCase()));
+  }, [roomBlockedIdentities]);
+
+  // Strictly check unique IDs / identities — NEVER casual display names!
+  const isBlockedInRoom = useCallback(
+    (
+      target?:
+        | JunctionParticipant
+        | { id?: string; identity?: string; username?: string }
+        | string
+        | null,
+      ...extraUniqueIdentifiers: (string | undefined | null)[]
+    ) => {
+      if (!target && extraUniqueIdentifiers.length === 0) return false;
+      if (roomBlockedSet.size === 0) return false;
+
+      const identifiers: string[] = [];
+      if (typeof target === "string") {
+        identifiers.push(target);
+      } else if (target) {
+        if (target.id) identifiers.push(target.id);
+        if (target.identity) identifiers.push(target.identity);
+        if (target.username) identifiers.push(target.username);
+      }
+      extraUniqueIdentifiers.forEach((id) => {
+        if (id) identifiers.push(id);
+      });
+
+      return identifiers.some((ident) => {
+        if (!ident) return false;
+        const clean = ident.trim().toLowerCase();
+        if (!clean) return false;
+        return roomBlockedSet.has(clean);
+      });
+    },
+    [roomBlockedSet]
+  );
+
   const [activeSpeakers, setActiveSpeakers] = useState<string[]>([]);
 
   // Instant platform suspension guard
@@ -855,6 +1021,12 @@ export function JunctionRoom({
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [rightPanelTab, setRightPanelTab] = useState<"chat" | "junctions">("chat");
   const [chatMessages, setChatMessages] = useState<RoomChatMessage[]>([]);
+  const visibleChatMessages = useMemo(() => {
+    return chatMessages.filter((msg) => {
+      if (msg.senderId === "system") return true;
+      return !isBlockedInRoom(msg.senderId, (msg as any).senderIdentity, (msg as any).identity);
+    });
+  }, [chatMessages, isBlockedInRoom]);
   const [inputMessage, setInputMessage] = useState("");
   const [dismissedSafetyKind, setDismissedSafetyKind] = useState<string | null>(null);
   const chatSafetyDetection = useMemo(
@@ -1215,9 +1387,9 @@ export function JunctionRoom({
 
   useEffect(() => {
     if (isChatOpen && rightPanelTab === "chat") {
-      setLastReadChatCount(chatMessages.length);
+      setLastReadChatCount(visibleChatMessages.length);
     }
-  }, [isChatOpen, rightPanelTab, chatMessages.length]);
+  }, [isChatOpen, rightPanelTab, visibleChatMessages.length]);
 
   // When a new message arrives: if user is scrolled up, increment unread badge; otherwise auto-scroll
   useEffect(() => {
@@ -1228,7 +1400,7 @@ export function JunctionRoom({
         scrollChatToBottom("smooth");
       }
     }
-  }, [chatMessages.length]);
+  }, [visibleChatMessages.length]);
 
   // Auto-scroll to latest messages when opening chat, switching tabs, or maximizing
   useEffect(() => {
@@ -2131,6 +2303,11 @@ export function JunctionRoom({
         if (payload.targetIdentity && !isLocalIdentity(payload.targetIdentity) && !isLocalIdentity(payload.senderName)) {
           return;
         }
+
+        // Mute messages from blocked users inside room
+        if (isBlockedInRoom(payload.senderId, payload.senderIdentity, payload.identity)) {
+          return;
+        }
         setChatMessages((prev) => {
           if (
             prev.some(
@@ -2172,11 +2349,11 @@ export function JunctionRoom({
           }
         }
 
-        if (!isSelf && isMinimizedRef.current && isNewMessage) {
+        if (!isSelf && !isBlockedInRoom(payload.senderId, payload.senderIdentity, payload.identity) && isMinimizedRef.current && isNewMessage) {
           setMinimizedUnreadCount((prev) => prev + 1);
         }
 
-        if (!isSelf && !isChatOpenRef.current && showInRoomPopupsRef.current && isNewMessage) {
+        if (!isSelf && !isBlockedInRoom(payload.senderId, payload.senderIdentity, payload.identity) && !isChatOpenRef.current && showInRoomPopupsRef.current && isNewMessage) {
           const isWhisper = Boolean(payload.targetIdentity && isLocalIdentity(payload.targetIdentity));
           let popupText = payload.text || "";
           try {
@@ -2237,6 +2414,8 @@ export function JunctionRoom({
         if (isLocalIdentity(identity) || isLocalIdentity(name)) return;
         // If it's a private whisper typing, only show if targetIdentity is ME
         if (targetIdentity && !isLocalIdentity(targetIdentity)) return;
+        // Mute typing indicators from blocked users inside room
+        if (isBlockedInRoom(identity)) return;
 
         setTypingUsers((prev) => {
           const cleanKey = (identity || name || "").toLowerCase().trim();
@@ -2262,6 +2441,11 @@ export function JunctionRoom({
       } else if (type === "reaction" && payload) {
         const reactionId = payload.id;
         if (!reactionId) return;
+
+        // Mute reactions from blocked users inside room
+        if (isBlockedInRoom(payload.senderIdentity, payload.senderId)) {
+          return;
+        }
 
         const resolvedEmoji =
           payload.emoji ||
@@ -2767,7 +2951,7 @@ export function JunctionRoom({
     } catch (err) {
       console.error("Error processing room message", err);
     }
-  }, [isLocalIdentity, isLocalParticipant, junctionId, user?.id, guest?.id, refreshUser, pollJunction, isPrivateRoom, mediaStream, broadcastRoomUpdate]);
+  }, [isLocalIdentity, isLocalParticipant, junctionId, user?.id, guest?.id, refreshUser, pollJunction, isPrivateRoom, mediaStream, broadcastRoomUpdate, isBlockedInRoom]);
 
   const handleParticipantLeave = useCallback((ident?: string, extraId?: string) => {
     const clean = (ident || "").toLowerCase().trim();
@@ -3870,10 +4054,11 @@ export function JunctionRoom({
 
     const newMsg: RoomChatMessage = {
       id: "msg_" + Date.now() + "_" + Math.random().toString(36).substring(2, 6),
-      senderId: guest.id,
-      senderName: guest.name,
-      senderAvatar: guest.avatar || "zap",
-      senderColor: guest.color || "#6366F1",
+      senderId: myId,
+      senderIdentity: myIdentity,
+      senderName: myDisplayName,
+      senderAvatar: (isRegistered && user?.avatar) || guest?.avatar || "zap",
+      senderColor: (isRegistered && user?.color) || guest?.color || "#6366F1",
       text: inputMessage.trim(),
       timestamp: Date.now(),
       isModerator: isCurrentModerator,
@@ -4198,9 +4383,6 @@ export function JunctionRoom({
       if (targetUser.username) {
         keys.push(targetUser.username, targetUser.username.toLowerCase());
       }
-      if (targetUser.name) {
-        keys.push(targetUser.name, targetUser.name.toLowerCase());
-      }
       if (targetUser.id) {
         keys.push(targetUser.id, targetUser.id.toLowerCase());
       }
@@ -4213,6 +4395,104 @@ export function JunctionRoom({
       }
       return next;
     });
+  };
+
+  const handleToggleBlockUserInRoom = async (target: JunctionParticipant) => {
+    if (!target || isLocalParticipant(target)) return;
+
+    // Use strictly unique identifiers to avoid blocking other users sharing the same display name
+    const uniqueId = target.identity || target.id || target.username || "";
+    const isGuest = uniqueId.toLowerCase().startsWith("guest_") || (target as any).isGuest;
+    const displayName = target.displayName || target.name || uniqueId;
+    const targetLabel = isGuest
+      ? `${displayName} (${uniqueId})`
+      : `@${target.username || uniqueId}${displayName && displayName !== target.username ? ` (${displayName})` : ""}`;
+
+    const isAlreadyBlocked = isBlockedInRoom(target);
+
+    if (isAlreadyBlocked) {
+      // Unblock user inside room using strictly unique keys
+      const keysToRemove = new Set(
+        [
+          target.id?.toLowerCase(),
+          target.identity?.toLowerCase(),
+          target.username?.toLowerCase(),
+        ].filter(Boolean) as string[]
+      );
+
+      setRoomBlockedIdentities((prev) => prev.filter((k) => !keysToRemove.has(k.toLowerCase())));
+
+      // Restore volume to 100
+      handleVolumeChange(target, 100);
+
+      // If registered user with UUID, also unblock in social service in background
+      if (user?.id && target.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(target.id)) {
+        socialService.unblockUser(user.id, target.id).catch(() => { });
+      }
+
+      setInRoomPopups((prev) => [
+        ...prev.slice(-2),
+        {
+          id: `unblocked_${Date.now()}`,
+          senderName: "System",
+          avatar: "shield",
+          color: "#10B981",
+          text: `Unblocked ${targetLabel} in this room.`,
+          isWhisper: false,
+          timestamp: Date.now(),
+        },
+      ]);
+    } else {
+      // Block user inside room
+      const confirmed = window.confirm(
+        `Block ${targetLabel} inside this room?\n\nTheir voice, chat messages, and emoji reactions will be muted for you.`
+      );
+      if (!confirmed) return;
+
+      // ONLY add strictly unique keys: id, identity, and username (NEVER casual display name!)
+      const keysToAdd: string[] = [
+        target.id,
+        target.identity,
+        target.username,
+      ].filter(Boolean) as string[];
+
+      setRoomBlockedIdentities((prev) => {
+        const next = new Set(prev.map((i) => i.toLowerCase()));
+        keysToAdd.forEach((k) => next.add(k.toLowerCase()));
+        return Array.from(next);
+      });
+
+      // Mute volume immediately to 0
+      handleVolumeChange(target, 0);
+
+      // Clear any active reactions currently floating from this blocked user
+      setReactions((prev) =>
+        prev.filter((r) => !isBlockedInRoom(r.senderIdentity, (r as any).senderId))
+      );
+
+      // Clear popups from this blocked user
+      setInRoomPopups((prev) =>
+        prev.filter((p) => !isBlockedInRoom((p as any).senderId, (p as any).targetIdentity))
+      );
+
+      // If registered user with UUID, also block in social service in background
+      if (user?.id && target.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(target.id)) {
+        socialService.blockUser(user.id, target.id).catch(() => { });
+      }
+
+      setInRoomPopups((prev) => [
+        ...prev.slice(-2),
+        {
+          id: `blocked_${Date.now()}`,
+          senderName: "System",
+          avatar: "user-x",
+          color: "#EF4444",
+          text: `Blocked ${targetLabel} inside this room. Their voice, messages, and reactions are muted for you.`,
+          isWhisper: false,
+          timestamp: Date.now(),
+        },
+      ]);
+    }
   };
 
   const handleToggleMic = () => {
@@ -4548,6 +4828,7 @@ export function JunctionRoom({
           <RemoteAudioPipeline
             participantVolumes={participantVolumes}
             isDeafened={isDeafened}
+            roomBlockedSet={roomBlockedSet}
           />
         </LiveKitRoom>
       )}
@@ -4779,11 +5060,10 @@ export function JunctionRoom({
                   e.stopPropagation();
                   handleOpenMusicModal(musicState.isActive ? "queue" : "youtube");
                 }}
-                className={`w-8 h-8 rounded-full flex items-center justify-center transition-all active:scale-90 cursor-pointer relative ${
-                  musicState.isActive
-                    ? "bg-indigo-600 text-white shadow-[0_0_12px_rgba(99,102,241,0.6)] ring-1 ring-indigo-400/70"
-                    : "bg-white/5 text-slate-400 hover:text-white hover:bg-white/10 border border-white/5"
-                }`}
+                className={`w-8 h-8 rounded-full flex items-center justify-center transition-all active:scale-90 cursor-pointer relative ${musicState.isActive
+                  ? "bg-indigo-600 text-white shadow-[0_0_12px_rgba(99,102,241,0.6)] ring-1 ring-indigo-400/70"
+                  : "bg-white/5 text-slate-400 hover:text-white hover:bg-white/10 border border-white/5"
+                  }`}
                 title={
                   musicState.isActive
                     ? `Music: ${musicState.currentTrack?.title || "Playing"}`
@@ -4852,2266 +5132,2312 @@ export function JunctionRoom({
       {/* Main Full Room Layout — permanently mounted in DOM so Music Player & WebRTC connections never get destroyed */}
       <div className={isMinimized ? "hidden" : "relative h-[calc(100vh-3.5rem)] sm:h-[calc(100vh-4rem)] flex flex-col lg:flex-row overflow-hidden bg-background"}>
 
-          {/* Mod Mute Alert Banner - Floating Centered Toast Notification */}
-          {isMutedByMod && (
-            <div className="fixed top-16 sm:top-20 inset-x-4 max-w-md mx-auto bg-rose-950/95 border border-rose-500/50 text-rose-200 px-4 py-2.5 rounded-2xl text-center text-xs font-semibold flex items-center justify-center gap-2 shadow-2xl backdrop-blur-xl z-50 animate-fadeIn pointer-events-auto">
-              <AlertCircle size={16} className="text-rose-400 shrink-0" />
-              <span>You have been force-muted by YapClub Moderation.</span>
-            </div>
-          )}
+        {/* Mod Mute Alert Banner - Floating Centered Toast Notification */}
+        {isMutedByMod && (
+          <div className="fixed top-16 sm:top-20 inset-x-4 max-w-md mx-auto bg-rose-950/95 border border-rose-500/50 text-rose-200 px-4 py-2.5 rounded-2xl text-center text-xs font-semibold flex items-center justify-center gap-2 shadow-2xl backdrop-blur-xl z-50 animate-fadeIn pointer-events-auto">
+            <AlertCircle size={16} className="text-rose-400 shrink-0" />
+            <span>You have been force-muted by YapClub Moderation.</span>
+          </div>
+        )}
 
-          {/* Toast notice for Mod claim / info */}
-          {modNoticeToast && (
-            <div
-              onClick={() => setModNoticeToast(null)}
-              className="fixed top-3.5 sm:top-5 inset-x-3 sm:inset-x-auto sm:right-6 max-w-sm mx-auto sm:mx-0 bg-[#161208]/95 border border-amber-500/50 text-amber-200 px-3.5 py-2 rounded-2xl text-xs font-semibold flex items-center justify-between gap-2.5 shadow-2xl backdrop-blur-2xl z-[120] animate-fadeIn pointer-events-auto cursor-pointer group hover:bg-amber-950/90 transition-all"
-              title="Click to dismiss"
+        {/* Toast notice for Mod claim / info */}
+        {modNoticeToast && (
+          <div
+            onClick={() => setModNoticeToast(null)}
+            className="fixed top-3.5 sm:top-5 inset-x-3 sm:inset-x-auto sm:right-6 max-w-sm mx-auto sm:mx-0 bg-[#161208]/95 border border-amber-500/50 text-amber-200 px-3.5 py-2 rounded-2xl text-xs font-semibold flex items-center justify-between gap-2.5 shadow-2xl backdrop-blur-2xl z-[120] animate-fadeIn pointer-events-auto cursor-pointer group hover:bg-amber-950/90 transition-all"
+            title="Click to dismiss"
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <Sparkles size={15} className="text-amber-400 shrink-0 animate-pulse" />
+              <span className="truncate">{modNoticeToast}</span>
+            </div>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setModNoticeToast(null);
+              }}
+              className="text-amber-400/70 hover:text-amber-200 p-1 rounded-lg hover:bg-amber-800/40 shrink-0 transition-colors"
+              title="Dismiss"
             >
-              <div className="flex items-center gap-2 min-w-0">
-                <Sparkles size={15} className="text-amber-400 shrink-0 animate-pulse" />
-                <span className="truncate">{modNoticeToast}</span>
-              </div>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setModNoticeToast(null);
-                }}
-                className="text-amber-400/70 hover:text-amber-200 p-1 rounded-lg hover:bg-amber-800/40 shrink-0 transition-colors"
-                title="Dismiss"
-              >
-                <X size={14} />
-              </button>
-            </div>
-          )}
+              <X size={14} />
+            </button>
+          </div>
+        )}
 
-          {/* Floating Emoji Reactions Overlay - Clean & Smooth */}
-          <FloatingReactionOverlay reactions={reactions} />
+        {/* Floating Emoji Reactions Overlay - Clean & Smooth */}
+        <FloatingReactionOverlay reactions={reactions} />
 
-          {/* Main Left Content Area */}
-          <div className={`flex-1 flex flex-col pb-20 lg:pb-0 overflow-y-auto overflow-x-hidden transition-all duration-300`}>
-            {/* Top Room Header - Lightweight & Fluid */}
-            <div className="w-full max-w-7xl mx-auto px-3.5 sm:px-6 pt-2.5 sm:pt-3 pb-2 sm:pb-3 relative">
-              {/* Dynamic Room Capacity Dropdown / Modal (Shared between Desktop & Mobile) */}
-              {isCapacityMenuOpen && (
-                <>
-                  <div
-                    className="fixed inset-0 z-40 bg-black/60 sm:bg-black/30 backdrop-blur-sm"
-                    onClick={() => setIsCapacityMenuOpen(false)}
-                  />
-                  <div className="fixed sm:absolute top-20 sm:top-14 left-4 right-4 sm:left-6 sm:right-auto max-w-xs w-full mx-auto sm:mx-0 p-3.5 rounded-2xl bg-[#12131F]/98 border border-white/20 shadow-2xl z-50 animate-fadeIn backdrop-blur-2xl">
-                    <div className="flex items-center justify-between mb-1.5">
-                      <div className="flex items-center gap-1.5 text-xs font-bold text-white">
-                        <Users size={13} className="text-indigo-400" />
-                        <span>Dynamic Room Capacity</span>
-                      </div>
-                      <span className="text-[10px] text-slate-400 font-mono">
-                        {participants.length} seated
-                      </span>
+        {/* Main Left Content Area */}
+        <div className={`flex-1 flex flex-col pb-20 lg:pb-0 overflow-y-auto overflow-x-hidden transition-all duration-300`}>
+          {/* Top Room Header - Lightweight & Fluid */}
+          <div className="w-full max-w-7xl mx-auto px-3.5 sm:px-6 pt-2.5 sm:pt-3 pb-2 sm:pb-3 relative">
+            {/* Dynamic Room Capacity Dropdown / Modal (Shared between Desktop & Mobile) */}
+            {isCapacityMenuOpen && (
+              <>
+                <div
+                  className="fixed inset-0 z-40 bg-black/60 sm:bg-black/30 backdrop-blur-sm"
+                  onClick={() => setIsCapacityMenuOpen(false)}
+                />
+                <div className="fixed sm:absolute top-20 sm:top-14 left-4 right-4 sm:left-6 sm:right-auto max-w-xs w-full mx-auto sm:mx-0 p-3.5 rounded-2xl bg-[#12131F]/98 border border-white/20 shadow-2xl z-50 animate-fadeIn backdrop-blur-2xl">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <div className="flex items-center gap-1.5 text-xs font-bold text-white">
+                      <Users size={13} className="text-indigo-400" />
+                      <span>Dynamic Room Capacity</span>
                     </div>
-
-                    <p className="text-[10px] text-slate-400 font-light mb-3">
-                      Dynamically expand or shrink seat capacity for this private room.
-                    </p>
-
-                    <div className="flex items-center justify-between p-2 rounded-xl bg-white/5 border border-white/10 mb-3">
-                      <button
-                        type="button"
-                        disabled={isUpdatingCapacity || (junction?.maxParticipants || 2) <= 2 || (junction?.maxParticipants || 2) <= participants.length}
-                        onClick={() => handleUpdateCapacity(Math.max(2, (junction?.maxParticipants || 2) - 2))}
-                        className="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-white font-bold flex items-center justify-center transition-all cursor-pointer text-sm"
-                        title="Decrease by 2 seats"
-                      >
-                        -
-                      </button>
-
-                      <div className="text-center">
-                        <div className="text-sm font-black text-white">
-                          {junction?.maxParticipants || 2} Seats
-                        </div>
-                        <div className="text-[9px] text-indigo-300 font-medium">
-                          {isUpdatingCapacity ? "Updating..." : "Active Room Limit"}
-                        </div>
-                      </div>
-
-                      <button
-                        type="button"
-                        disabled={isUpdatingCapacity || (junction?.maxParticipants || 2) >= 12}
-                        onClick={() => handleUpdateCapacity(Math.min(12, (junction?.maxParticipants || 2) + 2))}
-                        className="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-white font-bold flex items-center justify-center transition-all cursor-pointer text-sm"
-                        title="Increase by 2 seats"
-                      >
-                        +
-                      </button>
-                    </div>
-
-                    <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">
-                      Quick Seat Presets
-                    </div>
-                    <div className="grid grid-cols-3 gap-1.5">
-                      {[2, 4, 6, 8, 10, 12].map((size) => {
-                        const isActive = (junction?.maxParticipants || 2) === size;
-                        const isBelowOccupied = size < participants.length;
-                        return (
-                          <button
-                            key={size}
-                            type="button"
-                            disabled={isUpdatingCapacity || isBelowOccupied}
-                            onClick={() => {
-                              if (size !== (junction?.maxParticipants || 2)) {
-                                handleUpdateCapacity(size);
-                              }
-                            }}
-                            className={`py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex flex-col items-center justify-center ${isActive
-                              ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30 ring-1 ring-white/30"
-                              : isBelowOccupied
-                                ? "bg-white/5 text-slate-600 border border-white/5 cursor-not-allowed opacity-40"
-                                : "bg-white/5 hover:bg-white/15 text-slate-300 border border-white/10"
-                              }`}
-                            title={isBelowOccupied ? `Cannot set below ${participants.length} current participants` : `${size} seats`}
-                          >
-                            <span>{size}</span>
-                            <span className="text-[8px] opacity-75 font-normal">seats</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-
-                    {/* Room Lock Quick Row */}
-                    <div className="mt-3 pt-2.5 border-t border-white/10 flex items-center justify-between">
-                      <div className="flex items-center gap-1.5">
-                        {junction?.isLocked ? (
-                          <Lock size={12} className="text-amber-400 shrink-0" />
-                        ) : (
-                          <Unlock size={12} className="text-slate-400 shrink-0" />
-                        )}
-                        <div className="flex flex-col">
-                          <span className="text-[11px] font-bold text-white leading-tight">
-                            {junction?.isLocked ? "Room Locked" : "Room Open"}
-                          </span>
-                          <span className="text-[9px] text-slate-400 leading-tight">
-                            {junction?.isLocked ? "New users blocked" : "Open to invitees"}
-                          </span>
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={handleToggleLock}
-                        disabled={isTogglingLock}
-                        className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${junction?.isLocked
-                          ? "bg-amber-500 text-black shadow-sm hover:bg-amber-400"
-                          : "bg-white/10 text-slate-300 hover:bg-white/20 border border-white/10"
-                          }`}
-                      >
-                        {isTogglingLock ? "..." : (junction?.isLocked ? "Unlock" : "Lock")}
-                      </button>
-                    </div>
+                    <span className="text-[10px] text-slate-400 font-mono">
+                      {participants.length} seated
+                    </span>
                   </div>
-                </>
-              )}
 
-              {/* DESKTOP HEADER (sm:flex hidden) */}
-              <div className="hidden sm:flex items-center justify-between gap-4">
-                {/* Left: Title / Occupant Count / Role in one compact, clean row */}
-                <div className="min-w-0 flex items-center gap-3">
-                  <div className="min-w-0 flex flex-col justify-center">
-                    <div className="min-w-0 flex items-center gap-2 flex-wrap">
-                      <h1 className="text-sm sm:text-base font-bold text-white tracking-tight truncate drop-shadow-sm leading-tight">
-                        {junction?.name || "Junction Room"}
-                      </h1>
+                  <p className="text-[10px] text-slate-400 font-light mb-3">
+                    Dynamically expand or shrink seat capacity for this private room.
+                  </p>
 
-                      {/* Participant Count / Capacity Pill */}
-                      {isPrivateRoom && (isHost || isSuperAdmin) ? (
-                        <button
-                          type="button"
-                          onClick={() => setIsCapacityMenuOpen(!isCapacityMenuOpen)}
-                          className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/40 text-xs font-bold transition-all shadow-sm cursor-pointer active:scale-95 shrink-0"
-                          title="Dynamic Room Capacity"
-                        >
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                          <span>{effectiveParticipants.length}/{junction?.maxParticipants || 2} Seats</span>
-                          <ChevronDown size={11} className={`transition-transform duration-200 ${isCapacityMenuOpen ? "rotate-180" : ""}`} />
-                        </button>
-                      ) : (
-                        <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-xs font-semibold text-slate-300 shrink-0">
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                          <span>{effectiveParticipants.length}/{junction?.maxParticipants || (isPrivateRoom ? 2 : 10)} Seats</span>
-                        </div>
-                      )}
+                  <div className="flex items-center justify-between p-2 rounded-xl bg-white/5 border border-white/10 mb-3">
+                    <button
+                      type="button"
+                      disabled={isUpdatingCapacity || (junction?.maxParticipants || 2) <= 2 || (junction?.maxParticipants || 2) <= participants.length}
+                      onClick={() => handleUpdateCapacity(Math.max(2, (junction?.maxParticipants || 2) - 2))}
+                      className="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-white font-bold flex items-center justify-center transition-all cursor-pointer text-sm"
+                      title="Decrease by 2 seats"
+                    >
+                      -
+                    </button>
 
-                      {/* User's Role Badge */}
-                      {myPlatformRole !== "user" && (
-                        <RoleBadge role={myPlatformRole} size="xs" />
-                      )}
+                    <div className="text-center">
+                      <div className="text-sm font-black text-white">
+                        {junction?.maxParticipants || 2} Seats
+                      </div>
+                      <div className="text-[9px] text-indigo-300 font-medium">
+                        {isUpdatingCapacity ? "Updating..." : "Active Room Limit"}
+                      </div>
                     </div>
 
-                    {/* Room Description as clean subtitle */}
-                    {junction?.description && (
-                      <p className="text-[11px] text-slate-400 font-normal truncate max-w-xs sm:max-w-md mt-0.5 leading-tight">
-                        {junction.description}
-                      </p>
-                    )}
+                    <button
+                      type="button"
+                      disabled={isUpdatingCapacity || (junction?.maxParticipants || 2) >= 12}
+                      onClick={() => handleUpdateCapacity(Math.min(12, (junction?.maxParticipants || 2) + 2))}
+                      className="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-white font-bold flex items-center justify-center transition-all cursor-pointer text-sm"
+                      title="Increase by 2 seats"
+                    >
+                      +
+                    </button>
+                  </div>
+
+                  <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">
+                    Quick Seat Presets
+                  </div>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {[2, 4, 6, 8, 10, 12].map((size) => {
+                      const isActive = (junction?.maxParticipants || 2) === size;
+                      const isBelowOccupied = size < participants.length;
+                      return (
+                        <button
+                          key={size}
+                          type="button"
+                          disabled={isUpdatingCapacity || isBelowOccupied}
+                          onClick={() => {
+                            if (size !== (junction?.maxParticipants || 2)) {
+                              handleUpdateCapacity(size);
+                            }
+                          }}
+                          className={`py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex flex-col items-center justify-center ${isActive
+                            ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30 ring-1 ring-white/30"
+                            : isBelowOccupied
+                              ? "bg-white/5 text-slate-600 border border-white/5 cursor-not-allowed opacity-40"
+                              : "bg-white/5 hover:bg-white/15 text-slate-300 border border-white/10"
+                            }`}
+                          title={isBelowOccupied ? `Cannot set below ${participants.length} current participants` : `${size} seats`}
+                        >
+                          <span>{size}</span>
+                          <span className="text-[8px] opacity-75 font-normal">seats</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Room Lock Quick Row */}
+                  <div className="mt-3 pt-2.5 border-t border-white/10 flex items-center justify-between">
+                    <div className="flex items-center gap-1.5">
+                      {junction?.isLocked ? (
+                        <Lock size={12} className="text-amber-400 shrink-0" />
+                      ) : (
+                        <Unlock size={12} className="text-slate-400 shrink-0" />
+                      )}
+                      <div className="flex flex-col">
+                        <span className="text-[11px] font-bold text-white leading-tight">
+                          {junction?.isLocked ? "Room Locked" : "Room Open"}
+                        </span>
+                        <span className="text-[9px] text-slate-400 leading-tight">
+                          {junction?.isLocked ? "New users blocked" : "Open to invitees"}
+                        </span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleToggleLock}
+                      disabled={isTogglingLock}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${junction?.isLocked
+                        ? "bg-amber-500 text-black shadow-sm hover:bg-amber-400"
+                        : "bg-white/10 text-slate-300 hover:bg-white/20 border border-white/10"
+                        }`}
+                    >
+                      {isTogglingLock ? "..." : (junction?.isLocked ? "Unlock" : "Lock")}
+                    </button>
                   </div>
                 </div>
+              </>
+            )}
 
-                {/* Right: Clean, Spacious Controls */}
-                <div className="flex items-center justify-end gap-1.5 shrink-0">
-                  {/* Waiting Knocks Indicator for Host */}
+            {/* DESKTOP HEADER (sm:flex hidden) */}
+            <div className="hidden sm:flex items-center justify-between gap-4">
+              {/* Left: Title / Occupant Count / Role in one compact, clean row */}
+              <div className="min-w-0 flex items-center gap-3">
+                <div className="min-w-0 flex flex-col justify-center">
+                  <div className="min-w-0 flex items-center gap-2 flex-wrap">
+                    <h1 className="text-sm sm:text-base font-bold text-white tracking-tight truncate drop-shadow-sm leading-tight">
+                      {junction?.name || "Junction Room"}
+                    </h1>
+
+                    {/* Participant Count / Capacity Pill */}
+                    {isPrivateRoom && (isHost || isSuperAdmin) ? (
+                      <button
+                        type="button"
+                        onClick={() => setIsCapacityMenuOpen(!isCapacityMenuOpen)}
+                        className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/40 text-xs font-bold transition-all shadow-sm cursor-pointer active:scale-95 shrink-0"
+                        title="Dynamic Room Capacity"
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                        <span>{effectiveParticipants.length}/{junction?.maxParticipants || 2} Seats</span>
+                        <ChevronDown size={11} className={`transition-transform duration-200 ${isCapacityMenuOpen ? "rotate-180" : ""}`} />
+                      </button>
+                    ) : (
+                      <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-xs font-semibold text-slate-300 shrink-0">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                        <span>{effectiveParticipants.length}/{junction?.maxParticipants || (isPrivateRoom ? 2 : 10)} Seats</span>
+                      </div>
+                    )}
+
+                    {/* User's Role Badge */}
+                    {myPlatformRole !== "user" && (
+                      <RoleBadge role={myPlatformRole} size="xs" />
+                    )}
+                  </div>
+
+                  {/* Room Description as clean subtitle */}
+                  {junction?.description && (
+                    <p className="text-[11px] text-slate-400 font-normal truncate max-w-xs sm:max-w-md mt-0.5 leading-tight">
+                      {junction.description}
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              {/* Right: Clean, Spacious Controls */}
+              <div className="flex items-center justify-end gap-1.5 shrink-0">
+                {/* Waiting Knocks Indicator for Host */}
+                {!isWaitingRoom && isHost && activeKnocksForHost.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => handleAdmitKnock(activeKnocksForHost[0].identity)}
+                    className="h-8 sm:h-9 px-2.5 rounded-full flex items-center gap-1.5 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 text-[11px] font-bold cursor-pointer transition-all shrink-0 animate-pulse"
+                    title={`Click to admit @${activeKnocksForHost[0].name}`}
+                  >
+                    <Bell size={12} className="text-emerald-400" />
+                    <span>Waiting ({activeKnocksForHost.length})</span>
+                  </button>
+                )}
+
+                {/* Lock / Unlock Room Control - Host Feature & Super Admin Clearance */}
+                {isPrivateRoom && (isHost || isSuperAdmin) && (
+                  <button
+                    type="button"
+                    onClick={handleToggleLock}
+                    disabled={isTogglingLock}
+                    className={`h-8 sm:h-9 px-2.5 sm:px-3 rounded-full flex items-center gap-1.5 border transition-all cursor-pointer shadow-sm active:scale-95 shrink-0 ${junction?.isLocked
+                      ? "bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border-amber-400/50 shadow-amber-500/10"
+                      : "bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border-white/10"
+                      }`}
+                    title={junction?.isLocked ? "Room is Locked (Click to Unlock)" : "Room is Open (Click to Lock Room)"}
+                  >
+                    {junction?.isLocked ? (
+                      <>
+                        <Lock size={13} className="text-amber-400" />
+                        <span className="text-[11px] font-bold">Locked</span>
+                      </>
+                    ) : (
+                      <>
+                        <Unlock size={13} className="text-slate-400" />
+                        <span className="text-[11px] font-semibold text-slate-300">Lock Room</span>
+                      </>
+                    )}
+                  </button>
+                )}
+
+                {/* Room Locked indicator for fellow users in private room */}
+                {isPrivateRoom && !isHost && !isSuperAdmin && junction?.isLocked && (
+                  <div
+                    className="h-8 sm:h-9 px-2.5 sm:px-3 rounded-full flex items-center gap-1.5 bg-amber-500/15 border border-amber-400/30 text-amber-300 text-[11px] font-semibold shrink-0"
+                    title="This private room is locked by the host"
+                  >
+                    <Lock size={12} className="text-amber-400" />
+                    <span>Locked</span>
+                  </div>
+                )}
+
+                {/* Duration / Expiration Countdown Pill (Private Rooms Only) */}
+                {isPrivateRoom && junction && (
+                  <div
+                    className={`h-8 sm:h-9 px-2.5 sm:px-3 rounded-full flex items-center gap-1.5 border text-xs font-medium shrink-0 transition-all ${timeLeftMs !== null && timeLeftMs < 10 * 60 * 1000
+                      ? "bg-amber-500/15 border-amber-500/30 text-amber-300 animate-pulse"
+                      : junction.expiresAt
+                        ? "bg-white/[0.04] border-white/10 text-slate-200"
+                        : "bg-purple-500/10 border-purple-500/20 text-purple-300"
+                      }`}
+                    title={
+                      junction.expiresAt
+                        ? `Room closes at ${new Date(junction.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+                        : "Permanent Room (Does not auto-expire)"
+                    }
+                  >
+                    <Clock
+                      size={12}
+                      className={
+                        timeLeftMs !== null && timeLeftMs < 10 * 60 * 1000
+                          ? "text-amber-400"
+                          : junction.expiresAt
+                            ? "text-indigo-400"
+                            : "text-purple-400"
+                      }
+                    />
+                    <span className="font-semibold text-xs">
+                      {formattedDurationRemaining}
+                    </span>
+                  </div>
+                )}
+
+                {/* Terminate Junction Button (Super Admin for all rooms, Room Creator for private rooms) */}
+                {canDeleteRoom && (
+                  <button
+                    type="button"
+                    onClick={handleForceDeleteRoom}
+                    className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 flex items-center justify-center transition-all cursor-pointer shadow-sm active:scale-95 shrink-0"
+                    title={isPrivateRoom ? "Delete Room (Room Creator / Super Admin)" : "Terminate Junction (Super Admin Only)"}
+                  >
+                    <Trash2 size={14} className="text-rose-400" />
+                  </button>
+                )}
+
+                {/* Music Mode Trigger Button */}
+                <button
+                  type="button"
+                  onClick={() => handleOpenMusicModal(musicState.isActive ? "queue" : "youtube")}
+                  className={`w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95 relative ${musicState.isActive
+                    ? "bg-indigo-600 text-white border border-indigo-400/50 shadow-[0_0_15px_rgba(99,102,241,0.5)]"
+                    : "bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10"
+                    }`}
+                  title={musicState.isActive ? `Music: ${musicState.currentTrack?.title || "Playing"}` : "Music Player & DJ"}
+                >
+                  {musicState.isPlaying ? (
+                    <Disc3 size={15} className="text-white animate-spin [animation-duration:3s]" />
+                  ) : (
+                    <Headphones size={15} className={musicState.isActive ? "text-white" : "text-indigo-400"} />
+                  )}
+                  {musicState.isActive && (
+                    <span className="absolute top-0 right-0 w-2.5 h-2.5 bg-emerald-400 rounded-full ring-2 ring-[#0E0F17] animate-pulse" />
+                  )}
+                </button>
+
+                {/* Invite Friends */}
+                <button
+                  type="button"
+                  onClick={() => setIsInviteModalOpen(true)}
+                  className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95"
+                  title="Invite Friends to Hangout"
+                >
+                  <Share2 size={14} className="text-indigo-400" />
+                </button>
+
+                {/* Minimize Room */}
+                <button
+                  type="button"
+                  className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95"
+                  title="Minimize Room (Browse YapClub while in voice)"
+                  onClick={handleMinimize}
+                >
+                  <Minimize2 size={14} className="text-indigo-400" />
+                </button>
+              </div>
+            </div>
+
+            {/* MOBILE HEADER (flex sm:hidden flex-col gap-1.5) */}
+            <div className="flex sm:hidden flex-col gap-1.5">
+              {/* Row 1: Room Title & Compact Action Cluster */}
+              <div className="flex items-center justify-between gap-2">
+                {/* Room Name with live pulse */}
+                <div className="min-w-0 flex-1 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0 animate-pulse" />
+                  <h1 className="text-sm font-bold text-white tracking-tight truncate drop-shadow-sm leading-tight">
+                    {junction?.name || "Junction Room"}
+                  </h1>
+                </div>
+
+                {/* Compact Quick Actions Cluster */}
+                <div className="flex items-center gap-1 shrink-0">
+                  {/* Waiting Knocks button on mobile */}
                   {!isWaitingRoom && isHost && activeKnocksForHost.length > 0 && (
                     <button
                       type="button"
                       onClick={() => handleAdmitKnock(activeKnocksForHost[0].identity)}
-                      className="h-8 sm:h-9 px-2.5 rounded-full flex items-center gap-1.5 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 text-[11px] font-bold cursor-pointer transition-all shrink-0 animate-pulse"
-                      title={`Click to admit @${activeKnocksForHost[0].name}`}
+                      className="h-8 px-2 rounded-full flex items-center gap-1 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 text-[10px] font-bold active:scale-95 transition-all animate-pulse"
+                      title={`Admit @${activeKnocksForHost[0].name}`}
                     >
-                      <Bell size={12} className="text-emerald-400" />
-                      <span>Waiting ({activeKnocksForHost.length})</span>
+                      <Bell size={11} className="text-emerald-400" />
+                      <span>{activeKnocksForHost.length}</span>
                     </button>
                   )}
 
-                  {/* Lock / Unlock Room Control - Host Feature & Super Admin Clearance */}
-                  {isPrivateRoom && (isHost || isSuperAdmin) && (
-                    <button
-                      type="button"
-                      onClick={handleToggleLock}
-                      disabled={isTogglingLock}
-                      className={`h-8 sm:h-9 px-2.5 sm:px-3 rounded-full flex items-center gap-1.5 border transition-all cursor-pointer shadow-sm active:scale-95 shrink-0 ${junction?.isLocked
-                        ? "bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border-amber-400/50 shadow-amber-500/10"
-                        : "bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border-white/10"
-                        }`}
-                      title={junction?.isLocked ? "Room is Locked (Click to Unlock)" : "Room is Open (Click to Lock Room)"}
-                    >
-                      {junction?.isLocked ? (
-                        <>
-                          <Lock size={13} className="text-amber-400" />
-                          <span className="text-[11px] font-bold">Locked</span>
-                        </>
-                      ) : (
-                        <>
-                          <Unlock size={13} className="text-slate-400" />
-                          <span className="text-[11px] font-semibold text-slate-300">Lock Room</span>
-                        </>
-                      )}
-                    </button>
-                  )}
-
-                  {/* Room Locked indicator for fellow users in private room */}
-                  {isPrivateRoom && !isHost && !isSuperAdmin && junction?.isLocked && (
-                    <div
-                      className="h-8 sm:h-9 px-2.5 sm:px-3 rounded-full flex items-center gap-1.5 bg-amber-500/15 border border-amber-400/30 text-amber-300 text-[11px] font-semibold shrink-0"
-                      title="This private room is locked by the host"
-                    >
-                      <Lock size={12} className="text-amber-400" />
-                      <span>Locked</span>
-                    </div>
-                  )}
-
-                  {/* Duration / Expiration Countdown Pill (Private Rooms Only) */}
-                  {isPrivateRoom && junction && (
-                    <div
-                      className={`h-8 sm:h-9 px-2.5 sm:px-3 rounded-full flex items-center gap-1.5 border text-xs font-medium shrink-0 transition-all ${timeLeftMs !== null && timeLeftMs < 10 * 60 * 1000
-                        ? "bg-amber-500/15 border-amber-500/30 text-amber-300 animate-pulse"
-                        : junction.expiresAt
-                          ? "bg-white/[0.04] border-white/10 text-slate-200"
-                          : "bg-purple-500/10 border-purple-500/20 text-purple-300"
-                        }`}
-                      title={
-                        junction.expiresAt
-                          ? `Room closes at ${new Date(junction.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
-                          : "Permanent Room (Does not auto-expire)"
-                      }
-                    >
-                      <Clock
-                        size={12}
-                        className={
-                          timeLeftMs !== null && timeLeftMs < 10 * 60 * 1000
-                            ? "text-amber-400"
-                            : junction.expiresAt
-                              ? "text-indigo-400"
-                              : "text-purple-400"
-                        }
-                      />
-                      <span className="font-semibold text-xs">
-                        {formattedDurationRemaining}
-                      </span>
-                    </div>
-                  )}
-
-                  {/* Terminate Junction Button (Super Admin for all rooms, Room Creator for private rooms) */}
+                  {/* Delete Room button (if authorized) */}
                   {canDeleteRoom && (
                     <button
                       type="button"
                       onClick={handleForceDeleteRoom}
-                      className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 flex items-center justify-center transition-all cursor-pointer shadow-sm active:scale-95 shrink-0"
-                      title={isPrivateRoom ? "Delete Room (Room Creator / Super Admin)" : "Terminate Junction (Super Admin Only)"}
+                      className="w-8 h-8 rounded-full bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 flex items-center justify-center transition-all cursor-pointer shadow-sm active:scale-95 shrink-0"
+                      title={isPrivateRoom ? "Delete Room" : "Terminate Junction"}
                     >
-                      <Trash2 size={14} className="text-rose-400" />
+                      <Trash2 size={13} className="text-rose-400" />
                     </button>
                   )}
 
-                  {/* Music Mode Trigger Button */}
+                  {/* Music DJ button */}
                   <button
                     type="button"
                     onClick={() => handleOpenMusicModal(musicState.isActive ? "queue" : "youtube")}
-                    className={`w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95 relative ${musicState.isActive
+                    className={`w-8 h-8 rounded-full flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95 relative ${musicState.isActive
                       ? "bg-indigo-600 text-white border border-indigo-400/50 shadow-[0_0_15px_rgba(99,102,241,0.5)]"
                       : "bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10"
                       }`}
-                    title={musicState.isActive ? `Music: ${musicState.currentTrack?.title || "Playing"}` : "Music Player & DJ"}
+                    title="Music Player & DJ"
                   >
                     {musicState.isPlaying ? (
-                      <Disc3 size={15} className="text-white animate-spin [animation-duration:3s]" />
+                      <Disc3 size={13} className="text-white animate-spin [animation-duration:3s]" />
                     ) : (
-                      <Headphones size={15} className={musicState.isActive ? "text-white" : "text-indigo-400"} />
+                      <Headphones size={13} className={musicState.isActive ? "text-white" : "text-indigo-400"} />
                     )}
                     {musicState.isActive && (
-                      <span className="absolute top-0 right-0 w-2.5 h-2.5 bg-emerald-400 rounded-full ring-2 ring-[#0E0F17] animate-pulse" />
+                      <span className="absolute top-0 right-0 w-2 h-2 bg-emerald-400 rounded-full ring-2 ring-[#0E0F17] animate-pulse" />
                     )}
                   </button>
 
-                  {/* Invite Friends */}
+                  {/* Invite Friends button */}
                   <button
                     type="button"
                     onClick={() => setIsInviteModalOpen(true)}
-                    className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95"
-                    title="Invite Friends to Hangout"
+                    className="w-8 h-8 rounded-full bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95"
+                    title="Invite Friends"
                   >
-                    <Share2 size={14} className="text-indigo-400" />
+                    <Share2 size={13} className="text-indigo-400" />
                   </button>
 
-                  {/* Minimize Room */}
+                  {/* Minimize Room button */}
                   <button
                     type="button"
-                    className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95"
-                    title="Minimize Room (Browse YapClub while in voice)"
+                    className="w-8 h-8 rounded-full bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95"
+                    title="Minimize Room"
                     onClick={handleMinimize}
                   >
-                    <Minimize2 size={14} className="text-indigo-400" />
+                    <Minimize2 size={13} className="text-indigo-400" />
                   </button>
                 </div>
               </div>
 
-              {/* MOBILE HEADER (flex sm:hidden flex-col gap-1.5) */}
-              <div className="flex sm:hidden flex-col gap-1.5">
-                {/* Row 1: Room Title & Compact Action Cluster */}
-                <div className="flex items-center justify-between gap-2">
-                  {/* Room Name with live pulse */}
-                  <div className="min-w-0 flex-1 flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0 animate-pulse" />
-                    <h1 className="text-sm font-bold text-white tracking-tight truncate drop-shadow-sm leading-tight">
-                      {junction?.name || "Junction Room"}
-                    </h1>
+              {/* Row 2: Status & Settings Ribbon (Fluid horizontal strip, no collision!) */}
+              <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
+                {/* Capacity Pill */}
+                {isPrivateRoom && (isHost || isSuperAdmin) ? (
+                  <button
+                    type="button"
+                    onClick={() => setIsCapacityMenuOpen(!isCapacityMenuOpen)}
+                    className="h-6 px-2 rounded-full flex items-center gap-1 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/40 text-[10px] font-bold transition-all shadow-sm shrink-0 active:scale-95"
+                    title="Dynamic Room Capacity"
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    <span>{effectiveParticipants.length}/{junction?.maxParticipants || 2} Seats</span>
+                    <ChevronDown size={9} className={`transition-transform duration-200 ${isCapacityMenuOpen ? "rotate-180" : ""}`} />
+                  </button>
+                ) : (
+                  <div className="h-6 px-2 rounded-full flex items-center gap-1 bg-white/5 border border-white/10 text-[10px] font-semibold text-slate-300 shrink-0">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    <span>{effectiveParticipants.length}/{junction?.maxParticipants || (isPrivateRoom ? 2 : 10)} Seats</span>
                   </div>
+                )}
 
-                  {/* Compact Quick Actions Cluster */}
-                  <div className="flex items-center gap-1 shrink-0">
-                    {/* Waiting Knocks button on mobile */}
-                    {!isWaitingRoom && isHost && activeKnocksForHost.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => handleAdmitKnock(activeKnocksForHost[0].identity)}
-                        className="h-8 px-2 rounded-full flex items-center gap-1 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 text-[10px] font-bold active:scale-95 transition-all animate-pulse"
-                        title={`Admit @${activeKnocksForHost[0].name}`}
-                      >
-                        <Bell size={11} className="text-emerald-400" />
-                        <span>{activeKnocksForHost.length}</span>
-                      </button>
+                {/* Lock Status / Toggle Pill */}
+                {isPrivateRoom && (isHost || isSuperAdmin) && (
+                  <button
+                    type="button"
+                    onClick={handleToggleLock}
+                    disabled={isTogglingLock}
+                    className={`h-6 px-2 rounded-full flex items-center gap-1 border transition-all cursor-pointer shadow-sm active:scale-95 shrink-0 text-[10px] font-bold ${junction?.isLocked
+                      ? "bg-amber-500/20 text-amber-300 border-amber-400/50 shadow-amber-500/10"
+                      : "bg-white/5 text-slate-300 hover:text-white border-white/10"
+                      }`}
+                    title={junction?.isLocked ? "Room is Locked (Tap to Unlock)" : "Room is Open (Tap to Lock)"}
+                  >
+                    {junction?.isLocked ? (
+                      <>
+                        <Lock size={10} className="text-amber-400" />
+                        <span>Locked</span>
+                      </>
+                    ) : (
+                      <>
+                        <Unlock size={10} className="text-slate-400" />
+                        <span>Open</span>
+                      </>
                     )}
+                  </button>
+                )}
 
-                    {/* Delete Room button (if authorized) */}
-                    {canDeleteRoom && (
-                      <button
-                        type="button"
-                        onClick={handleForceDeleteRoom}
-                        className="w-8 h-8 rounded-full bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 flex items-center justify-center transition-all cursor-pointer shadow-sm active:scale-95 shrink-0"
-                        title={isPrivateRoom ? "Delete Room" : "Terminate Junction"}
-                      >
-                        <Trash2 size={13} className="text-rose-400" />
-                      </button>
-                    )}
-
-                    {/* Music DJ button */}
-                    <button
-                      type="button"
-                      onClick={() => handleOpenMusicModal(musicState.isActive ? "queue" : "youtube")}
-                      className={`w-8 h-8 rounded-full flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95 relative ${musicState.isActive
-                        ? "bg-indigo-600 text-white border border-indigo-400/50 shadow-[0_0_15px_rgba(99,102,241,0.5)]"
-                        : "bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10"
-                        }`}
-                      title="Music Player & DJ"
-                    >
-                      {musicState.isPlaying ? (
-                        <Disc3 size={13} className="text-white animate-spin [animation-duration:3s]" />
-                      ) : (
-                        <Headphones size={13} className={musicState.isActive ? "text-white" : "text-indigo-400"} />
-                      )}
-                      {musicState.isActive && (
-                        <span className="absolute top-0 right-0 w-2 h-2 bg-emerald-400 rounded-full ring-2 ring-[#0E0F17] animate-pulse" />
-                      )}
-                    </button>
-
-                    {/* Invite Friends button */}
-                    <button
-                      type="button"
-                      onClick={() => setIsInviteModalOpen(true)}
-                      className="w-8 h-8 rounded-full bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95"
-                      title="Invite Friends"
-                    >
-                      <Share2 size={13} className="text-indigo-400" />
-                    </button>
-
-                    {/* Minimize Room button */}
-                    <button
-                      type="button"
-                      className="w-8 h-8 rounded-full bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 flex items-center justify-center transition-all cursor-pointer shadow-sm shrink-0 active:scale-95"
-                      title="Minimize Room"
-                      onClick={handleMinimize}
-                    >
-                      <Minimize2 size={13} className="text-indigo-400" />
-                    </button>
+                {isPrivateRoom && !isHost && !isSuperAdmin && junction?.isLocked && (
+                  <div
+                    className="h-6 px-2 rounded-full flex items-center gap-1 bg-amber-500/15 border border-amber-400/30 text-amber-300 text-[10px] font-semibold shrink-0"
+                    title="Room locked by host"
+                  >
+                    <Lock size={10} className="text-amber-400" />
+                    <span>Locked</span>
                   </div>
-                </div>
+                )}
 
-                {/* Row 2: Status & Settings Ribbon (Fluid horizontal strip, no collision!) */}
-                <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
-                  {/* Capacity Pill */}
-                  {isPrivateRoom && (isHost || isSuperAdmin) ? (
-                    <button
-                      type="button"
-                      onClick={() => setIsCapacityMenuOpen(!isCapacityMenuOpen)}
-                      className="h-6 px-2 rounded-full flex items-center gap-1 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/40 text-[10px] font-bold transition-all shadow-sm shrink-0 active:scale-95"
-                      title="Dynamic Room Capacity"
-                    >
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                      <span>{effectiveParticipants.length}/{junction?.maxParticipants || 2} Seats</span>
-                      <ChevronDown size={9} className={`transition-transform duration-200 ${isCapacityMenuOpen ? "rotate-180" : ""}`} />
-                    </button>
-                  ) : (
-                    <div className="h-6 px-2 rounded-full flex items-center gap-1 bg-white/5 border border-white/10 text-[10px] font-semibold text-slate-300 shrink-0">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                      <span>{effectiveParticipants.length}/{junction?.maxParticipants || (isPrivateRoom ? 2 : 10)} Seats</span>
-                    </div>
-                  )}
-
-                  {/* Lock Status / Toggle Pill */}
-                  {isPrivateRoom && (isHost || isSuperAdmin) && (
-                    <button
-                      type="button"
-                      onClick={handleToggleLock}
-                      disabled={isTogglingLock}
-                      className={`h-6 px-2 rounded-full flex items-center gap-1 border transition-all cursor-pointer shadow-sm active:scale-95 shrink-0 text-[10px] font-bold ${junction?.isLocked
-                        ? "bg-amber-500/20 text-amber-300 border-amber-400/50 shadow-amber-500/10"
-                        : "bg-white/5 text-slate-300 hover:text-white border-white/10"
-                        }`}
-                      title={junction?.isLocked ? "Room is Locked (Tap to Unlock)" : "Room is Open (Tap to Lock)"}
-                    >
-                      {junction?.isLocked ? (
-                        <>
-                          <Lock size={10} className="text-amber-400" />
-                          <span>Locked</span>
-                        </>
-                      ) : (
-                        <>
-                          <Unlock size={10} className="text-slate-400" />
-                          <span>Open</span>
-                        </>
-                      )}
-                    </button>
-                  )}
-
-                  {isPrivateRoom && !isHost && !isSuperAdmin && junction?.isLocked && (
-                    <div
-                      className="h-6 px-2 rounded-full flex items-center gap-1 bg-amber-500/15 border border-amber-400/30 text-amber-300 text-[10px] font-semibold shrink-0"
-                      title="Room locked by host"
-                    >
-                      <Lock size={10} className="text-amber-400" />
-                      <span>Locked</span>
-                    </div>
-                  )}
-
-                  {/* Duration / Expiration Countdown Pill */}
-                  {isPrivateRoom && junction && (
-                    <div
-                      className={`h-6 px-2 rounded-full flex items-center gap-1 border text-[10px] font-medium shrink-0 transition-all ${timeLeftMs !== null && timeLeftMs < 10 * 60 * 1000
-                        ? "bg-amber-500/15 border-amber-500/30 text-amber-300 animate-pulse"
-                        : junction.expiresAt
-                          ? "bg-white/[0.04] border-white/10 text-slate-200"
-                          : "bg-purple-500/10 border-purple-500/20 text-purple-300"
-                        }`}
-                      title={
-                        junction.expiresAt
-                          ? `Closes at ${new Date(junction.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
-                          : "Permanent Room"
+                {/* Duration / Expiration Countdown Pill */}
+                {isPrivateRoom && junction && (
+                  <div
+                    className={`h-6 px-2 rounded-full flex items-center gap-1 border text-[10px] font-medium shrink-0 transition-all ${timeLeftMs !== null && timeLeftMs < 10 * 60 * 1000
+                      ? "bg-amber-500/15 border-amber-500/30 text-amber-300 animate-pulse"
+                      : junction.expiresAt
+                        ? "bg-white/[0.04] border-white/10 text-slate-200"
+                        : "bg-purple-500/10 border-purple-500/20 text-purple-300"
+                      }`}
+                    title={
+                      junction.expiresAt
+                        ? `Closes at ${new Date(junction.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+                        : "Permanent Room"
+                    }
+                  >
+                    <Clock
+                      size={10}
+                      className={
+                        timeLeftMs !== null && timeLeftMs < 10 * 60 * 1000
+                          ? "text-amber-400"
+                          : junction.expiresAt
+                            ? "text-indigo-400"
+                            : "text-purple-400"
                       }
-                    >
-                      <Clock
-                        size={10}
-                        className={
-                          timeLeftMs !== null && timeLeftMs < 10 * 60 * 1000
-                            ? "text-amber-400"
-                            : junction.expiresAt
-                              ? "text-indigo-400"
-                              : "text-purple-400"
-                        }
-                      />
-                      <span className="font-semibold text-[10px]">
-                        {formattedDurationRemaining}
-                      </span>
-                    </div>
-                  )}
+                    />
+                    <span className="font-semibold text-[10px]">
+                      {formattedDurationRemaining}
+                    </span>
+                  </div>
+                )}
 
-                  {/* Role Badge */}
-                  {myPlatformRole !== "user" && (
-                    <div className="shrink-0 scale-90 origin-left">
-                      <RoleBadge role={myPlatformRole} size="xs" />
-                    </div>
-                  )}
-                </div>
-
-                {/* Row 3: Description if present */}
-                {junction?.description && (
-                  <p className="text-[10px] text-slate-400 font-normal truncate leading-tight mt-0.5">
-                    {junction.description}
-                  </p>
+                {/* Role Badge */}
+                {myPlatformRole !== "user" && (
+                  <div className="shrink-0 scale-90 origin-left">
+                    <RoleBadge role={myPlatformRole} size="xs" />
+                  </div>
                 )}
               </div>
-            </div>
 
-            {/* Synchronized Music & Media Stage (DJ Deck) */}
-            <div className="relative z-30">
-              <MusicDeck
-                musicState={musicState}
-                participants={participants}
-                currentIdentity={myIdentity}
-                currentName={myDisplayName}
-                canModerateAux={isCurrentModerator || isStaff}
-                isExpanded={isMusicExpanded}
-                isDeafened={isDeafened}
-                isRoomMinimized={isMinimized}
-                onToggleExpand={() => setIsMusicExpanded((prev) => !prev)}
-                onOpenMusicModal={handleOpenMusicModal}
-                onTogglePlayback={handleToggleMusicPlayback}
-                onSeek={handleSeekMusic}
-                onReleaseAux={handleReleaseAux}
-                onClaimAux={handleClaimAux}
-                onStopMusic={handleStopMusic}
-                onHeartbeatSync={handleHeartbeatSync}
-                onAutoAdvanceQueue={handleAutoAdvanceQueue}
-              />
+              {/* Row 3: Description if present */}
+              {junction?.description && (
+                <p className="text-[10px] text-slate-400 font-normal truncate leading-tight mt-0.5">
+                  {junction.description}
+                </p>
+              )}
             </div>
+          </div>
 
-            {/* Dynamic Adaptive Voice Stage */}
-            {(() => {
-              const participantCount = seatedParticipants.length;
-              return (
-                <div className="relative z-10 w-full mx-auto px-2.5 sm:px-6 my-auto py-2 sm:py-4 transition-all duration-300 flex items-center justify-center">
-                  {participantCount === 0 ? (
-                    <div className="flex flex-col items-center justify-center py-12 px-4 text-center my-auto animate-fadeIn">
-                      <div className="w-16 h-16 rounded-2xl bg-white/[0.04] border border-white/10 flex items-center justify-center mb-3 shadow-inner">
-                        <Users className="w-8 h-8 text-slate-500" />
-                      </div>
-                      <p className="text-sm font-semibold text-slate-300">No participants in the room</p>
-                      <p className="text-xs text-slate-500 mt-1 max-w-xs">
-                        Invite friends to start chatting, or wait for others to join.
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          handleCopyLink();
-                          setIsInviteModalOpen(true);
-                        }}
-                        className="mt-4 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-2 transition-all shadow-lg shadow-indigo-600/30 active:scale-95 cursor-pointer"
-                      >
-                        <UserPlus size={14} />
-                        <span>Invite Friends</span>
-                      </button>
+          {/* Synchronized Music & Media Stage (DJ Deck) */}
+          <div className="relative z-30">
+            <MusicDeck
+              musicState={musicState}
+              participants={participants}
+              currentIdentity={myIdentity}
+              currentName={myDisplayName}
+              canModerateAux={isCurrentModerator || isStaff}
+              isExpanded={isMusicExpanded}
+              isDeafened={isDeafened}
+              isRoomMinimized={isMinimized}
+              onToggleExpand={() => setIsMusicExpanded((prev) => !prev)}
+              onOpenMusicModal={handleOpenMusicModal}
+              onTogglePlayback={handleToggleMusicPlayback}
+              onSeek={handleSeekMusic}
+              onReleaseAux={handleReleaseAux}
+              onClaimAux={handleClaimAux}
+              onStopMusic={handleStopMusic}
+              onHeartbeatSync={handleHeartbeatSync}
+              onAutoAdvanceQueue={handleAutoAdvanceQueue}
+            />
+          </div>
+
+          {/* Dynamic Adaptive Voice Stage */}
+          {(() => {
+            const participantCount = seatedParticipants.length;
+            return (
+              <div className="relative z-10 w-full mx-auto px-2.5 sm:px-6 my-auto py-2 sm:py-4 transition-all duration-300 flex items-center justify-center">
+                {participantCount === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-12 px-4 text-center my-auto animate-fadeIn">
+                    <div className="w-16 h-16 rounded-2xl bg-white/[0.04] border border-white/10 flex items-center justify-center mb-3 shadow-inner">
+                      <Users className="w-8 h-8 text-slate-500" />
                     </div>
-                  ) : (
-                    <div className={`w-full max-w-5xl mx-auto transition-all duration-300 ${participantCount === 1
-                      ? "flex items-center justify-center"
-                      : "grid grid-cols-2 sm:flex sm:flex-wrap items-center justify-center gap-2 sm:gap-4.5"
-                      }`}>
-                      {seatedParticipants.map((participant, index) => {
-                        const isLocal = isLocalParticipant(participant);
-                        const isParticipantMod = participant?.role === "moderator";
-                        const participantRole = isLocal
-                          ? myPlatformRole
-                          : (participant?.userRole || "user");
-                        const speaking = isLocal ? isLocalSpeaking : activeSpeakers.some((s) => s.toLowerCase() === participant.identity?.toLowerCase());
-                        const muted = isLocal ? (isMuted || isMutedByMod) : (participant.isMuted || participant.isMutedByMod);
-                        const activeCardBg = (isLocal && user?.cardBgColor && user.cardBgColor !== "#465B73")
-                          ? user.cardBgColor
-                          : (participant.cardBgColor || participant.color);
-                        const cardThemeStyle = getCardThemeStyle(activeCardBg);
-                        const participantAvatar = (isLocal && user?.avatar)
-                          ? user.avatar
-                          : (participant.avatar || "zap");
+                    <p className="text-sm font-semibold text-slate-300">No participants in the room</p>
+                    <p className="text-xs text-slate-500 mt-1 max-w-xs">
+                      Invite friends to start chatting, or wait for others to join.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleCopyLink();
+                        setIsInviteModalOpen(true);
+                      }}
+                      className="mt-4 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-2 transition-all shadow-lg shadow-indigo-600/30 active:scale-95 cursor-pointer"
+                    >
+                      <UserPlus size={14} />
+                      <span>Invite Friends</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className={`w-full max-w-5xl mx-auto transition-all duration-300 ${participantCount === 1
+                    ? "flex items-center justify-center"
+                    : "grid grid-cols-2 sm:flex sm:flex-wrap items-center justify-center gap-2 sm:gap-4.5"
+                    }`}>
+                    {seatedParticipants.map((participant, index) => {
+                      const isLocal = isLocalParticipant(participant);
+                      const isParticipantMod = participant?.role === "moderator";
+                      const participantRole = isLocal
+                        ? myPlatformRole
+                        : (participant?.userRole || "user");
+                      const isTargetBlocked = !isLocal && isBlockedInRoom(participant);
+                      const speaking = !isTargetBlocked && (isLocal ? isLocalSpeaking : activeSpeakers.some((s) => s.toLowerCase() === participant.identity?.toLowerCase()));
+                      const muted = isLocal ? (isMuted || isMutedByMod) : (isTargetBlocked || participant.isMuted || participant.isMutedByMod);
+                      const activeCardBg = (isLocal && user?.cardBgColor && user.cardBgColor !== "#465B73")
+                        ? user.cardBgColor
+                        : (participant.cardBgColor || participant.color);
+                      const cardThemeStyle = getCardThemeStyle(activeCardBg);
+                      const participantAvatar = (isLocal && user?.avatar)
+                        ? user.avatar
+                        : (participant.avatar || "zap");
 
-                        const isParticipantAuxHolder = Boolean(
-                          musicState.isActive &&
-                          musicState.auxHolderIdentity && (
-                            (participant.identity && participant.identity.toLowerCase().trim() === musicState.auxHolderIdentity.toLowerCase().trim()) ||
-                            (participant.username && participant.username.toLowerCase().trim() === musicState.auxHolderIdentity.toLowerCase().trim()) ||
-                            (participant.name && participant.name.toLowerCase().trim() === musicState.auxHolderIdentity.toLowerCase().trim())
-                          )
-                        );
-                        const isListeningToMusic = Boolean(
-                          musicState.isActive &&
-                          musicState.isPlaying &&
-                          !(isLocal && isDeafened)
-                        );
+                      const isParticipantAuxHolder = Boolean(
+                        musicState.isActive &&
+                        musicState.auxHolderIdentity && (
+                          (participant.identity && participant.identity.toLowerCase().trim() === musicState.auxHolderIdentity.toLowerCase().trim()) ||
+                          (participant.username && participant.username.toLowerCase().trim() === musicState.auxHolderIdentity.toLowerCase().trim()) ||
+                          (participant.name && participant.name.toLowerCase().trim() === musicState.auxHolderIdentity.toLowerCase().trim())
+                        )
+                      );
+                      const isListeningToMusic = Boolean(
+                        musicState.isActive &&
+                        musicState.isPlaying &&
+                        !(isLocal && isDeafened)
+                      );
 
-                        return (
+                      return (
+                        <div
+                          key={participant.identity || participant.username || participant.id || `seat-${index}`}
+                          style={cardThemeStyle}
+                          className={`relative min-w-0 rounded-2xl sm:rounded-[1.4rem] flex flex-col justify-between items-center text-center transition-all duration-300 border overflow-hidden backdrop-blur-xl group/card shadow-[0_12px_32px_-8px_rgba(0,0,0,0.6)] ${participantCount === 1
+                            ? "p-3.5 sm:p-4.5 w-[220px] xs:w-[240px] sm:w-[260px] min-h-[195px] sm:min-h-[225px]"
+                            : `p-2 sm:p-4 w-full sm:w-[220px] md:w-[235px] max-w-[250px] min-h-[170px] sm:min-h-[215px] ${participantCount % 2 === 1 && index === participantCount - 1
+                              ? "col-span-2 max-w-[180px] xs:max-w-[220px] justify-self-center"
+                              : ""
+                            }`
+                            } ${participantRole === "super_admin"
+                              ? "ring-1.5 ring-amber-400/80 shadow-[0_0_25px_rgba(245,158,11,0.25)]"
+                              : participantRole === "admin"
+                                ? "ring-1.5 ring-rose-400/80 shadow-[0_0_25px_rgba(244,63,94,0.25)]"
+                                : participantRole === "manager"
+                                  ? "ring-1.5 ring-cyan-400/80 shadow-[0_0_25px_rgba(6,182,212,0.25)]"
+                                  : speaking
+                                    ? "ring-2 ring-emerald-400/90 shadow-[0_0_25px_rgba(52,211,153,0.35)]"
+                                    : "border-white/10 hover:border-white/20"
+                            }`}
+                        >
+                          {/* Ambient Card Backlight Glow */}
                           <div
-                            key={participant.identity || participant.username || participant.id || `seat-${index}`}
-                            style={cardThemeStyle}
-                            className={`relative min-w-0 rounded-2xl sm:rounded-[1.4rem] flex flex-col justify-between items-center text-center transition-all duration-300 border overflow-hidden backdrop-blur-xl group/card shadow-[0_12px_32px_-8px_rgba(0,0,0,0.6)] ${participantCount === 1
-                              ? "p-3.5 sm:p-4.5 w-[220px] xs:w-[240px] sm:w-[260px] min-h-[195px] sm:min-h-[225px]"
-                              : `p-2 sm:p-4 w-full sm:w-[220px] md:w-[235px] max-w-[250px] min-h-[170px] sm:min-h-[215px] ${participantCount % 2 === 1 && index === participantCount - 1
-                                ? "col-span-2 max-w-[180px] xs:max-w-[220px] justify-self-center"
-                                : ""
-                              }`
-                              } ${participantRole === "super_admin"
-                                ? "ring-1.5 ring-amber-400/80 shadow-[0_0_25px_rgba(245,158,11,0.25)]"
-                                : participantRole === "admin"
-                                  ? "ring-1.5 ring-rose-400/80 shadow-[0_0_25px_rgba(244,63,94,0.25)]"
-                                  : participantRole === "manager"
-                                    ? "ring-1.5 ring-cyan-400/80 shadow-[0_0_25px_rgba(6,182,212,0.25)]"
-                                    : speaking
-                                      ? "ring-2 ring-emerald-400/90 shadow-[0_0_25px_rgba(52,211,153,0.35)]"
-                                      : "border-white/10 hover:border-white/20"
-                              }`}
-                          >
-                            {/* Ambient Card Backlight Glow */}
-                            <div
-                              className="absolute -top-10 -right-10 w-32 h-32 rounded-full blur-2xl opacity-30 pointer-events-none"
-                              style={{ backgroundColor: activeCardBg.includes("gradient") ? "#6366F1" : activeCardBg }}
-                            />
+                            className="absolute -top-10 -right-10 w-32 h-32 rounded-full blur-2xl opacity-30 pointer-events-none"
+                            style={{ backgroundColor: activeCardBg.includes("gradient") ? "#6366F1" : activeCardBg }}
+                          />
 
-                            {/* Top Hairline Light Reflection */}
-                            <div className="absolute inset-x-0 top-0 h-[1px] bg-gradient-to-r from-transparent via-white/25 to-transparent pointer-events-none" />
+                          {/* Top Hairline Light Reflection */}
+                          <div className="absolute inset-x-0 top-0 h-[1px] bg-gradient-to-r from-transparent via-white/25 to-transparent pointer-events-none" />
 
-                            {/* Top Card Header */}
-                            <div className="w-full flex items-center justify-between gap-1 z-10 min-h-[22px]">
-                              <div className="flex items-center gap-1 shrink-0">
-                                <div className="px-2 py-0.5 rounded-full bg-black/40 backdrop-blur-md border border-white/10 text-[9px] sm:text-[10px] font-mono font-medium text-slate-300 shadow-xs flex items-center gap-1.5 shrink-0">
-                                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
-                                  <span>#{index + 1}</span>
-                                </div>
-
-                                {/* Small Icon on Top of User Card when Listening to Music */}
-                                {isListeningToMusic && (
-                                  isParticipantAuxHolder ? (
-                                    <span
-                                      className="h-5 px-1.5 rounded-full bg-indigo-500/25 border border-indigo-400/40 text-indigo-300 text-[9px] font-bold flex items-center gap-1 shadow-xs backdrop-blur-md shrink-0 animate-pulse"
-                                      title={`AUX DJ — Playing: ${musicState.currentTrack?.title || "Music"}`}
-                                    >
-                                      <Headphones size={10} className="text-indigo-400" />
-                                      <span className="text-[8px] font-black uppercase text-indigo-200">AUX</span>
-                                    </span>
-                                  ) : (
-                                    <span
-                                      className="w-5 h-5 rounded-full bg-indigo-500/20 border border-indigo-400/30 text-indigo-300 flex items-center justify-center shadow-xs backdrop-blur-md shrink-0"
-                                      title={`Listening to ${musicState.currentTrack?.title || "Music"}`}
-                                    >
-                                      <Headphones size={10} className="text-indigo-300 animate-pulse" />
-                                    </span>
-                                  )
-                                )}
-                                {!isLocal && (() => {
-                                  const pIdent = participant.identity || "";
-                                  const pName = participant.name || "";
-                                  const vol = participantVolumes[pIdent] ?? participantVolumes[pIdent.toLowerCase()] ?? (pName ? participantVolumes[pName] ?? participantVolumes[pName.toLowerCase()] : undefined) ?? 100;
-                                  if (vol === 0) {
-                                    return (
-                                      <span
-                                        className="px-1.5 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[8px] sm:text-[9px] font-bold flex items-center gap-0.5 backdrop-blur-md"
-                                        title="You muted this user"
-                                      >
-                                        <VolumeX size={9} />
-                                      </span>
-                                    );
-                                  }
-                                  return null;
-                                })()}
+                          {/* Top Card Header */}
+                          <div className="w-full flex items-center justify-between gap-1 z-10 min-h-[22px]">
+                            <div className="flex items-center gap-1 shrink-0">
+                              <div className="px-2 py-0.5 rounded-full bg-black/40 backdrop-blur-md border border-white/10 text-[9px] sm:text-[10px] font-mono font-medium text-slate-300 shadow-xs flex items-center gap-1.5 shrink-0">
+                                <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
+                                <span>#{index + 1}</span>
                               </div>
 
-                              <div className="flex items-center gap-1.5 shrink-0 justify-end">
-                                {isPrivateRoom && isParticipantHost(participant) && (
-                                  <span className="w-5 h-5 rounded-full bg-amber-500/20 border border-amber-400/40 text-amber-300 flex items-center justify-center shadow-xs backdrop-blur-md shrink-0" title="Room Host">
-                                    <Shield size={11} className="fill-amber-400/40 text-amber-400" />
-                                  </span>
-                                )}
-                                {isLocal ? (
-                                  <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/35 text-[8px] sm:text-[9px] font-extrabold tracking-wider shrink-0 backdrop-blur-md shadow-xs uppercase">
-                                    YOU
+                              {/* Small Icon on Top of User Card when Listening to Music */}
+                              {isListeningToMusic && (
+                                isParticipantAuxHolder ? (
+                                  <span
+                                    className="h-5 px-1.5 rounded-full bg-indigo-500/25 border border-indigo-400/40 text-indigo-300 text-[9px] font-bold flex items-center gap-1 shadow-xs backdrop-blur-md shrink-0 animate-pulse"
+                                    title={`AUX DJ — Playing: ${musicState.currentTrack?.title || "Music"}`}
+                                  >
+                                    <Headphones size={10} className="text-indigo-400" />
+                                    <span className="text-[8px] font-black uppercase text-indigo-200">AUX</span>
                                   </span>
                                 ) : (
-                                  /* Action Trigger for Remote Participants */
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      if (isLocal) return;
-                                      if (menuAnchor?.participantIdentity === participant.identity) {
-                                        setMenuAnchor(null);
-                                        setActiveModMenuParticipant(null);
-                                        return;
-                                      }
-                                      const rect = e.currentTarget.getBoundingClientRect();
-                                      const screenW = window.innerWidth;
-                                      const screenH = window.innerHeight;
-
-                                      const DROPDOWN_WIDTH = 216;
-                                      const PADDING = 10;
-
-                                      // Preferred: align right edge of dropdown with the button's right edge
-                                      let calculatedLeft = rect.right - DROPDOWN_WIDTH;
-
-                                      // If aligning to right edge would push dropdown off the left screen edge:
-                                      if (calculatedLeft < PADDING) {
-                                        calculatedLeft = rect.left;
-                                      }
-
-                                      // Strictly clamp within viewport bounds so it never bleeds off either edge
-                                      calculatedLeft = Math.max(PADDING, Math.min(calculatedLeft, screenW - DROPDOWN_WIDTH - PADDING));
-
-                                      // Vertical placement:
-                                      const spaceBelow = screenH - rect.bottom;
-                                      const spaceAbove = rect.top;
-                                      const isUpward = spaceBelow < 340 && spaceAbove > spaceBelow;
-
-                                      setMenuAnchor({
-                                        top: isUpward ? undefined : Math.round(rect.bottom + 6),
-                                        bottom: isUpward ? Math.round(screenH - rect.top + 6) : undefined,
-                                        left: Math.round(calculatedLeft),
-                                        participantIdentity: participant.identity,
-                                      });
-                                      setActiveModMenuParticipant(participant.identity);
-                                    }}
-                                    className={`p-1 sm:p-1.5 rounded-lg border backdrop-blur-md transition-all active:scale-95 cursor-pointer shrink-0 touch-manipulation ${menuAnchor?.participantIdentity === participant.identity
-                                      ? "bg-indigo-600 text-white border-indigo-400 shadow-md"
-                                      : "text-slate-400 hover:text-white bg-black/30 hover:bg-black/50 border-white/10"
-                                      }`}
-                                    title={`Participant Actions for ${participant.name}`}
+                                  <span
+                                    className="w-5 h-5 rounded-full bg-indigo-500/20 border border-indigo-400/30 text-indigo-300 flex items-center justify-center shadow-xs backdrop-blur-md shrink-0"
+                                    title={`Listening to ${musicState.currentTrack?.title || "Music"}`}
                                   >
-                                    <MoreVertical size={13} className="sm:w-3.5 sm:h-3.5" />
-                                  </button>
-                                )}
-                              </div>
+                                    <Headphones size={10} className="text-indigo-300 animate-pulse" />
+                                  </span>
+                                )
+                              )}
+                              {!isLocal && (() => {
+                                const pIdent = participant.identity || "";
+                                const pName = participant.name || "";
+                                if (isTargetBlocked) {
+                                  return (
+                                    <span
+                                      className="px-1.5 py-0.5 rounded-full bg-rose-500/25 text-rose-300 border border-rose-500/40 text-[8px] sm:text-[9px] font-bold flex items-center gap-1 backdrop-blur-md shadow-xs"
+                                      title="Blocked inside room — voice, chat, and reactions are muted"
+                                    >
+                                      <UserX size={9} className="text-rose-400" />
+                                      <span>Blocked</span>
+                                    </span>
+                                  );
+                                }
+                                const vol = participantVolumes[pIdent] ?? participantVolumes[pIdent.toLowerCase()] ?? (pName ? participantVolumes[pName] ?? participantVolumes[pName.toLowerCase()] : undefined) ?? 100;
+                                if (vol === 0) {
+                                  return (
+                                    <span
+                                      className="px-1.5 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[8px] sm:text-[9px] font-bold flex items-center gap-0.5 backdrop-blur-md"
+                                      title="You muted this user"
+                                    >
+                                      <VolumeX size={9} />
+                                    </span>
+                                  );
+                                }
+                                return null;
+                              })()}
                             </div>
 
-                            {/* Center Squircle Avatar */}
+                            <div className="flex items-center gap-1.5 shrink-0 justify-end">
+                              {isPrivateRoom && isParticipantHost(participant) && (
+                                <span className="w-5 h-5 rounded-full bg-amber-500/20 border border-amber-400/40 text-amber-300 flex items-center justify-center shadow-xs backdrop-blur-md shrink-0" title="Room Host">
+                                  <Shield size={11} className="fill-amber-400/40 text-amber-400" />
+                                </span>
+                              )}
+                              {isLocal ? (
+                                <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/35 text-[8px] sm:text-[9px] font-extrabold tracking-wider shrink-0 backdrop-blur-md shadow-xs uppercase">
+                                  YOU
+                                </span>
+                              ) : (
+                                /* Action Trigger for Remote Participants */
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (isLocal) return;
+                                    if (menuAnchor?.participantIdentity === participant.identity) {
+                                      setMenuAnchor(null);
+                                      setActiveModMenuParticipant(null);
+                                      return;
+                                    }
+                                    const rect = e.currentTarget.getBoundingClientRect();
+                                    const screenW = window.innerWidth;
+                                    const screenH = window.innerHeight;
+
+                                    const DROPDOWN_WIDTH = 216;
+                                    const PADDING = 10;
+
+                                    // Preferred: align right edge of dropdown with the button's right edge
+                                    let calculatedLeft = rect.right - DROPDOWN_WIDTH;
+
+                                    // If aligning to right edge would push dropdown off the left screen edge:
+                                    if (calculatedLeft < PADDING) {
+                                      calculatedLeft = rect.left;
+                                    }
+
+                                    // Strictly clamp within viewport bounds so it never bleeds off either edge
+                                    calculatedLeft = Math.max(PADDING, Math.min(calculatedLeft, screenW - DROPDOWN_WIDTH - PADDING));
+
+                                    // Vertical placement:
+                                    const spaceBelow = screenH - rect.bottom;
+                                    const spaceAbove = rect.top;
+                                    const isUpward = spaceBelow < 340 && spaceAbove > spaceBelow;
+
+                                    setMenuAnchor({
+                                      top: isUpward ? undefined : Math.round(rect.bottom + 6),
+                                      bottom: isUpward ? Math.round(screenH - rect.top + 6) : undefined,
+                                      left: Math.round(calculatedLeft),
+                                      participantIdentity: participant.identity,
+                                    });
+                                    setActiveModMenuParticipant(participant.identity);
+                                  }}
+                                  className={`p-1 sm:p-1.5 rounded-lg border backdrop-blur-md transition-all active:scale-95 cursor-pointer shrink-0 touch-manipulation ${menuAnchor?.participantIdentity === participant.identity
+                                    ? "bg-indigo-600 text-white border-indigo-400 shadow-md"
+                                    : "text-slate-400 hover:text-white bg-black/30 hover:bg-black/50 border-white/10"
+                                    }`}
+                                  title={`Participant Actions for ${participant.name}`}
+                                >
+                                  <MoreVertical size={13} className="sm:w-3.5 sm:h-3.5" />
+                                </button>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Center Squircle Avatar */}
+                          <div
+                            className={`relative shrink-0 my-1.5 sm:my-3 cursor-pointer transition-all duration-300 hover:scale-105 active:scale-95 group rounded-2xl sm:rounded-[1.4rem] ${speaking
+                              ? "ring-2.5 ring-emerald-400 ring-offset-2 ring-offset-[#0E1017] shadow-[0_0_24px_rgba(52,211,153,0.45)] animate-pulse"
+                              : "ring-1.5 ring-white/15 shadow-xl hover:ring-white/30"
+                              }`}
+                            onClick={() => {
+                              const effectiveAvatar = isLocal
+                                ? (user?.avatar || guest?.avatar || participant.avatar || "zap")
+                                : (participant.avatar || "zap");
+                              const effectiveName = isLocal
+                                ? (user?.displayName || user?.name || guest?.displayName || guest?.name || participant.name)
+                                : participant.name;
+                              const effectiveColor = isLocal
+                                ? (user?.color || guest?.color || participant.color || "#6366F1")
+                                : (participant.color || "#6366F1");
+                              const effectiveRole = isLocal
+                                ? myPlatformRole
+                                : (participant.userRole || "user");
+                              setPreviewParticipant({
+                                ...participant,
+                                avatar: effectiveAvatar,
+                                name: effectiveName,
+                                color: effectiveColor,
+                                userRole: effectiveRole,
+                              });
+                            }}
+                          >
                             <div
-                              className={`relative shrink-0 my-1.5 sm:my-3 cursor-pointer transition-all duration-300 hover:scale-105 active:scale-95 group rounded-2xl sm:rounded-[1.4rem] ${speaking
-                                ? "ring-2.5 ring-emerald-400 ring-offset-2 ring-offset-[#0E1017] shadow-[0_0_24px_rgba(52,211,153,0.45)] animate-pulse"
-                                : "ring-1.5 ring-white/15 shadow-xl hover:ring-white/30"
-                                }`}
-                              onClick={() => {
-                                const effectiveAvatar = isLocal
-                                  ? (user?.avatar || guest?.avatar || participant.avatar || "zap")
-                                  : (participant.avatar || "zap");
-                                const effectiveName = isLocal
-                                  ? (user?.displayName || user?.name || guest?.displayName || guest?.name || participant.name)
-                                  : participant.name;
-                                const effectiveColor = isLocal
-                                  ? (user?.color || guest?.color || participant.color || "#6366F1")
-                                  : (participant.color || "#6366F1");
-                                const effectiveRole = isLocal
-                                  ? myPlatformRole
-                                  : (participant.userRole || "user");
-                                setPreviewParticipant({
-                                  ...participant,
-                                  avatar: effectiveAvatar,
-                                  name: effectiveName,
-                                  color: effectiveColor,
-                                  userRole: effectiveRole,
-                                });
+                              className="w-14 h-14 xs:w-16 xs:h-16 sm:w-20 sm:h-20 shrink-0 rounded-2xl sm:rounded-[1.4rem] overflow-hidden flex items-center justify-center transition-colors shadow-inner"
+                              style={{
+                                backgroundColor: participant.color ? `${participant.color}22` : "rgba(0,0,0,0.45)",
+                                border: `1.5px solid ${participant.color ? `${participant.color}45` : "rgba(255,255,255,0.12)"}`,
+                                boxShadow: participant.color ? `0 4px 18px ${participant.color}18` : undefined,
                               }}
                             >
-                              <div
-                                className="w-14 h-14 xs:w-16 xs:h-16 sm:w-20 sm:h-20 shrink-0 rounded-2xl sm:rounded-[1.4rem] overflow-hidden flex items-center justify-center transition-colors shadow-inner"
-                                style={{
-                                  backgroundColor: participant.color ? `${participant.color}22` : "rgba(0,0,0,0.45)",
-                                  border: `1.5px solid ${participant.color ? `${participant.color}45` : "rgba(255,255,255,0.12)"}`,
-                                  boxShadow: participant.color ? `0 4px 18px ${participant.color}18` : undefined,
-                                }}
-                              >
-                                {participantAvatar?.includes("http") ? (
-                                  <img
-                                    src={participantAvatar}
-                                    alt={participant.name}
-                                    className="w-full h-full object-cover rounded-2xl sm:rounded-[1.4rem] aspect-square"
-                                  />
-                                ) : (
-                                  (() => {
-                                    const normalizedKey = participantAvatar?.toLowerCase().replace(/[^a-z0-9]/g, "") || "zap";
-                                    const IconComponent = AVATAR_ICON_MAP[normalizedKey] || AVATAR_ICON_MAP[participantAvatar || ""] || Sparkles;
-                                    return (
-                                      <IconComponent
-                                        className="w-7 h-7 xs:w-8 xs:h-8 sm:w-10 sm:h-10 shrink-0 transition-transform duration-300 group-hover:scale-110 drop-shadow-md"
-                                        style={{ color: speaking ? "#34D399" : (participant.color || "#6366F1") }}
-                                      />
-                                    );
-                                  })()
-                                )}
-                              </div>
-
-                              {/* Mic Mute Indicator */}
-                              {muted && (
-                                <div className="absolute -bottom-1 -right-1 w-5 h-5 sm:w-5.5 sm:h-5.5 rounded-lg bg-gradient-to-br from-rose-500 to-rose-600 border-2 border-[#0E1017] text-white flex items-center justify-center shadow-md shrink-0">
-                                  <MicOff size={11} />
-                                </div>
+                              {participantAvatar?.includes("http") ? (
+                                <img
+                                  src={participantAvatar}
+                                  alt={participant.name}
+                                  className="w-full h-full object-cover rounded-2xl sm:rounded-[1.4rem] aspect-square"
+                                />
+                              ) : (
+                                (() => {
+                                  const normalizedKey = participantAvatar?.toLowerCase().replace(/[^a-z0-9]/g, "") || "zap";
+                                  const IconComponent = AVATAR_ICON_MAP[normalizedKey] || AVATAR_ICON_MAP[participantAvatar || ""] || Sparkles;
+                                  return (
+                                    <IconComponent
+                                      className="w-7 h-7 xs:w-8 xs:h-8 sm:w-10 sm:h-10 shrink-0 transition-transform duration-300 group-hover:scale-110 drop-shadow-md"
+                                      style={{ color: speaking ? "#34D399" : (participant.color || "#6366F1") }}
+                                    />
+                                  );
+                                })()
                               )}
                             </div>
 
-                            {/* Name & Audio Wave Status */}
-                            <div
-                              className="w-full flex flex-col items-center gap-1 z-10 px-1 cursor-pointer group/name"
-                              onClick={() => {
-                                const effectiveAvatar = isLocal
-                                  ? (user?.avatar || guest?.avatar || participant.avatar || "zap")
-                                  : (participant.avatar || "zap");
-                                const effectiveName = isLocal
-                                  ? (isRegistered && user?.isRegistered ? (user?.displayName || user?.name) : (guest?.displayName || guest?.name || participant.name))
-                                  : participant.name;
-                                const effectiveColor = isLocal
-                                  ? (user?.color || guest?.color || participant.color || "#6366F1")
-                                  : (participant.color || "#6366F1");
-                                const effectiveRole = isLocal
-                                  ? myPlatformRole
-                                  : (participant.userRole || "user");
-                                setPreviewParticipant({
-                                  ...participant,
-                                  avatar: effectiveAvatar,
-                                  name: effectiveName,
-                                  color: effectiveColor,
-                                  userRole: effectiveRole,
-                                });
-                              }}
-                            >
-                              <div className="flex items-center justify-center gap-1.5 max-w-full">
-                                <span className="font-bold text-xs sm:text-sm text-white tracking-tight truncate max-w-[105px] xs:max-w-[145px] sm:max-w-[175px] group-hover/name:underline decoration-white/40">
-                                  {isLocal
-                                    ? (isRegistered && user?.isRegistered ? (user?.displayName || user?.name) : (guest?.displayName || guest?.name || participant.name))
-                                    : participant.name}
-                                </span>
-                                {participantRole !== "user" && (
-                                  <RoleBadge role={participantRole} size="xs" showLabel={false} />
-                                )}
+                            {/* Mic Mute Indicator */}
+                            {muted && (
+                              <div className="absolute -bottom-1 -right-1 w-5 h-5 sm:w-5.5 sm:h-5.5 rounded-lg bg-gradient-to-br from-rose-500 to-rose-600 border-2 border-[#0E1017] text-white flex items-center justify-center shadow-md shrink-0">
+                                <MicOff size={11} />
                               </div>
+                            )}
+                          </div>
 
-                              {/* Fixed Height Soundwave Bar or Status Pill */}
-                              <div className="h-5 flex items-center justify-center mt-0.5">
-                                {speaking ? (
-                                  <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/30 backdrop-blur-md shadow-xs">
-                                    <div className="flex items-center gap-0.5 h-2">
-                                      <span className="w-0.5 bg-emerald-300 rounded-full soundwave-bar-1" />
-                                      <span className="w-0.5 bg-emerald-300 rounded-full soundwave-bar-2" />
-                                      <span className="w-0.5 bg-emerald-300 rounded-full soundwave-bar-3" />
-                                      <span className="w-0.5 bg-emerald-300 rounded-full soundwave-bar-4" />
-                                    </div>
-                                    <span className="text-[8px] sm:text-[9px] text-emerald-300 font-bold uppercase tracking-wider leading-none">
-                                      Speaking
-                                    </span>
+                          {/* Name & Audio Wave Status */}
+                          <div
+                            className="w-full flex flex-col items-center gap-1 z-10 px-1 cursor-pointer group/name"
+                            onClick={() => {
+                              const effectiveAvatar = isLocal
+                                ? (user?.avatar || guest?.avatar || participant.avatar || "zap")
+                                : (participant.avatar || "zap");
+                              const effectiveName = isLocal
+                                ? (isRegistered && user?.isRegistered ? (user?.displayName || user?.name) : (guest?.displayName || guest?.name || participant.name))
+                                : participant.name;
+                              const effectiveColor = isLocal
+                                ? (user?.color || guest?.color || participant.color || "#6366F1")
+                                : (participant.color || "#6366F1");
+                              const effectiveRole = isLocal
+                                ? myPlatformRole
+                                : (participant.userRole || "user");
+                              setPreviewParticipant({
+                                ...participant,
+                                avatar: effectiveAvatar,
+                                name: effectiveName,
+                                color: effectiveColor,
+                                userRole: effectiveRole,
+                              });
+                            }}
+                          >
+                            <div className="flex items-center justify-center gap-1.5 max-w-full">
+                              <span className="font-bold text-xs sm:text-sm text-white tracking-tight truncate max-w-[105px] xs:max-w-[145px] sm:max-w-[175px] group-hover/name:underline decoration-white/40">
+                                {isLocal
+                                  ? (isRegistered && user?.isRegistered ? (user?.displayName || user?.name) : (guest?.displayName || guest?.name || participant.name))
+                                  : participant.name}
+                              </span>
+                              {participantRole !== "user" && (
+                                <RoleBadge role={participantRole} size="xs" showLabel={false} />
+                              )}
+                            </div>
+
+                            {/* Fixed Height Soundwave Bar or Status Pill */}
+                            <div className="h-5 flex items-center justify-center mt-0.5">
+                              {speaking ? (
+                                <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/30 backdrop-blur-md shadow-xs">
+                                  <div className="flex items-center gap-0.5 h-2">
+                                    <span className="w-0.5 bg-emerald-300 rounded-full soundwave-bar-1" />
+                                    <span className="w-0.5 bg-emerald-300 rounded-full soundwave-bar-2" />
+                                    <span className="w-0.5 bg-emerald-300 rounded-full soundwave-bar-3" />
+                                    <span className="w-0.5 bg-emerald-300 rounded-full soundwave-bar-4" />
                                   </div>
-                                ) : participant.isMutedByMod ? (
-                                  <span className="px-2 py-0.5 rounded-full bg-rose-500/15 border border-rose-500/30 text-[9px] text-rose-300 font-semibold backdrop-blur-md">
-                                    Mod Muted
+                                  <span className="text-[8px] sm:text-[9px] text-emerald-300 font-bold uppercase tracking-wider leading-none">
+                                    Speaking
                                   </span>
-                                ) : muted ? (
-                                  <span className="px-2 py-0.5 rounded-full bg-black/40 border border-white/10 text-[9px] text-slate-400 font-medium backdrop-blur-md flex items-center gap-1">
-                                    <MicOff size={9} className="text-rose-400" />
-                                    <span>Muted</span>
-                                  </span>
-                                ) : (
-                                  <span className="px-2 py-0.5 rounded-full bg-black/40 border border-white/10 text-[9px] text-slate-300/80 font-medium backdrop-blur-md flex items-center gap-1">
-                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400/80 animate-pulse" />
-                                    <span>Listening</span>
-                                  </span>
-                                )}
-                              </div>
+                                </div>
+                              ) : participant.isMutedByMod ? (
+                                <span className="px-2 py-0.5 rounded-full bg-rose-500/15 border border-rose-500/30 text-[9px] text-rose-300 font-semibold backdrop-blur-md">
+                                  Mod Muted
+                                </span>
+                              ) : muted ? (
+                                <span className="px-2 py-0.5 rounded-full bg-black/40 border border-white/10 text-[9px] text-slate-400 font-medium backdrop-blur-md flex items-center gap-1">
+                                  <MicOff size={9} className="text-rose-400" />
+                                  <span>Muted</span>
+                                </span>
+                              ) : (
+                                <span className="px-2 py-0.5 rounded-full bg-black/40 border border-white/10 text-[9px] text-slate-300/80 font-medium backdrop-blur-md flex items-center gap-1">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400/80 animate-pulse" />
+                                  <span>Listening</span>
+                                </span>
+                              )}
                             </div>
                           </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
-          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+        </div>
 
-          {/* Slide-out In-Room Whisper Chat Drawer / Right Sidebar */}
-          <div
-            className={`
+        {/* Slide-out In-Room Whisper Chat Drawer / Right Sidebar */}
+        <div
+          className={`
           fixed inset-x-0 bottom-20 top-14 sm:inset-x-auto sm:right-0 sm:top-16 sm:bottom-24 z-40 bg-[#0B0C12]/95 backdrop-blur-3xl border-t sm:border-t-0 sm:border-l border-white/[0.08] flex flex-col shadow-2xl transition-all duration-300
           ${isChatOpen ? "translate-y-0 translate-x-0 opacity-100" : "translate-y-[150%] sm:translate-y-0 sm:translate-x-full opacity-0 pointer-events-none"}
           lg:relative lg:inset-auto lg:z-10 lg:w-[410px] xl:w-[450px] lg:bg-[#0B0C12]/95 lg:border-l lg:border-white/[0.08] lg:shadow-2xl lg:transform-none lg:transition-none lg:opacity-100 lg:pointer-events-auto
           ${!isChatOpen && 'lg:hidden'}
         `}
-          >
-            {/* Top Header & Tab Switcher */}
-            <div className="p-3 sm:p-4 border-b border-white/[0.08] bg-black/25 flex flex-col gap-2.5 shrink-0">
-              <div className="flex items-center justify-between">
-                {/* Tab Pill Buttons */}
-                <div className="flex items-center gap-1 p-1 bg-white/[0.05] border border-white/10 rounded-2xl">
-                  <button
-                    type="button"
-                    onClick={() => setRightPanelTab("chat")}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${rightPanelTab === "chat"
-                      ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
-                      : "text-slate-400 hover:text-white hover:bg-white/5"
-                      }`}
-                  >
-                    <MessageSquare size={13} />
-                    <span>Chat</span>
-                    {chatMessages.length > 0 && rightPanelTab !== "chat" && (
-                      <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setRightPanelTab("junctions");
-                      fetchOtherJunctions();
-                    }}
-                    className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${rightPanelTab === "junctions"
-                      ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
-                      : "text-slate-400 hover:text-white hover:bg-white/5"
-                      }`}
-                  >
-                    <ArrowLeftRight size={13} />
-                    <span><span className="hidden xs:inline">Switch </span>Junctions</span>
-                    {otherJunctions.some((j) => j.currentCount > 0) && (
-                      <span className="flex items-center gap-0.5 px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px] font-bold">
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                        {otherJunctions.filter((j) => j.currentCount > 0).length}
-                      </span>
-                    )}
-                  </button>
-                </div>
-
-                <div className="flex items-center gap-1">
-                  {rightPanelTab === "chat" && chatMessages.length > 1 && (
-                    <button
-                      type="button"
-                      onClick={handleClearChat}
-                      className="px-2.5 py-1 rounded-xl text-[11px] font-medium text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
-                      title="Clear chat"
-                    >
-                      Clear
-                    </button>
+        >
+          {/* Top Header & Tab Switcher */}
+          <div className="p-3 sm:p-4 border-b border-white/[0.08] bg-black/25 flex flex-col gap-2.5 shrink-0">
+            <div className="flex items-center justify-between">
+              {/* Tab Pill Buttons */}
+              <div className="flex items-center gap-1 p-1 bg-white/[0.05] border border-white/10 rounded-2xl">
+                <button
+                  type="button"
+                  onClick={() => setRightPanelTab("chat")}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${rightPanelTab === "chat"
+                    ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
+                    : "text-slate-400 hover:text-white hover:bg-white/5"
+                    }`}
+                >
+                  <MessageSquare size={13} />
+                  <span>Chat</span>
+                  {chatMessages.length > 0 && rightPanelTab !== "chat" && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
                   )}
-                  {rightPanelTab === "junctions" && (
-                    <button
-                      type="button"
-                      onClick={fetchOtherJunctions}
-                      className="p-1.5 rounded-full text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
-                      title="Refresh junctions"
-                    >
-                      <RotateCw size={14} className={isLoadingJunctions ? "animate-spin text-indigo-400" : ""} />
-                    </button>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRightPanelTab("junctions");
+                    fetchOtherJunctions();
+                  }}
+                  className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${rightPanelTab === "junctions"
+                    ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
+                    : "text-slate-400 hover:text-white hover:bg-white/5"
+                    }`}
+                >
+                  <ArrowLeftRight size={13} />
+                  <span><span className="hidden xs:inline">Switch </span>Junctions</span>
+                  {otherJunctions.some((j) => j.currentCount > 0) && (
+                    <span className="flex items-center gap-0.5 px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px] font-bold">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                      {otherJunctions.filter((j) => j.currentCount > 0).length}
+                    </span>
                   )}
-                  <button
-                    onClick={() => setIsChatOpen(false)}
-                    className="w-8 h-8 rounded-full text-slate-400 hover:text-white hover:bg-white/10 flex items-center justify-center transition-all cursor-pointer"
-                    title="Close panel"
-                  >
-                    <X size={16} />
-                  </button>
-                </div>
+                </button>
               </div>
 
-              {/* Subheader info depending on tab */}
-              {rightPanelTab === "chat" ? (
-                <div className="flex flex-col gap-2">
-                  <div className="flex items-center gap-2">
-                    {/* Private Message Recipient Selector - Custom Styled Glassmorphic Dropdown */}
-                    <div className="relative flex-1" ref={recipientMenuRef}>
-                      <button
-                        type="button"
-                        onClick={() => setIsRecipientMenuOpen(!isRecipientMenuOpen)}
-                        className="w-full flex items-center justify-between gap-2 bg-white/[0.04] hover:bg-white/[0.07] border border-white/10 hover:border-white/20 rounded-2xl px-3.5 py-2 transition-all cursor-pointer shadow-inner active:scale-[0.99]"
-                      >
-                        <div className="flex items-center gap-2 min-w-0">
-                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider shrink-0">
-                            To:
-                          </span>
-                          <span className="text-xs font-semibold text-white truncate">
-                            {privateRecipient === "all" ? "Everyone in Room" : privateRecipient}
-                          </span>
-                        </div>
-                        <ChevronDown
-                          size={14}
-                          className={`text-slate-400 shrink-0 transition-transform duration-200 ${isRecipientMenuOpen ? 'rotate-180 text-white' : ''}`}
-                        />
-                      </button>
-
-                      {/* Custom Dropdown Menu with Glassmorphic Styling */}
-                      {isRecipientMenuOpen && (
-                        <div className="absolute left-0 right-0 top-full mt-1.5 bg-[#141622]/95 border border-white/10 rounded-2xl shadow-2xl backdrop-blur-2xl p-1.5 z-50 flex flex-col gap-0.5 animate-in fade-in zoom-in-95 duration-150">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setPrivateRecipient("all");
-                              setIsRecipientMenuOpen(false);
-                            }}
-                            className={`w-full px-3 py-2 rounded-xl text-left text-xs font-semibold flex items-center justify-between transition-colors cursor-pointer ${privateRecipient === "all"
-                              ? "bg-indigo-600/20 text-indigo-300 border border-indigo-500/30"
-                              : "text-slate-300 hover:text-white hover:bg-white/5"
-                              }`}
-                          >
-                            <span>Everyone in Room</span>
-                            {privateRecipient === "all" && <Check size={14} className="text-indigo-400" />}
-                          </button>
-
-                          {participants
-                            .filter((p) => !isLocalParticipant(p))
-                            .map((p) => {
-                              const isSelected = privateRecipient === p.identity;
-                              return (
-                                <button
-                                  key={p.identity}
-                                  type="button"
-                                  onClick={() => {
-                                    setPrivateRecipient(p.identity);
-                                    setIsRecipientMenuOpen(false);
-                                  }}
-                                  className={`w-full px-3 py-2 rounded-xl text-left text-xs font-semibold flex items-center justify-between transition-colors cursor-pointer ${isSelected
-                                    ? "bg-indigo-600/20 text-indigo-300 border border-indigo-500/30"
-                                    : "text-slate-300 hover:text-white hover:bg-white/5"
-                                    }`}
-                                >
-                                  <span className="truncate">{p.name}</span>
-                                  {isSelected && <Check size={14} className="text-indigo-400" />}
-                                </button>
-                              );
-                            })}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Feature: Show msgs / Not show msgs Toggle */}
-                    <button
-                      type="button"
-                      onClick={toggleShowInRoomPopups}
-                      className={`flex items-center gap-1.5 px-3 py-2 rounded-2xl border text-xs font-medium transition-all cursor-pointer shrink-0 active:scale-95 ${showInRoomPopups
-                        ? "bg-white/10 text-white border-white/20 hover:bg-white/15"
-                        : "bg-transparent text-slate-400 border-white/10 hover:text-slate-200 hover:bg-white/5"
-                        }`}
-                      title={
-                        showInRoomPopups
-                          ? "Side pop-up messages are ON (Click to set Not show msgs)"
-                          : "Side pop-up messages are OFF (Click to set Show msgs)"
-                      }
-                    >
-                      {showInRoomPopups ? (
-                        <>
-                          <Eye size={13} className="text-slate-200" />
-                          <span>Show msgs</span>
-                          <span className="w-1.5 h-1.5 rounded-full bg-white/70" />
-                        </>
-                      ) : (
-                        <>
-                          <EyeOff size={13} className="text-slate-500" />
-                          <span>Not show msgs</span>
-                          <span className="w-1.5 h-1.5 rounded-full bg-slate-600" />
-                        </>
-                      )}
-                    </button>
-                  </div>
-
-                  {/* Status helper banner */}
-                  <div className="flex items-center justify-between px-1 text-[10px] text-slate-400">
-                    <span className="truncate">
-                      {showInRoomPopups
-                        ? "Pop-up previews active when chat is closed"
-                        : "Pop-up previews hidden"}
-                    </span>
-                  </div>
-                </div>
-              ) : (
-                <p className="text-[11px] text-slate-400 flex items-center justify-between">
-                  <span>Shift directly between active junctions</span>
-                  <span className="text-indigo-300 font-semibold">{otherJunctions.length} available</span>
-                </p>
-              )}
+              <div className="flex items-center gap-1">
+                {rightPanelTab === "chat" && chatMessages.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={handleClearChat}
+                    className="px-2.5 py-1 rounded-xl text-[11px] font-medium text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
+                    title="Clear chat"
+                  >
+                    Clear
+                  </button>
+                )}
+                {rightPanelTab === "junctions" && (
+                  <button
+                    type="button"
+                    onClick={fetchOtherJunctions}
+                    className="p-1.5 rounded-full text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+                    title="Refresh junctions"
+                  >
+                    <RotateCw size={14} className={isLoadingJunctions ? "animate-spin text-indigo-400" : ""} />
+                  </button>
+                )}
+                <button
+                  onClick={() => setIsChatOpen(false)}
+                  className="w-8 h-8 rounded-full text-slate-400 hover:text-white hover:bg-white/10 flex items-center justify-center transition-all cursor-pointer"
+                  title="Close panel"
+                >
+                  <X size={16} />
+                </button>
+              </div>
             </div>
 
-            {/* TAB 1: WHISPER CHAT */}
-            {rightPanelTab === "chat" && (
-              <div className="flex-1 flex flex-col min-h-0 relative overflow-hidden">
-                <RotatingVibeBanner />
-                {/* Chat Messages Log */}
-                <div
-                  ref={chatScrollContainerRef}
-                  onScroll={handleChatScroll}
-                  className="flex-1 p-3 sm:p-4 overflow-y-auto space-y-3.5 scroll-smooth flex flex-col"
-                >
-                  {chatMessages.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center m-auto text-center py-8 px-4 select-none animate-in fade-in zoom-in-95 duration-200">
-                      <div className="w-12 h-12 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 mb-3 shadow-lg shadow-indigo-500/5">
-                        <MessageSquare size={22} />
+            {/* Subheader info depending on tab */}
+            {rightPanelTab === "chat" ? (
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  {/* Private Message Recipient Selector - Custom Styled Glassmorphic Dropdown */}
+                  <div className="relative flex-1" ref={recipientMenuRef}>
+                    <button
+                      type="button"
+                      onClick={() => setIsRecipientMenuOpen(!isRecipientMenuOpen)}
+                      className="w-full flex items-center justify-between gap-2 bg-white/[0.04] hover:bg-white/[0.07] border border-white/10 hover:border-white/20 rounded-2xl px-3.5 py-2 transition-all cursor-pointer shadow-inner active:scale-[0.99]"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider shrink-0">
+                          To:
+                        </span>
+                        <span className="text-xs font-semibold text-white truncate">
+                          {privateRecipient === "all" ? "Everyone in Room" : privateRecipient}
+                        </span>
                       </div>
-                      <span className="text-sm font-semibold text-slate-200">Start your conversation</span>
-                      <p className="text-xs text-slate-400 mt-1 max-w-[220px] leading-relaxed">
-                        Send a message to the room or whisper privately to any user.
-                      </p>
-                    </div>
-                  ) : chatMessages.map((msg) => {
-                    // System Announcement Card
-                    if (msg.senderId === "system") {
-                      return (
-                        <div key={msg.id} className="w-full flex justify-center py-2 px-1">
-                          <div className="max-w-[95%] px-3.5 py-2.5 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-200 text-xs text-center flex items-center gap-2.5 shadow-sm">
-                            <Sparkles size={14} className="text-indigo-400 shrink-0" />
-                            <p className="leading-relaxed font-medium">{msg.text}</p>
-                          </div>
-                        </div>
-                      );
-                    }
+                      <ChevronDown
+                        size={14}
+                        className={`text-slate-400 shrink-0 transition-transform duration-200 ${isRecipientMenuOpen ? 'rotate-180 text-white' : ''}`}
+                      />
+                    </button>
 
-                    const isMe = isLocalIdentity(msg.senderName) || (!!msg.senderId && (msg.senderId === guest.id || (!!user?.id && msg.senderId === user.id)));
-                    const isPrivate = msg.targetIdentity !== undefined;
-                    const senderParticipant = participants.find((p) => p.identity === msg.senderName);
-                    const senderRole = isMe ? myPlatformRole : (senderParticipant?.userRole || undefined);
+                    {/* Custom Dropdown Menu with Glassmorphic Styling */}
+                    {isRecipientMenuOpen && (
+                      <div className="absolute left-0 right-0 top-full mt-1.5 bg-[#141622]/95 border border-white/10 rounded-2xl shadow-2xl backdrop-blur-2xl p-1.5 z-50 flex flex-col gap-0.5 animate-in fade-in zoom-in-95 duration-150">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPrivateRecipient("all");
+                            setIsRecipientMenuOpen(false);
+                          }}
+                          className={`w-full px-3 py-2 rounded-xl text-left text-xs font-semibold flex items-center justify-between transition-colors cursor-pointer ${privateRecipient === "all"
+                            ? "bg-indigo-600/20 text-indigo-300 border border-indigo-500/30"
+                            : "text-slate-300 hover:text-white hover:bg-white/5"
+                            }`}
+                        >
+                          <span>Everyone in Room</span>
+                          {privateRecipient === "all" && <Check size={14} className="text-indigo-400" />}
+                        </button>
 
-                    return (
-                      <div key={msg.id} className={`group/msg relative flex flex-col ${isMe ? 'items-end' : 'items-start'} py-1`}>
-                        {/* Sender Header for Incoming Messages */}
-                        {!isMe && (
-                          <div className="flex items-center gap-1.5 mb-1 pl-1">
-                            <div className="w-5 h-5 rounded-full overflow-hidden shrink-0 border border-white/10 bg-slate-800">
-                              <UserAvatar avatar={msg.senderAvatar} size="sm" className="!w-full !h-full" badgeRole={senderRole} />
-                            </div>
-                            <span className="text-[11px] font-semibold text-slate-300">{msg.senderName}</span>
-                            {isPrivateRoom && isParticipantHost(senderParticipant) && (
-                              <span className="flex items-center gap-0.5 px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                                <Shield size={8} className="fill-amber-400/40" /> Host
-                              </span>
-                            )}
-                            {senderRole && senderRole !== "user" && (
-                              <RoleBadge role={senderRole} size="xs" />
-                            )}
-                            {isPrivate && (
-                              <span className="flex items-center gap-0.5 px-1.5 py-0.2 rounded text-[9px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30">
-                                <Lock size={9} /> Whisper
-                              </span>
-                            )}
-                          </div>
-                        )}
-
-                        {/* Header for own whisper */}
-                        {isMe && isPrivate && (
-                          <div className="flex items-center gap-1 mb-1 pr-1 text-[10px] font-bold text-purple-300 uppercase tracking-wider">
-                            <Lock size={10} /> Whisper to {msg.targetIdentity}
-                          </div>
-                        )}
-
-                        {/* Quoted Message Preview if Reply */}
-                        {msg.replyTo && (
-                          <div className={`mb-1 px-3 py-1.5 rounded-xl border-l-2 max-w-[85%] text-xs flex flex-col ${isMe
-                            ? 'bg-indigo-950/40 border-indigo-400 text-indigo-200'
-                            : 'bg-black/30 border-purple-400 text-purple-200'
-                            }`}>
-                            <span className="text-[10px] font-bold opacity-80 flex items-center gap-1">
-                              <Reply size={10} /> Replying to {msg.replyTo.senderName}
-                            </span>
-                            <span className="truncate opacity-75 italic text-[11px]">
-                              &ldquo;{msg.replyTo.text}&rdquo;
-                            </span>
-                          </div>
-                        )}
-
-                        {/* Bubble Container with Non-Overlapping Action Toolbar Beside It */}
-                        <div className="relative group/bubble max-w-[85%] flex items-center">
-                          {/* Action Bar for isMe: Placed to the LEFT of the bubble in open row space */}
-                          {isMe && (
-                            <div className="absolute right-full mr-2.5 top-1/2 -translate-y-1/2 opacity-0 group-hover/msg:opacity-100 transition-all duration-150 flex items-center gap-1 bg-[#141622]/95 border border-white/10 rounded-full px-1.5 py-1 shadow-2xl backdrop-blur-xl z-20 pointer-events-none group-hover/msg:pointer-events-auto">
+                        {participants
+                          .filter((p) => !isLocalParticipant(p) && !isBlockedInRoom(p))
+                          .map((p) => {
+                            const isSelected = privateRecipient === p.identity;
+                            return (
                               <button
+                                key={p.identity}
                                 type="button"
                                 onClick={() => {
-                                  setReplyingToMessage(msg);
-                                  setEditingMessage(null);
+                                  setPrivateRecipient(p.identity);
+                                  setIsRecipientMenuOpen(false);
                                 }}
-                                className="w-6 h-6 rounded-full text-slate-400 hover:text-white hover:bg-white/15 flex items-center justify-center transition-colors cursor-pointer"
-                                title="Reply"
-                                aria-label="Reply"
-                              >
-                                <Reply size={12} />
-                              </button>
-                              {/* 5-minute limit message edit */}
-                              {isMe && (Date.now() - (msg.timestamp || 0) <= 5 * 60 * 1000) && (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setEditingMessage(msg);
-                                    setInputMessage(msg.text);
-                                    setReplyingToMessage(null);
-                                  }}
-                                  className="w-6 h-6 rounded-full text-slate-400 hover:text-amber-300 hover:bg-amber-400/15 flex items-center justify-center transition-colors cursor-pointer"
-                                  title="Edit message (within 5 min)"
-                                  aria-label="Edit"
-                                >
-                                  <Edit2 size={12} />
-                                </button>
-                              )}
-                              <button
-                                type="button"
-                                onClick={() => handleDeleteMessage(msg.id)}
-                                className="w-6 h-6 rounded-full text-slate-400 hover:text-rose-400 hover:bg-rose-400/15 flex items-center justify-center transition-colors cursor-pointer"
-                                title="Delete message"
-                                aria-label="Delete"
-                              >
-                                <Trash2 size={12} />
-                              </button>
-                            </div>
-                          )}
-
-                          {/* Message Bubble */}
-                          <div className={`
-                    px-4 py-2.5 text-[13.5px] leading-relaxed shadow-lg backdrop-blur-md break-words transition-all
-                    ${isMe
-                              ? (isPrivate
-                                ? 'rounded-2xl rounded-tr-xs text-white bg-gradient-to-br from-purple-600 to-fuchsia-600 shadow-purple-600/25'
-                                : 'rounded-2xl rounded-tr-xs text-white bg-gradient-to-br from-indigo-600 to-indigo-500 shadow-indigo-600/25')
-                              : (isPrivate
-                                ? 'rounded-2xl rounded-tl-xs border border-purple-500/30 bg-[#251532]/90 text-purple-100 shadow-purple-950/20'
-                                : 'rounded-2xl rounded-tl-xs border border-white/[0.08] bg-[#181924]/90 text-slate-100 shadow-black/20')
-                            }
-                  `}>
-                            <SafeMessageText text={msg.text} isMe={isMe} />
-                            {msg.isEdited && (
-                              <span className="text-[10px] opacity-70 ml-1.5 italic select-none">
-                                (edited)
-                              </span>
-                            )}
-                          </div>
-
-                          {/* Action Bar for other users: Placed to the RIGHT of the bubble in open row space */}
-                          {!isMe && (
-                            <div className="absolute left-full ml-2.5 top-1/2 -translate-y-1/2 opacity-0 group-hover/msg:opacity-100 transition-all duration-150 flex items-center gap-1 bg-[#141622]/95 border border-white/10 rounded-full px-1.5 py-1 shadow-2xl backdrop-blur-xl z-20 pointer-events-none group-hover/msg:pointer-events-auto">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setReplyingToMessage(msg);
-                                  setEditingMessage(null);
-                                }}
-                                className="w-6 h-6 rounded-full text-slate-400 hover:text-white hover:bg-white/15 flex items-center justify-center transition-colors cursor-pointer"
-                                title="Reply"
-                                aria-label="Reply"
-                              >
-                                <Reply size={12} />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleDeleteMessage(msg.id)}
-                                className="w-6 h-6 rounded-full text-slate-400 hover:text-rose-400 hover:bg-rose-400/15 flex items-center justify-center transition-colors cursor-pointer"
-                                title="Delete message"
-                                aria-label="Delete"
-                              >
-                                <Trash2 size={12} />
-                              </button>
-                            </div>
-                          )}
-                        </div>
-
-                        <span className="text-[9.5px] text-slate-500 mt-1 px-1 select-none">
-                          {new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                        </span>
-                      </div>
-                    );
-                  })}
-                  <div ref={chatMessagesEndRef} />
-                </div>
-
-                {/* Floating "Tap to Recent Chat" Down Arrow Button */}
-                {isScrolledUp && (
-                  <div className="absolute bottom-20 right-4 sm:right-6 z-30 pointer-events-auto animate-in fade-in slide-in-from-bottom-2 duration-200">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        scrollChatToBottom("smooth");
-                        setIsScrolledUp(false);
-                        setNewMessagesWhileScrolledUp(0);
-                      }}
-                      className="group flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-indigo-600/95 hover:bg-indigo-600 active:scale-95 text-white text-xs font-semibold shadow-xl shadow-indigo-600/50 border border-indigo-400/40 backdrop-blur-xl transition-all cursor-pointer select-none"
-                      title="Scroll to recent chat"
-                      aria-label="Scroll to recent chat"
-                    >
-                      <span>Recent chat</span>
-                      <div className="w-4 h-4 rounded-full bg-white/20 flex items-center justify-center group-hover:translate-y-0.5 transition-transform">
-                        <ChevronDown size={13} className="text-white" />
-                      </div>
-                      {newMessagesWhileScrolledUp > 0 && (
-                        <span className="px-1.5 py-0.2 rounded-full bg-rose-500 text-white text-[10px] font-bold">
-                          {newMessagesWhileScrolledUp}
-                        </span>
-                      )}
-                    </button>
-                  </div>
-                )}
-
-                {/* Real-time Typing Indicator Bar */}
-                {activeTypingList.length > 0 && (
-                  <div className="px-4 py-1.5 bg-[#0C0D14]/90 border-t border-white/[0.06] flex items-center gap-2 text-xs text-slate-400 shrink-0 select-none animate-in fade-in slide-in-from-bottom-1 duration-150">
-                    <div className="flex items-center gap-1 py-1 px-1.5 bg-indigo-500/10 rounded-full border border-indigo-500/20 shrink-0">
-                      <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce [animation-delay:-0.3s]" />
-                      <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce [animation-delay:-0.15s]" />
-                      <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce" />
-                    </div>
-                    <span className="truncate text-[11px] text-slate-300">
-                      {activeTypingList.length === 1 ? (
-                        <>
-                          <strong className="font-semibold text-indigo-300">
-                            {activeTypingList[0].name}
-                          </strong>{" "}
-                          {activeTypingList[0].isWhisper
-                            ? "is whispering..."
-                            : "is typing..."}
-                        </>
-                      ) : activeTypingList.length === 2 ? (
-                        <>
-                          <strong className="font-semibold text-indigo-300">
-                            {activeTypingList[0].name}
-                          </strong>{" "}
-                          and{" "}
-                          <strong className="font-semibold text-indigo-300">
-                            {activeTypingList[1].name}
-                          </strong>{" "}
-                          are typing...
-                        </>
-                      ) : (
-                        <>
-                          <strong className="font-semibold text-indigo-300">
-                            {activeTypingList[0].name}
-                          </strong>
-                          ,{" "}
-                          <strong className="font-semibold text-indigo-300">
-                            {activeTypingList[1].name}
-                          </strong>{" "}
-                          and {activeTypingList.length - 2} others are typing...
-                        </>
-                      )}
-                    </span>
-                  </div>
-                )}
-
-                {/* Reply Context Banner */}
-                {replyingToMessage && (
-                  <div className="px-3.5 py-2 bg-indigo-950/70 border-t border-indigo-500/30 flex items-center justify-between gap-2 shrink-0 animate-in fade-in duration-150">
-                    <div className="flex items-center gap-2 min-w-0 text-xs">
-                      <div className="w-5 h-5 rounded-full bg-indigo-500/20 flex items-center justify-center text-indigo-400 shrink-0">
-                        <Reply size={11} />
-                      </div>
-                      <div className="flex items-center gap-1.5 min-w-0">
-                        <span className="text-indigo-300 font-semibold truncate">
-                          Replying to {replyingToMessage.senderName}:
-                        </span>
-                        <span className="text-slate-400 truncate italic text-[11px]">
-                          &ldquo;{replyingToMessage.text}&rdquo;
-                        </span>
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setReplyingToMessage(null)}
-                      className="w-6 h-6 rounded-full text-slate-400 hover:text-white hover:bg-white/10 flex items-center justify-center shrink-0 cursor-pointer"
-                      title="Cancel reply"
-                    >
-                      <X size={13} />
-                    </button>
-                  </div>
-                )}
-
-                {/* Edit Context Banner */}
-                {editingMessage && (
-                  <div className="px-3.5 py-2 bg-amber-950/70 border-t border-amber-500/30 flex items-center justify-between gap-2 shrink-0 animate-in fade-in duration-150">
-                    <div className="flex items-center gap-2 min-w-0 text-xs">
-                      <div className="w-5 h-5 rounded-full bg-amber-500/20 flex items-center justify-center text-amber-400 shrink-0">
-                        <Edit2 size={11} />
-                      </div>
-                      <span className="text-amber-300 font-semibold truncate">
-                        Editing your message (allowed within 5 min &bull; Enter to save, Esc to cancel)
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setEditingMessage(null);
-                        setInputMessage("");
-                      }}
-                      className="w-6 h-6 rounded-full text-slate-400 hover:text-white hover:bg-white/10 flex items-center justify-center shrink-0 cursor-pointer"
-                      title="Cancel edit"
-                    >
-                      <X size={13} />
-                    </button>
-                  </div>
-                )}
-
-                {/* Smart PII / Link Safety Nudge */}
-                <SafetyComposerNudge
-                  detection={chatSafetyDetection}
-                  dismissed={Boolean(
-                    chatSafetyDetection && dismissedSafetyKind === chatSafetyDetection.kind
-                  )}
-                  onDismiss={() =>
-                    chatSafetyDetection && setDismissedSafetyKind(chatSafetyDetection.kind)
-                  }
-                  className="mx-3 mt-2"
-                />
-
-                {/* Chat Input Area */}
-                <form onSubmit={handleSendMessage} className="p-3 sm:p-4 border-t border-white/[0.08] bg-[#0E0F17]/90 backdrop-blur-xl shrink-0">
-                  <div className="relative flex items-center bg-white/[0.04] border border-white/10 rounded-2xl p-1 focus-within:border-indigo-500/60 focus-within:bg-white/[0.07] focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-inner">
-                    <input
-                      type="text"
-                      value={inputMessage}
-                      onChange={handleChatInputChange}
-                      onKeyDown={(e) => {
-                        if (e.key === "Escape") {
-                          if (editingMessage) {
-                            setEditingMessage(null);
-                            setInputMessage("");
-                          } else if (replyingToMessage) {
-                            setReplyingToMessage(null);
-                          }
-                        }
-                      }}
-                      placeholder={
-                        editingMessage
-                          ? "Edit message..."
-                          : privateRecipient !== "all"
-                            ? `Whisper to ${privateRecipient}...`
-                            : "Send a message..."
-                      }
-                      maxLength={200}
-                      className="flex-1 bg-transparent px-3.5 py-2 text-xs sm:text-sm text-white placeholder-slate-500 focus:outline-none"
-                    />
-                    <button
-                      type="submit"
-                      disabled={!inputMessage.trim() || chatSafetyDetection?.severity === "block"}
-                      className="w-8 h-8 rounded-xl flex items-center justify-center bg-indigo-600 hover:bg-indigo-500 active:scale-95 disabled:bg-white/5 disabled:text-slate-600 text-white transition-all shadow-md shadow-indigo-600/20 cursor-pointer disabled:cursor-not-allowed"
-                      aria-label="Send message"
-                    >
-                      <Send size={14} className={inputMessage.trim() ? "translate-x-0.5 -translate-y-0.5 transition-transform" : ""} />
-                    </button>
-                  </div>
-                </form>
-              </div>
-            )}
-
-            {/* TAB 2: OTHER JUNCTIONS EXPLORER */}
-            {rightPanelTab === "junctions" && (
-              <div className="flex-1 flex flex-col overflow-hidden">
-                {/* Search Input */}
-                <div className="p-3 border-b border-white/[0.06] bg-white/[0.02]">
-                  <div className="relative">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
-                    <input
-                      type="text"
-                      value={junctionSearchQuery}
-                      onChange={(e) => setJunctionSearchQuery(e.target.value)}
-                      placeholder="Search live junctions..."
-                      className="w-full pl-8 pr-3 py-1.5 bg-black/40 border border-white/10 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500/50 transition-colors"
-                    />
-                  </div>
-                </div>
-
-                {/* Junctions List */}
-                <div className="flex-1 overflow-y-auto p-3 space-y-2.5">
-                  {isLoadingJunctions && otherJunctions.length === 0 ? (
-                    <div className="flex items-center justify-center h-48 text-slate-500 text-xs">
-                      <span className="w-4 h-4 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mr-2" />
-                      Scanning active voice junctions...
-                    </div>
-                  ) : otherJunctions.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center h-52 text-center px-4 text-slate-500">
-                      <div className="w-12 h-12 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center text-slate-400 mb-2.5">
-                        <Radio size={22} />
-                      </div>
-                      <h4 className="text-xs font-semibold text-slate-300">No Other Public Junctions</h4>
-                      <p className="text-[11px] text-slate-500 mt-1 max-w-[200px]">
-                        You are currently in the only active public voice junction.
-                      </p>
-                    </div>
-                  ) : (
-                    otherJunctions
-                      .filter((j) =>
-                        j.name.toLowerCase().includes(junctionSearchQuery.toLowerCase()) ||
-                        j.category.toLowerCase().includes(junctionSearchQuery.toLowerCase()) ||
-                        (j.tags && j.tags.some((t) => t.toLowerCase().includes(junctionSearchQuery.toLowerCase())))
-                      )
-                      .sort((a, b) => {
-                        const countA = a.participants?.length ?? a.currentCount ?? 0;
-                        const countB = b.participants?.length ?? b.currentCount ?? 0;
-                        if (countB !== countA) return countB - countA;
-                        return a.name.localeCompare(b.name);
-                      })
-                      .map((j) => {
-                        const jCount = j.participants?.length ?? j.currentCount;
-                        const maxCap = j.maxParticipants || 10;
-                        const isOccupied = jCount > 0;
-                        const isSwitching = isSwitchingRoomId === j.id;
-
-                        return (
-                          <div
-                            key={j.id}
-                            className={`p-3.5 rounded-2xl border transition-all duration-200 ${isOccupied
-                              ? "bg-white/[0.04] hover:bg-white/[0.07] border-white/10 hover:border-indigo-500/30"
-                              : "bg-white/[0.02] border-white/5 opacity-80 hover:opacity-100"
-                              }`}
-                          >
-                            <div className="flex items-start justify-between gap-2 mb-2">
-                              <div className="min-w-0">
-                                <h4 className="text-xs font-bold text-white truncate max-w-[190px]">
-                                  {j.name}
-                                </h4>
-                                <span className="text-[10px] font-medium text-slate-400 capitalize">
-                                  {j.category}
-                                </span>
-                              </div>
-
-                              {/* Live Occupancy Status Badge */}
-                              <div
-                                className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold shrink-0 ${isOccupied
-                                  ? "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
-                                  : "bg-white/5 text-slate-400 border border-white/10"
+                                className={`w-full px-3 py-2 rounded-xl text-left text-xs font-semibold flex items-center justify-between transition-colors cursor-pointer ${isSelected
+                                  ? "bg-indigo-600/20 text-indigo-300 border border-indigo-500/30"
+                                  : "text-slate-300 hover:text-white hover:bg-white/5"
                                   }`}
                               >
-                                <span
-                                  className={`w-1.5 h-1.5 rounded-full ${isOccupied ? "bg-emerald-400 animate-pulse shadow-[0_0_6px_rgba(52,211,153,0.8)]" : "bg-slate-500"
-                                    }`}
-                                />
-                                <span>
-                                  {jCount}/{maxCap} {isOccupied ? "live" : "empty"}
-                                </span>
-                              </div>
-                            </div>
+                                <span className="truncate">{p.name}</span>
+                                {isSelected && <Check size={14} className="text-indigo-400" />}
+                              </button>
+                            );
+                          })}
+                      </div>
+                    )}
+                  </div>
 
-                            {/* Avatars Preview if participants exist */}
-                            {j.participants && j.participants.length > 0 && (
-                              <div className="flex items-center gap-1 mb-2.5">
-                                <div className="flex -space-x-1.5 overflow-hidden">
-                                  {j.participants.slice(0, 4).map((p, idx) => (
-                                    <div
-                                      key={p.id || idx}
-                                      className="w-5 h-5 rounded-full border border-black/40 overflow-hidden bg-slate-800"
-                                      title={p.name}
-                                    >
-                                      <UserAvatar avatar={p.avatar} color={p.color} size="sm" className="!w-full !h-full" />
-                                    </div>
-                                  ))}
-                                </div>
-                                <span className="text-[10px] text-slate-400 ml-1.5">
-                                  {j.participants[0]?.name}
-                                  {j.participants.length > 1 && ` +${j.participants.length - 1} more`}
-                                </span>
-                              </div>
-                            )}
+                  {/* Feature: Show msgs / Not show msgs Toggle */}
+                  <button
+                    type="button"
+                    onClick={toggleShowInRoomPopups}
+                    className={`flex items-center gap-1.5 px-3 py-2 rounded-2xl border text-xs font-medium transition-all cursor-pointer shrink-0 active:scale-95 ${showInRoomPopups
+                      ? "bg-white/10 text-white border-white/20 hover:bg-white/15"
+                      : "bg-transparent text-slate-400 border-white/10 hover:text-slate-200 hover:bg-white/5"
+                      }`}
+                    title={
+                      showInRoomPopups
+                        ? "Side pop-up messages are ON (Click to set Not show msgs)"
+                        : "Side pop-up messages are OFF (Click to set Show msgs)"
+                    }
+                  >
+                    {showInRoomPopups ? (
+                      <>
+                        <Eye size={13} className="text-slate-200" />
+                        <span>Show msgs</span>
+                        <span className="w-1.5 h-1.5 rounded-full bg-white/70" />
+                      </>
+                    ) : (
+                      <>
+                        <EyeOff size={13} className="text-slate-500" />
+                        <span>Not show msgs</span>
+                        <span className="w-1.5 h-1.5 rounded-full bg-slate-600" />
+                      </>
+                    )}
+                  </button>
+                </div>
 
-                            {/* Tags */}
-                            {j.tags && j.tags.length > 0 && (
-                              <div className="flex flex-wrap gap-1 mb-3">
-                                {j.tags.slice(0, 3).map((tag, tIdx) => (
-                                  <span
-                                    key={tIdx}
-                                    className="px-1.5 py-0.2 rounded-md bg-white/5 text-[9px] text-slate-400 font-medium"
-                                  >
-                                    #{tag}
-                                  </span>
-                                ))}
-                              </div>
-                            )}
+                {/* Status helper banner */}
+                <div className="flex items-center justify-between px-1 text-[10px] text-slate-400">
+                  <span className="truncate">
+                    {showInRoomPopups
+                      ? "Pop-up previews active when chat is closed"
+                      : "Pop-up previews hidden"}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <p className="text-[11px] text-slate-400 flex items-center justify-between">
+                <span>Shift directly between active junctions</span>
+                <span className="text-indigo-300 font-semibold">{otherJunctions.length} available</span>
+              </p>
+            )}
+          </div>
 
-                            {/* Switch Room Action Button */}
+          {/* TAB 1: WHISPER CHAT */}
+          {rightPanelTab === "chat" && (
+            <div className="flex-1 flex flex-col min-h-0 relative overflow-hidden">
+              <RotatingVibeBanner />
+              {/* Chat Messages Log */}
+              <div
+                ref={chatScrollContainerRef}
+                onScroll={handleChatScroll}
+                className="flex-1 p-3 sm:p-4 overflow-y-auto space-y-3.5 scroll-smooth flex flex-col"
+              >
+                {visibleChatMessages.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center m-auto text-center py-8 px-4 select-none animate-in fade-in zoom-in-95 duration-200">
+                    <div className="w-12 h-12 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 mb-3 shadow-lg shadow-indigo-500/5">
+                      <MessageSquare size={22} />
+                    </div>
+                    <span className="text-sm font-semibold text-slate-200">Start your conversation</span>
+                    <p className="text-xs text-slate-400 mt-1 max-w-[220px] leading-relaxed">
+                      Send a message to the room or whisper privately to any user.
+                    </p>
+                  </div>
+                ) : visibleChatMessages.map((msg) => {
+                  // System Announcement Card
+                  if (msg.senderId === "system") {
+                    return (
+                      <div key={msg.id} className="w-full flex justify-center py-2 px-1">
+                        <div className="max-w-[95%] px-3.5 py-2.5 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-200 text-xs text-center flex items-center gap-2.5 shadow-sm">
+                          <Sparkles size={14} className="text-indigo-400 shrink-0" />
+                          <p className="leading-relaxed font-medium">{msg.text}</p>
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  const isMe = isLocalIdentity(msg.senderName) || (!!msg.senderId && (msg.senderId === guest.id || (!!user?.id && msg.senderId === user.id)));
+                  const isPrivate = msg.targetIdentity !== undefined;
+                  const senderParticipant = participants.find((p) => p.identity === msg.senderName);
+                  const senderRole = isMe ? myPlatformRole : (senderParticipant?.userRole || undefined);
+
+                  return (
+                    <div key={msg.id} className={`group/msg relative flex flex-col ${isMe ? 'items-end' : 'items-start'} py-1`}>
+                      {/* Sender Header for Incoming Messages */}
+                      {!isMe && (
+                        <div className="flex items-center gap-1.5 mb-1 pl-1">
+                          <div className="w-5 h-5 rounded-full overflow-hidden shrink-0 border border-white/10 bg-slate-800">
+                            <UserAvatar avatar={msg.senderAvatar} size="sm" className="!w-full !h-full" badgeRole={senderRole} />
+                          </div>
+                          <span className="text-[11px] font-semibold text-slate-300">{msg.senderName}</span>
+                          {isPrivateRoom && isParticipantHost(senderParticipant) && (
+                            <span className="flex items-center gap-0.5 px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                              <Shield size={8} className="fill-amber-400/40" /> Host
+                            </span>
+                          )}
+                          {senderRole && senderRole !== "user" && (
+                            <RoleBadge role={senderRole} size="xs" />
+                          )}
+                          {isPrivate && (
+                            <span className="flex items-center gap-0.5 px-1.5 py-0.2 rounded text-[9px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                              <Lock size={9} /> Whisper
+                            </span>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Header for own whisper */}
+                      {isMe && isPrivate && (
+                        <div className="flex items-center gap-1 mb-1 pr-1 text-[10px] font-bold text-purple-300 uppercase tracking-wider">
+                          <Lock size={10} /> Whisper to {msg.targetIdentity}
+                        </div>
+                      )}
+
+                      {/* Quoted Message Preview if Reply */}
+                      {msg.replyTo && (
+                        <div className={`mb-1 px-3 py-1.5 rounded-xl border-l-2 max-w-[85%] text-xs flex flex-col ${isMe
+                          ? 'bg-indigo-950/40 border-indigo-400 text-indigo-200'
+                          : 'bg-black/30 border-purple-400 text-purple-200'
+                          }`}>
+                          <span className="text-[10px] font-bold opacity-80 flex items-center gap-1">
+                            <Reply size={10} /> Replying to {msg.replyTo.senderName}
+                          </span>
+                          <span className="truncate opacity-75 italic text-[11px]">
+                            &ldquo;{msg.replyTo.text}&rdquo;
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Bubble Container with Non-Overlapping Action Toolbar Beside It */}
+                      <div className="relative group/bubble max-w-[85%] flex items-center">
+                        {/* Action Bar for isMe: Placed to the LEFT of the bubble in open row space */}
+                        {isMe && (
+                          <div className="absolute right-full mr-2.5 top-1/2 -translate-y-1/2 opacity-0 group-hover/msg:opacity-100 transition-all duration-150 flex items-center gap-1 bg-[#141622]/95 border border-white/10 rounded-full px-1.5 py-1 shadow-2xl backdrop-blur-xl z-20 pointer-events-none group-hover/msg:pointer-events-auto">
                             <button
                               type="button"
-                              disabled={isSwitching || !!isSwitchingRoomId}
-                              onClick={() => handleShiftJunction(j.id, j.name)}
-                              className="w-full py-1.5 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 active:scale-98 disabled:bg-indigo-900/50 disabled:text-indigo-300/50 text-white text-xs font-semibold flex items-center justify-center gap-1.5 shadow-md shadow-indigo-600/20 transition-all cursor-pointer disabled:cursor-wait"
+                              onClick={() => {
+                                setReplyingToMessage(msg);
+                                setEditingMessage(null);
+                              }}
+                              className="w-6 h-6 rounded-full text-slate-400 hover:text-white hover:bg-white/15 flex items-center justify-center transition-colors cursor-pointer"
+                              title="Reply"
+                              aria-label="Reply"
                             >
-                              {isSwitching ? (
-                                <>
-                                  <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                                  <span>Switching...</span>
-                                </>
-                              ) : (
-                                <>
-                                  <LogIn size={13} />
-                                  <span>Switch to this Junction</span>
-                                </>
-                              )}
+                              <Reply size={12} />
+                            </button>
+                            {/* 5-minute limit message edit */}
+                            {isMe && (Date.now() - (msg.timestamp || 0) <= 5 * 60 * 1000) && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingMessage(msg);
+                                  setInputMessage(msg.text);
+                                  setReplyingToMessage(null);
+                                }}
+                                className="w-6 h-6 rounded-full text-slate-400 hover:text-amber-300 hover:bg-amber-400/15 flex items-center justify-center transition-colors cursor-pointer"
+                                title="Edit message (within 5 min)"
+                                aria-label="Edit"
+                              >
+                                <Edit2 size={12} />
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteMessage(msg.id)}
+                              className="w-6 h-6 rounded-full text-slate-400 hover:text-rose-400 hover:bg-rose-400/15 flex items-center justify-center transition-colors cursor-pointer"
+                              title="Delete message"
+                              aria-label="Delete"
+                            >
+                              <Trash2 size={12} />
                             </button>
                           </div>
-                        );
-                      })
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
+                        )}
 
-          {/* Floating Bottom Audio Dock Controls */}
-          <div className="fixed bottom-3 sm:bottom-6 inset-x-0 z-50 flex flex-col items-center pointer-events-none pb-[env(safe-area-inset-bottom)]">
-            {/* Floating Friends Emoji Reaction Picker - Always directly above the dock, never clipped */}
-            {isReactionsOpen && (
-              <div className="pointer-events-auto mb-2.5 sm:mb-3.5">
-                <FriendReactionPicker
-                  isOpen={isReactionsOpen}
-                  onClose={() => setIsReactionsOpen(false)}
-                  onSelectReaction={handleSendReaction}
-                />
-              </div>
-            )}
+                        {/* Message Bubble */}
+                        <div className={`
+                    px-4 py-2.5 text-[13.5px] leading-relaxed shadow-lg backdrop-blur-md break-words transition-all
+                    ${isMe
+                            ? (isPrivate
+                              ? 'rounded-2xl rounded-tr-xs text-white bg-gradient-to-br from-purple-600 to-fuchsia-600 shadow-purple-600/25'
+                              : 'rounded-2xl rounded-tr-xs text-white bg-gradient-to-br from-indigo-600 to-indigo-500 shadow-indigo-600/25')
+                            : (isPrivate
+                              ? 'rounded-2xl rounded-tl-xs border border-purple-500/30 bg-[#251532]/90 text-purple-100 shadow-purple-950/20'
+                              : 'rounded-2xl rounded-tl-xs border border-white/[0.08] bg-[#181924]/90 text-slate-100 shadow-black/20')
+                          }
+                  `}>
+                          <SafeMessageText text={msg.text} isMe={isMe} />
+                          {msg.isEdited && (
+                            <span className="text-[10px] opacity-70 ml-1.5 italic select-none">
+                              (edited)
+                            </span>
+                          )}
+                        </div>
 
-            <div className="pointer-events-auto p-1 sm:p-2 px-2 sm:px-4 rounded-full bg-[#0E0F17]/90 backdrop-blur-3xl border border-white/15 shadow-[0_16px_50px_rgba(0,0,0,0.85),inset_0_1px_1px_rgba(255,255,255,0.18)] flex items-center gap-1.5 sm:gap-3 max-w-[98vw] overflow-x-auto [&::-webkit-scrollbar]:hidden">
-              {/* Mute / Unmute Mic (Hero Circular Voice Call Button) */}
-              <button
-                onClick={handleToggleMic}
-                disabled={isMutedByMod}
-                className={`w-11 h-11 sm:w-12 sm:h-12 rounded-full flex items-center justify-center transition-all duration-200 hover:scale-105 active:scale-90 cursor-pointer ${isMutedByMod
-                  ? "bg-rose-950/80 text-rose-400 border border-rose-800/80 cursor-not-allowed opacity-80"
-                  : isMuted
-                    ? "bg-gradient-to-tr from-rose-600 to-rose-500 hover:from-rose-500 hover:to-rose-400 text-white shadow-[0_4px_18px_rgba(244,63,94,0.45)] ring-2 ring-rose-400/30"
-                    : "bg-gradient-to-tr from-emerald-500 to-teal-400 hover:from-emerald-400 text-white shadow-[0_4px_20px_rgba(16,185,129,0.5)] ring-2 ring-emerald-400/40 animate-[pulse_2s_cubic-bezier(0.4,0,0.6,1)_infinite]"
-                  }`}
-                title={isMutedByMod ? "Muted by Moderation" : isMuted ? "Unmute Mic" : "Mute Mic"}
-              >
-                {isMuted || isMutedByMod ? <MicOff size={19} /> : <Mic size={19} />}
-              </button>
-
-              {/* Deafen / Listen */}
-              <button
-                onClick={() => setIsDeafened(!isDeafened)}
-                className={`w-10 h-10 sm:w-11 sm:h-11 rounded-full flex items-center justify-center transition-all duration-200 hover:scale-105 active:scale-90 cursor-pointer ${isDeafened
-                  ? "bg-rose-600 text-white shadow-[0_4px_16px_rgba(244,63,94,0.45)] ring-2 ring-rose-400/30"
-                  : "bg-white/10 hover:bg-white/20 text-slate-200 hover:text-white border border-white/10 backdrop-blur-md"
-                  }`}
-                title={isDeafened ? "Undeafen Audio" : "Deafen Audio"}
-              >
-                {isDeafened ? <VolumeX size={18} /> : <Volume2 size={18} />}
-              </button>
-
-              <div className="h-6 w-px bg-gradient-to-b from-transparent via-white/25 to-transparent mx-0.5" />
-
-              {/* Reactions Button */}
-              <button
-                data-reaction-trigger="true"
-                onClick={() => setIsReactionsOpen(!isReactionsOpen)}
-                className={`w-10 h-10 sm:w-11 sm:h-11 rounded-full flex items-center justify-center transition-all duration-200 hover:scale-105 active:scale-90 cursor-pointer ${isReactionsOpen
-                  ? "bg-indigo-600 text-white shadow-[0_4px_16px_rgba(99,102,241,0.5)] ring-2 ring-indigo-400/40"
-                  : "bg-white/10 hover:bg-white/20 text-slate-200 hover:text-white border border-white/10 backdrop-blur-md"
-                  }`}
-                title="Reactions (Friends & Close Friends)"
-              >
-                <Smile size={18} />
-              </button>
-
-              {/* Chat Toggle Button */}
-              <button
-                onClick={() => {
-                  if (isChatOpen && rightPanelTab === "chat") {
-                    setIsChatOpen(false);
-                  } else {
-                    setRightPanelTab("chat");
-                    setIsChatOpen(true);
-                    setInRoomPopups([]);
-                  }
-                }}
-                className={`w-10 h-10 sm:w-11 sm:h-11 rounded-full flex items-center justify-center transition-all duration-200 hover:scale-105 active:scale-90 cursor-pointer relative ${isChatOpen && rightPanelTab === "chat"
-                  ? "bg-indigo-600 text-white shadow-[0_4px_16px_rgba(99,102,241,0.5)] ring-2 ring-indigo-400/40"
-                  : "bg-white/10 hover:bg-white/20 text-slate-200 hover:text-white border border-white/10 backdrop-blur-md"
-                  }`}
-                title={showInRoomPopups ? "Room Chat (Show msgs active)" : "Room Chat (Not show msgs)"}
-              >
-                <MessageSquare size={18} />
-                {chatMessages.length > lastReadChatCount && (!isChatOpen || rightPanelTab !== "chat") && (
-                  <span className="absolute top-0.5 right-0.5 w-2.5 h-2.5 bg-indigo-400 rounded-full ring-2 ring-[#0E0F17] animate-pulse" />
-                )}
-              </button>
-
-              {/* Other Junctions Explorer Toggle Button */}
-              <button
-                onClick={() => {
-                  if (isChatOpen && rightPanelTab === "junctions") {
-                    setIsChatOpen(false);
-                  } else {
-                    setRightPanelTab("junctions");
-                    setIsChatOpen(true);
-                    fetchOtherJunctions();
-                  }
-                }}
-                className={`w-10 h-10 sm:w-11 sm:h-11 rounded-full flex items-center justify-center transition-all duration-200 hover:scale-105 active:scale-90 cursor-pointer relative ${isChatOpen && rightPanelTab === "junctions"
-                  ? "bg-indigo-600 text-white shadow-[0_4px_16px_rgba(99,102,241,0.5)] ring-2 ring-indigo-400/40"
-                  : "bg-white/10 hover:bg-white/20 text-slate-200 hover:text-white border border-white/10 backdrop-blur-md"
-                  }`}
-                title="Switch Junction"
-              >
-                <ArrowLeftRight size={18} />
-                {otherJunctions.some((j) => j.currentCount > 0) && (
-                  <span className="absolute top-0.5 right-0.5 w-2.5 h-2.5 bg-emerald-400 rounded-full ring-2 ring-[#0E0F17] animate-pulse shadow-[0_0_8px_rgba(52,211,153,0.8)]" />
-                )}
-              </button>
-
-              <div className="h-6 w-px bg-gradient-to-b from-transparent via-white/25 to-transparent mx-0.5" />
-
-              {/* Disconnect & Leave Junction (Hero Circular End Call Button) */}
-              <button
-                onClick={() => setIsLeaveModalOpen(true)}
-                className="w-11 h-11 sm:w-12 sm:h-12 rounded-full bg-gradient-to-tr from-rose-600 via-rose-600 to-red-500 hover:from-rose-500 hover:to-red-400 text-white shadow-[0_4px_20px_rgba(244,63,94,0.45)] ring-2 ring-rose-400/30 flex items-center justify-center active:scale-90 hover:scale-105 transition-all duration-200 cursor-pointer"
-                title="Leave Junction"
-              >
-                <PhoneOff size={19} />
-              </button>
-            </div>
-          </div>
-
-
-          {/* Profile Preview Popover */}
-          <ProfilePreviewModal
-            isOpen={previewParticipant !== null}
-            onClose={() => setPreviewParticipant(null)}
-            participant={previewParticipant}
-          />
-
-          {/* Anchored Participant Dropdown Menu */}
-          {menuAnchor && (() => {
-            const target = participants.find((p) => p.identity === menuAnchor.participantIdentity);
-            if (!target) return null;
-
-            // Never open dropdown menu for self
-            const isTargetLocal = isLocalParticipant(target);
-            if (isTargetLocal) return null;
-
-            const targetRole = target.userRole || "user";
-            const targetVolume = target
-              ? (participantVolumes[target.identity] ??
-                participantVolumes[target.identity?.toLowerCase()] ??
-                participantVolumes[target.username || ""] ??
-                participantVolumes[(target.username || "").toLowerCase()] ??
-                participantVolumes[target.name || ""] ??
-                participantVolumes[(target.name || "").toLowerCase()] ??
-                100)
-              : 100;
-
-            const canStaffKick = isStaff && (
-              isSuperAdmin ||
-              (isAdmin && targetRole !== "super_admin" && targetRole !== "admin") ||
-              (isManager && targetRole === "user")
-            );
-
-            const canHostKick = isPrivateRoom && isHost && targetRole !== "super_admin" && targetRole !== "admin";
-            const canKick = canStaffKick || canHostKick;
-
-            const canStaffBan = isStaff && targetRole !== "super_admin" && (
-              isSuperAdmin ||
-              (isAdmin && targetRole !== "admin") ||
-              (isManager && targetRole === "user")
-            );
-
-            const canStaffSuspendAccount = (isAdmin || isSuperAdmin) && targetRole !== "super_admin" && targetRole !== "admin";
-
-            const canMute = (isStaff && (
-              isSuperAdmin ||
-              (isAdmin && targetRole !== "super_admin") ||
-              (isManager && targetRole !== "super_admin" && targetRole !== "admin")
-            )) || (isPrivateRoom && isHost && targetRole !== "super_admin" && targetRole !== "admin");
-
-            const closeMenu = () => {
-              setMenuAnchor(null);
-              setActiveModMenuParticipant(null);
-            };
-
-            return (
-              <>
-                {/* Transparent backdrop overlay to dismiss on outside click */}
-                <div
-                  className="fixed inset-0 z-[90] cursor-default bg-black/10 touch-manipulation"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    closeMenu();
-                  }}
-                  onTouchStart={(e) => {
-                    e.stopPropagation();
-                    closeMenu();
-                  }}
-                />
-
-                {/* Anchored Dropdown Menu */}
-                <div
-                  style={{
-                    top: menuAnchor.top !== undefined ? `${menuAnchor.top}px` : undefined,
-                    bottom: menuAnchor.bottom !== undefined ? `${menuAnchor.bottom}px` : undefined,
-                    left: `${menuAnchor.left}px`,
-                  }}
-                  onClick={(e) => e.stopPropagation()}
-                  className="fixed w-[216px] max-w-[calc(100vw-20px)] rounded-2xl bg-[#12131F]/98 border border-white/20 shadow-2xl p-1.5 z-[100] flex flex-col gap-1 text-left animate-fadeIn backdrop-blur-2xl max-h-[min(80vh,420px)] overflow-y-auto overscroll-contain touch-manipulation"
-                >
-                  {/* Header Info */}
-                  <div className="px-2 py-1.5 border-b border-white/10 flex items-center justify-between gap-1.5">
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      <div className="w-5 h-5 rounded-full overflow-hidden shrink-0">
-                        <UserAvatar avatar={target.avatar} color={target.color} size="sm" className="!w-5 !h-5" />
-                      </div>
-                      <div className="min-w-0">
-                        <div className="text-xs font-bold text-white truncate">{target.name}</div>
-                        {target.username && target.username.toLowerCase() !== target.name.toLowerCase() && (
-                          <div className="text-[10px] text-slate-400 font-semibold truncate">@{target.username}</div>
+                        {/* Action Bar for other users: Placed to the RIGHT of the bubble in open row space */}
+                        {!isMe && (
+                          <div className="absolute left-full ml-2.5 top-1/2 -translate-y-1/2 opacity-0 group-hover/msg:opacity-100 transition-all duration-150 flex items-center gap-1 bg-[#141622]/95 border border-white/10 rounded-full px-1.5 py-1 shadow-2xl backdrop-blur-xl z-20 pointer-events-none group-hover/msg:pointer-events-auto">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setReplyingToMessage(msg);
+                                setEditingMessage(null);
+                              }}
+                              className="w-6 h-6 rounded-full text-slate-400 hover:text-white hover:bg-white/15 flex items-center justify-center transition-colors cursor-pointer"
+                              title="Reply"
+                              aria-label="Reply"
+                            >
+                              <Reply size={12} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteMessage(msg.id)}
+                              className="w-6 h-6 rounded-full text-slate-400 hover:text-rose-400 hover:bg-rose-400/15 flex items-center justify-center transition-colors cursor-pointer"
+                              title="Delete message"
+                              aria-label="Delete"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
                         )}
                       </div>
-                    </div>
-                    {isPrivateRoom && isParticipantHost(target) ? (
-                      <span className="px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-400/40 text-[9px] font-bold">Host</span>
-                    ) : (
-                      <RoleBadge role={targetRole} size="xs" showLabel={false} />
-                    )}
-                  </div>
 
-                  {/* Section 1: Room Voice Control */}
-                  {canMute && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        handleModerateParticipant(target.identity, target.isMutedByMod ? "unmute" : "mute");
-                        closeMenu();
-                      }}
-                      className="w-full px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-slate-200 hover:bg-white/10 flex items-center gap-2 transition-colors cursor-pointer"
-                    >
-                      {target.isMutedByMod ? (
-                        <Mic size={13} className="text-emerald-400 shrink-0" />
-                      ) : (
-                        <MicOff size={13} className="text-amber-400 shrink-0" />
-                      )}
-                      <span>{target.isMutedByMod ? "Allow Mic (Remove Mod Mute)" : "Force Mute"}</span>
-                    </button>
-                  )}
-
-                  {/* Kick from Room */}
-                  {canKick && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const confirmed = window.confirm(
-                          `Kick @${target.name || target.identity} from this room?`
-                        );
-                        if (!confirmed) return;
-                        handleModerateParticipant(target.identity, "kick");
-                        closeMenu();
-                      }}
-                      className="w-full px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-rose-400 hover:bg-rose-950/60 flex items-center gap-2 transition-colors cursor-pointer"
-                    >
-                      <PhoneOff size={13} className="shrink-0" />
-                      <span>{isPrivateRoom ? "Kick from Room" : "Kick from Junction"}</span>
-                    </button>
-                  )}
-
-                  {/* Ban from Room - Official Staff Only (Admin/Super Admin only) */}
-                  {canStaffBan && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const confirmed = window.confirm(
-                          `Ban @${target.identity} from this junction?\nThey will be disconnected and blocked from re-entering this room.`
-                        );
-                        if (!confirmed) return;
-                        handleModerateParticipant(target.identity, "ban");
-                        closeMenu();
-                      }}
-                      className="w-full px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-rose-300 hover:bg-rose-950/70 flex items-center gap-2 transition-colors cursor-pointer"
-                    >
-                      <UserX size={13} className="text-rose-400 shrink-0" />
-                      <span>Ban from Junction</span>
-                    </button>
-                  )}
-
-                  {/* Suspend Account - Admins & Super Admin Only */}
-                  {canStaffSuspendAccount && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        handlePlatformBanParticipant(target);
-                        closeMenu();
-                      }}
-                      className="w-full px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-rose-300 hover:bg-rose-950/80 flex items-center gap-2 transition-colors cursor-pointer border border-rose-500/20"
-                    >
-                      <Ban size={13} className="text-rose-400 shrink-0" />
-                      <span>Suspend Account</span>
-                    </button>
-                  )}
-
-                  {/* Section 2: Staff Hierarchy Management */}
-                  {isAdmin && (
-                    <div className="pt-1 mt-0.5 border-t border-white/10 flex flex-col gap-0.5">
-                      <span className="px-2 py-0.5 text-[9px] font-extrabold uppercase tracking-wider text-slate-400">
-                        Staff Hierarchy
+                      <span className="text-[9.5px] text-slate-500 mt-1 px-1 select-none">
+                        {new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                       </span>
-
-                      {/* Super Admin: Appoint Admin */}
-                      {isSuperAdmin && targetRole !== "admin" && targetRole !== "super_admin" && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            handleSetRoleParticipant(target, "admin");
-                            closeMenu();
-                          }}
-                          className="w-full px-2 py-1.5 rounded-lg text-[11px] font-semibold text-amber-300 hover:bg-amber-950/60 flex items-center gap-2 transition-colors cursor-pointer"
-                        >
-                          <Crown size={13} className="text-amber-400 shrink-0" />
-                          <span>Make Admin</span>
-                        </button>
-                      )}
-
-                      {/* Admin or Super Admin: Appoint Manager */}
-                      {isAdmin && targetRole === "user" && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            handleSetRoleParticipant(target, "manager");
-                            closeMenu();
-                          }}
-                          className="w-full px-2 py-1.5 rounded-lg text-[11px] font-semibold text-cyan-300 hover:bg-cyan-950/60 flex items-center gap-2 transition-colors cursor-pointer"
-                        >
-                          <Zap size={13} className="text-cyan-400 shrink-0" />
-                          <span>Make Manager</span>
-                        </button>
-                      )}
-
-                      {/* Super Admin: Demote Admin */}
-                      {isSuperAdmin && targetRole === "admin" && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            handleSetRoleParticipant(target, "user");
-                            closeMenu();
-                          }}
-                          className="w-full px-2 py-1.5 rounded-lg text-[11px] font-semibold text-rose-400 hover:bg-rose-950/60 flex items-center gap-2 transition-colors cursor-pointer"
-                        >
-                          <UserMinus size={13} className="shrink-0" />
-                          <span>Demote to User</span>
-                        </button>
-                      )}
-
-                      {/* Admin or Super Admin: Demote Manager */}
-                      {isAdmin && targetRole === "manager" && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            handleSetRoleParticipant(target, "user");
-                            closeMenu();
-                          }}
-                          className="w-full px-2 py-1.5 rounded-lg text-[11px] font-semibold text-rose-400 hover:bg-rose-950/60 flex items-center gap-2 transition-colors cursor-pointer"
-                        >
-                          <UserMinus size={13} className="shrink-0" />
-                          <span>Demote Manager</span>
-                        </button>
-                      )}
-
-                      {/* Super Admin: Delete Account Permanently */}
-                      {isSuperAdmin && targetRole !== "super_admin" && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            handleDeleteAccountParticipant(target);
-                            closeMenu();
-                          }}
-                          className="w-full px-2 py-1.5 rounded-lg text-[11px] font-semibold text-rose-400 hover:bg-rose-900/60 flex items-center gap-2 transition-colors cursor-pointer border border-rose-600/30"
-                        >
-                          <Trash2 size={13} className="shrink-0" />
-                          <span>Delete Account</span>
-                        </button>
-                      )}
                     </div>
-                  )}
+                  );
+                })}
+                <div ref={chatMessagesEndRef} />
+              </div>
 
-                  {/* Section 4: Inline Volume Slider */}
-                  <div className="px-2.5 py-2 border-t border-white/10 flex items-center gap-2">
-                    <button
-                      type="button"
-                      title={targetVolume === 0 ? "Unmute user" : "Mute user"}
-                      onClick={() => {
-                        handleVolumeChange(target, targetVolume === 0 ? 100 : 0);
-                      }}
-                      className="p-1 rounded-md text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer shrink-0"
-                    >
-                      {targetVolume === 0 ? (
-                        <VolumeX size={14} className="text-rose-400" />
-                      ) : targetVolume <= 50 ? (
-                        <Volume1 size={14} className="text-slate-300" />
-                      ) : (
-                        <Volume2 size={14} className="text-indigo-400" />
-                      )}
-                    </button>
-                    <input
-                      type="range"
-                      min="0"
-                      max="100"
-                      step="5"
-                      value={targetVolume}
-                      onChange={(e) => handleVolumeChange(target, Number(e.target.value))}
-                      className="w-full h-1.5 bg-white/20 rounded-lg appearance-none cursor-pointer accent-indigo-500"
-                    />
-                    <span className="text-[10px] text-slate-300 font-mono w-7 text-right shrink-0">
-                      {targetVolume}%
-                    </span>
-                  </div>
-
-                  {/* Section 5: Profile & Report */}
-                  <div className="pt-1 mt-0.5 border-t border-white/10 flex items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setPreviewParticipant(target);
-                        closeMenu();
-                      }}
-                      className="flex-1 px-2 py-1 rounded-lg text-[10px] font-semibold text-slate-300 hover:text-white hover:bg-white/10 flex items-center justify-center gap-1 transition-colors cursor-pointer"
-                    >
-                      <Users size={11} />
-                      <span>Profile</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setReportingTarget(target);
-                        setReportCategory("Inappropriate Audio");
-                        setReportReasonText("");
-                        closeMenu();
-                      }}
-                      className="px-2 py-1 rounded-lg text-[10px] font-semibold text-slate-400 hover:text-rose-400 hover:bg-white/10 flex items-center justify-center gap-1 transition-colors cursor-pointer"
-                    >
-                      <AlertCircle size={11} />
-                      <span>Report</span>
-                    </button>
-                  </div>
+              {/* Floating "Tap to Recent Chat" Down Arrow Button */}
+              {isScrolledUp && (
+                <div className="absolute bottom-20 right-4 sm:right-6 z-30 pointer-events-auto animate-in fade-in slide-in-from-bottom-2 duration-200">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      scrollChatToBottom("smooth");
+                      setIsScrolledUp(false);
+                      setNewMessagesWhileScrolledUp(0);
+                    }}
+                    className="group flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-indigo-600/95 hover:bg-indigo-600 active:scale-95 text-white text-xs font-semibold shadow-xl shadow-indigo-600/50 border border-indigo-400/40 backdrop-blur-xl transition-all cursor-pointer select-none"
+                    title="Scroll to recent chat"
+                    aria-label="Scroll to recent chat"
+                  >
+                    <span>Recent chat</span>
+                    <div className="w-4 h-4 rounded-full bg-white/20 flex items-center justify-center group-hover:translate-y-0.5 transition-transform">
+                      <ChevronDown size={13} className="text-white" />
+                    </div>
+                    {newMessagesWhileScrolledUp > 0 && (
+                      <span className="px-1.5 py-0.2 rounded-full bg-rose-500 text-white text-[10px] font-bold">
+                        {newMessagesWhileScrolledUp}
+                      </span>
+                    )}
+                  </button>
                 </div>
-              </>
-            );
-          })()}
+              )}
 
-          {/* Participant Report Modal with Required Reason */}
-          {reportingTarget && (
-            <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-fadeIn">
-              <div className="w-full max-w-md bg-[#131522] border border-white/15 rounded-3xl p-5 shadow-2xl flex flex-col gap-4 text-left">
-                {/* Modal Header */}
-                <div className="flex items-center justify-between pb-3 border-b border-white/10">
-                  <div className="flex items-center gap-2">
-                    <div className="w-9 h-9 rounded-xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-rose-400">
-                      <AlertCircle size={18} />
+              {/* Real-time Typing Indicator Bar */}
+              {activeTypingList.length > 0 && (
+                <div className="px-4 py-1.5 bg-[#0C0D14]/90 border-t border-white/[0.06] flex items-center gap-2 text-xs text-slate-400 shrink-0 select-none animate-in fade-in slide-in-from-bottom-1 duration-150">
+                  <div className="flex items-center gap-1 py-1 px-1.5 bg-indigo-500/10 rounded-full border border-indigo-500/20 shrink-0">
+                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce [animation-delay:-0.3s]" />
+                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce [animation-delay:-0.15s]" />
+                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce" />
+                  </div>
+                  <span className="truncate text-[11px] text-slate-300">
+                    {activeTypingList.length === 1 ? (
+                      <>
+                        <strong className="font-semibold text-indigo-300">
+                          {activeTypingList[0].name}
+                        </strong>{" "}
+                        {activeTypingList[0].isWhisper
+                          ? "is whispering..."
+                          : "is typing..."}
+                      </>
+                    ) : activeTypingList.length === 2 ? (
+                      <>
+                        <strong className="font-semibold text-indigo-300">
+                          {activeTypingList[0].name}
+                        </strong>{" "}
+                        and{" "}
+                        <strong className="font-semibold text-indigo-300">
+                          {activeTypingList[1].name}
+                        </strong>{" "}
+                        are typing...
+                      </>
+                    ) : (
+                      <>
+                        <strong className="font-semibold text-indigo-300">
+                          {activeTypingList[0].name}
+                        </strong>
+                        ,{" "}
+                        <strong className="font-semibold text-indigo-300">
+                          {activeTypingList[1].name}
+                        </strong>{" "}
+                        and {activeTypingList.length - 2} others are typing...
+                      </>
+                    )}
+                  </span>
+                </div>
+              )}
+
+              {/* Reply Context Banner */}
+              {replyingToMessage && (
+                <div className="px-3.5 py-2 bg-indigo-950/70 border-t border-indigo-500/30 flex items-center justify-between gap-2 shrink-0 animate-in fade-in duration-150">
+                  <div className="flex items-center gap-2 min-w-0 text-xs">
+                    <div className="w-5 h-5 rounded-full bg-indigo-500/20 flex items-center justify-center text-indigo-400 shrink-0">
+                      <Reply size={11} />
                     </div>
-                    <div>
-                      <h3 className="text-sm font-bold text-white">Report Participant</h3>
-                      <p className="text-[11px] text-slate-400">Reporting <span className="font-semibold text-rose-300">@{reportingTarget.name || reportingTarget.identity}</span></p>
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="text-indigo-300 font-semibold truncate">
+                        Replying to {replyingToMessage.senderName}:
+                      </span>
+                      <span className="text-slate-400 truncate italic text-[11px]">
+                        &ldquo;{replyingToMessage.text}&rdquo;
+                      </span>
                     </div>
                   </div>
                   <button
                     type="button"
-                    onClick={() => {
-                      setReportingTarget(null);
-                      setReportReasonText("");
-                    }}
-                    className="w-8 h-8 rounded-full bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+                    onClick={() => setReplyingToMessage(null)}
+                    className="w-6 h-6 rounded-full text-slate-400 hover:text-white hover:bg-white/10 flex items-center justify-center shrink-0 cursor-pointer"
+                    title="Cancel reply"
                   >
-                    <X size={16} />
+                    <X size={13} />
                   </button>
                 </div>
+              )}
 
-                {/* Common Category Chips */}
-                <div className="flex flex-col gap-1.5">
-                  <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                    Reason Category
-                  </label>
-                  <div className="flex flex-wrap gap-1.5">
-                    {[
-                      "Inappropriate Audio",
-                      "Harassment / Abuse",
-                      "Spam / Echo / Noise",
-                      "Hate Speech",
-                      "Underage Concern",
-                      "Other",
-                    ].map((cat) => (
-                      <button
-                        key={cat}
-                        type="button"
-                        onClick={() => setReportCategory(cat)}
-                        className={`px-2.5 py-1 rounded-full text-xs font-semibold transition-all cursor-pointer ${reportCategory === cat
-                          ? "bg-rose-500/25 text-rose-300 border border-rose-500/50 shadow-sm"
-                          : "bg-white/5 text-slate-400 border border-white/10 hover:bg-white/10 hover:text-slate-200"
-                          }`}
-                      >
-                        {cat}
-                      </button>
-                    ))}
+              {/* Edit Context Banner */}
+              {editingMessage && (
+                <div className="px-3.5 py-2 bg-amber-950/70 border-t border-amber-500/30 flex items-center justify-between gap-2 shrink-0 animate-in fade-in duration-150">
+                  <div className="flex items-center gap-2 min-w-0 text-xs">
+                    <div className="w-5 h-5 rounded-full bg-amber-500/20 flex items-center justify-center text-amber-400 shrink-0">
+                      <Edit2 size={11} />
+                    </div>
+                    <span className="text-amber-300 font-semibold truncate">
+                      Editing your message (allowed within 5 min &bull; Enter to save, Esc to cancel)
+                    </span>
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingMessage(null);
+                      setInputMessage("");
+                    }}
+                    className="w-6 h-6 rounded-full text-slate-400 hover:text-white hover:bg-white/10 flex items-center justify-center shrink-0 cursor-pointer"
+                    title="Cancel edit"
+                  >
+                    <X size={13} />
+                  </button>
                 </div>
+              )}
 
-                {/* Description Textarea (Required) */}
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex items-center justify-between">
-                    <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                      Detailed Reason <span className="text-rose-400">*</span>
-                    </label>
-                    <span className="text-[10px] text-slate-500 font-mono">Required</span>
-                  </div>
-                  <textarea
-                    value={reportReasonText}
-                    onChange={(e) => setReportReasonText(e.target.value)}
-                    placeholder="Please describe why you are reporting this participant (e.g. offensive language, loud disturbance)..."
-                    rows={3}
-                    className="w-full px-3 py-2.5 rounded-xl bg-black/40 border border-white/15 focus:border-rose-500/60 focus:ring-1 focus:ring-rose-500/50 text-white placeholder-slate-500 text-xs resize-none outline-none transition-all"
+              {/* Smart PII / Link Safety Nudge */}
+              <SafetyComposerNudge
+                detection={chatSafetyDetection}
+                dismissed={Boolean(
+                  chatSafetyDetection && dismissedSafetyKind === chatSafetyDetection.kind
+                )}
+                onDismiss={() =>
+                  chatSafetyDetection && setDismissedSafetyKind(chatSafetyDetection.kind)
+                }
+                className="mx-3 mt-2"
+              />
+
+              {/* Chat Input Area */}
+              <form onSubmit={handleSendMessage} className="p-3 sm:p-4 border-t border-white/[0.08] bg-[#0E0F17]/90 backdrop-blur-xl shrink-0">
+                <div className="relative flex items-center bg-white/[0.04] border border-white/10 rounded-2xl p-1 focus-within:border-indigo-500/60 focus-within:bg-white/[0.07] focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-inner">
+                  <input
+                    type="text"
+                    value={inputMessage}
+                    onChange={handleChatInputChange}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") {
+                        if (editingMessage) {
+                          setEditingMessage(null);
+                          setInputMessage("");
+                        } else if (replyingToMessage) {
+                          setReplyingToMessage(null);
+                        }
+                      }
+                    }}
+                    placeholder={
+                      editingMessage
+                        ? "Edit message..."
+                        : privateRecipient !== "all"
+                          ? `Whisper to ${privateRecipient}...`
+                          : "Send a message..."
+                    }
+                    maxLength={200}
+                    className="flex-1 bg-transparent px-3.5 py-2 text-xs sm:text-sm text-white placeholder-slate-500 focus:outline-none"
+                  />
+                  <button
+                    type="submit"
+                    disabled={!inputMessage.trim() || chatSafetyDetection?.severity === "block"}
+                    className="w-8 h-8 rounded-xl flex items-center justify-center bg-indigo-600 hover:bg-indigo-500 active:scale-95 disabled:bg-white/5 disabled:text-slate-600 text-white transition-all shadow-md shadow-indigo-600/20 cursor-pointer disabled:cursor-not-allowed"
+                    aria-label="Send message"
+                  >
+                    <Send size={14} className={inputMessage.trim() ? "translate-x-0.5 -translate-y-0.5 transition-transform" : ""} />
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+
+          {/* TAB 2: OTHER JUNCTIONS EXPLORER */}
+          {rightPanelTab === "junctions" && (
+            <div className="flex-1 flex flex-col overflow-hidden">
+              {/* Search Input */}
+              <div className="p-3 border-b border-white/[0.06] bg-white/[0.02]">
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+                  <input
+                    type="text"
+                    value={junctionSearchQuery}
+                    onChange={(e) => setJunctionSearchQuery(e.target.value)}
+                    placeholder="Search live junctions..."
+                    className="w-full pl-8 pr-3 py-1.5 bg-black/40 border border-white/10 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500/50 transition-colors"
                   />
                 </div>
+              </div>
 
-                {/* Action Buttons */}
-                <div className="flex items-center justify-end gap-2 pt-2 border-t border-white/10">
+              {/* Junctions List */}
+              <div className="flex-1 overflow-y-auto p-3 space-y-2.5">
+                {isLoadingJunctions && otherJunctions.length === 0 ? (
+                  <div className="flex items-center justify-center h-48 text-slate-500 text-xs">
+                    <span className="w-4 h-4 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mr-2" />
+                    Scanning active voice junctions...
+                  </div>
+                ) : otherJunctions.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center h-52 text-center px-4 text-slate-500">
+                    <div className="w-12 h-12 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center text-slate-400 mb-2.5">
+                      <Radio size={22} />
+                    </div>
+                    <h4 className="text-xs font-semibold text-slate-300">No Other Public Junctions</h4>
+                    <p className="text-[11px] text-slate-500 mt-1 max-w-[200px]">
+                      You are currently in the only active public voice junction.
+                    </p>
+                  </div>
+                ) : (
+                  otherJunctions
+                    .filter((j) =>
+                      j.name.toLowerCase().includes(junctionSearchQuery.toLowerCase()) ||
+                      j.category.toLowerCase().includes(junctionSearchQuery.toLowerCase()) ||
+                      (j.tags && j.tags.some((t) => t.toLowerCase().includes(junctionSearchQuery.toLowerCase())))
+                    )
+                    .sort((a, b) => {
+                      const countA = a.participants?.length ?? a.currentCount ?? 0;
+                      const countB = b.participants?.length ?? b.currentCount ?? 0;
+                      if (countB !== countA) return countB - countA;
+                      return a.name.localeCompare(b.name);
+                    })
+                    .map((j) => {
+                      const jCount = j.participants?.length ?? j.currentCount;
+                      const maxCap = j.maxParticipants || 10;
+                      const isOccupied = jCount > 0;
+                      const isSwitching = isSwitchingRoomId === j.id;
+
+                      return (
+                        <div
+                          key={j.id}
+                          className={`p-3.5 rounded-2xl border transition-all duration-200 ${isOccupied
+                            ? "bg-white/[0.04] hover:bg-white/[0.07] border-white/10 hover:border-indigo-500/30"
+                            : "bg-white/[0.02] border-white/5 opacity-80 hover:opacity-100"
+                            }`}
+                        >
+                          <div className="flex items-start justify-between gap-2 mb-2">
+                            <div className="min-w-0">
+                              <h4 className="text-xs font-bold text-white truncate max-w-[190px]">
+                                {j.name}
+                              </h4>
+                              <span className="text-[10px] font-medium text-slate-400 capitalize">
+                                {j.category}
+                              </span>
+                            </div>
+
+                            {/* Live Occupancy Status Badge */}
+                            <div
+                              className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold shrink-0 ${isOccupied
+                                ? "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+                                : "bg-white/5 text-slate-400 border border-white/10"
+                                }`}
+                            >
+                              <span
+                                className={`w-1.5 h-1.5 rounded-full ${isOccupied ? "bg-emerald-400 animate-pulse shadow-[0_0_6px_rgba(52,211,153,0.8)]" : "bg-slate-500"
+                                  }`}
+                              />
+                              <span>
+                                {jCount}/{maxCap} {isOccupied ? "live" : "empty"}
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Avatars Preview if participants exist */}
+                          {j.participants && j.participants.length > 0 && (
+                            <div className="flex items-center gap-1 mb-2.5">
+                              <div className="flex -space-x-1.5 overflow-hidden">
+                                {j.participants.slice(0, 4).map((p, idx) => (
+                                  <div
+                                    key={p.id || idx}
+                                    className="w-5 h-5 rounded-full border border-black/40 overflow-hidden bg-slate-800"
+                                    title={p.name}
+                                  >
+                                    <UserAvatar avatar={p.avatar} color={p.color} size="sm" className="!w-full !h-full" />
+                                  </div>
+                                ))}
+                              </div>
+                              <span className="text-[10px] text-slate-400 ml-1.5">
+                                {j.participants[0]?.name}
+                                {j.participants.length > 1 && ` +${j.participants.length - 1} more`}
+                              </span>
+                            </div>
+                          )}
+
+                          {/* Tags */}
+                          {j.tags && j.tags.length > 0 && (
+                            <div className="flex flex-wrap gap-1 mb-3">
+                              {j.tags.slice(0, 3).map((tag, tIdx) => (
+                                <span
+                                  key={tIdx}
+                                  className="px-1.5 py-0.2 rounded-md bg-white/5 text-[9px] text-slate-400 font-medium"
+                                >
+                                  #{tag}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+
+                          {/* Switch Room Action Button */}
+                          <button
+                            type="button"
+                            disabled={isSwitching || !!isSwitchingRoomId}
+                            onClick={() => handleShiftJunction(j.id, j.name)}
+                            className="w-full py-1.5 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 active:scale-98 disabled:bg-indigo-900/50 disabled:text-indigo-300/50 text-white text-xs font-semibold flex items-center justify-center gap-1.5 shadow-md shadow-indigo-600/20 transition-all cursor-pointer disabled:cursor-wait"
+                          >
+                            {isSwitching ? (
+                              <>
+                                <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                <span>Switching...</span>
+                              </>
+                            ) : (
+                              <>
+                                <LogIn size={13} />
+                                <span>Switch to this Junction</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      );
+                    })
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Floating Bottom Audio Dock Controls */}
+        <div className="fixed bottom-3 sm:bottom-6 inset-x-0 z-50 flex flex-col items-center pointer-events-none pb-[env(safe-area-inset-bottom)]">
+          {/* Floating Friends Emoji Reaction Picker - Always directly above the dock, never clipped */}
+          {isReactionsOpen && (
+            <div className="pointer-events-auto mb-2.5 sm:mb-3.5">
+              <FriendReactionPicker
+                isOpen={isReactionsOpen}
+                onClose={() => setIsReactionsOpen(false)}
+                onSelectReaction={handleSendReaction}
+              />
+            </div>
+          )}
+
+          <div className="pointer-events-auto p-1 sm:p-2 px-2 sm:px-4 rounded-full bg-[#0E0F17]/90 backdrop-blur-3xl border border-white/15 shadow-[0_16px_50px_rgba(0,0,0,0.85),inset_0_1px_1px_rgba(255,255,255,0.18)] flex items-center gap-1.5 sm:gap-3 max-w-[98vw] overflow-x-auto [&::-webkit-scrollbar]:hidden">
+            {/* Mute / Unmute Mic (Hero Circular Voice Call Button) */}
+            <button
+              onClick={handleToggleMic}
+              disabled={isMutedByMod}
+              className={`w-11 h-11 sm:w-12 sm:h-12 rounded-full flex items-center justify-center transition-all duration-200 hover:scale-105 active:scale-90 cursor-pointer ${isMutedByMod
+                ? "bg-rose-950/80 text-rose-400 border border-rose-800/80 cursor-not-allowed opacity-80"
+                : isMuted
+                  ? "bg-gradient-to-tr from-rose-600 to-rose-500 hover:from-rose-500 hover:to-rose-400 text-white shadow-[0_4px_18px_rgba(244,63,94,0.45)] ring-2 ring-rose-400/30"
+                  : "bg-gradient-to-tr from-emerald-500 to-teal-400 hover:from-emerald-400 text-white shadow-[0_4px_20px_rgba(16,185,129,0.5)] ring-2 ring-emerald-400/40 animate-[pulse_2s_cubic-bezier(0.4,0,0.6,1)_infinite]"
+                }`}
+              title={isMutedByMod ? "Muted by Moderation" : isMuted ? "Unmute Mic" : "Mute Mic"}
+            >
+              {isMuted || isMutedByMod ? <MicOff size={19} /> : <Mic size={19} />}
+            </button>
+
+            {/* Deafen / Listen */}
+            <button
+              onClick={() => setIsDeafened(!isDeafened)}
+              className={`w-10 h-10 sm:w-11 sm:h-11 rounded-full flex items-center justify-center transition-all duration-200 hover:scale-105 active:scale-90 cursor-pointer ${isDeafened
+                ? "bg-rose-600 text-white shadow-[0_4px_16px_rgba(244,63,94,0.45)] ring-2 ring-rose-400/30"
+                : "bg-white/10 hover:bg-white/20 text-slate-200 hover:text-white border border-white/10 backdrop-blur-md"
+                }`}
+              title={isDeafened ? "Undeafen Audio" : "Deafen Audio"}
+            >
+              {isDeafened ? <VolumeX size={18} /> : <Volume2 size={18} />}
+            </button>
+
+            <div className="h-6 w-px bg-gradient-to-b from-transparent via-white/25 to-transparent mx-0.5" />
+
+            {/* Reactions Button */}
+            <button
+              data-reaction-trigger="true"
+              onClick={() => setIsReactionsOpen(!isReactionsOpen)}
+              className={`w-10 h-10 sm:w-11 sm:h-11 rounded-full flex items-center justify-center transition-all duration-200 hover:scale-105 active:scale-90 cursor-pointer ${isReactionsOpen
+                ? "bg-indigo-600 text-white shadow-[0_4px_16px_rgba(99,102,241,0.5)] ring-2 ring-indigo-400/40"
+                : "bg-white/10 hover:bg-white/20 text-slate-200 hover:text-white border border-white/10 backdrop-blur-md"
+                }`}
+              title="Reactions (Friends & Close Friends)"
+            >
+              <Smile size={18} />
+            </button>
+
+            {/* Chat Toggle Button */}
+            <button
+              onClick={() => {
+                if (isChatOpen && rightPanelTab === "chat") {
+                  setIsChatOpen(false);
+                } else {
+                  setRightPanelTab("chat");
+                  setIsChatOpen(true);
+                  setInRoomPopups([]);
+                }
+              }}
+              className={`w-10 h-10 sm:w-11 sm:h-11 rounded-full flex items-center justify-center transition-all duration-200 hover:scale-105 active:scale-90 cursor-pointer relative ${isChatOpen && rightPanelTab === "chat"
+                ? "bg-indigo-600 text-white shadow-[0_4px_16px_rgba(99,102,241,0.5)] ring-2 ring-indigo-400/40"
+                : "bg-white/10 hover:bg-white/20 text-slate-200 hover:text-white border border-white/10 backdrop-blur-md"
+                }`}
+              title={showInRoomPopups ? "Room Chat (Show msgs active)" : "Room Chat (Not show msgs)"}
+            >
+              <MessageSquare size={18} />
+              {visibleChatMessages.length > lastReadChatCount && (!isChatOpen || rightPanelTab !== "chat") && (
+                <span className="absolute top-0.5 right-0.5 w-2.5 h-2.5 bg-indigo-400 rounded-full ring-2 ring-[#0E0F17] animate-pulse" />
+              )}
+            </button>
+
+            {/* Other Junctions Explorer Toggle Button */}
+            <button
+              onClick={() => {
+                if (isChatOpen && rightPanelTab === "junctions") {
+                  setIsChatOpen(false);
+                } else {
+                  setRightPanelTab("junctions");
+                  setIsChatOpen(true);
+                  fetchOtherJunctions();
+                }
+              }}
+              className={`w-10 h-10 sm:w-11 sm:h-11 rounded-full flex items-center justify-center transition-all duration-200 hover:scale-105 active:scale-90 cursor-pointer relative ${isChatOpen && rightPanelTab === "junctions"
+                ? "bg-indigo-600 text-white shadow-[0_4px_16px_rgba(99,102,241,0.5)] ring-2 ring-indigo-400/40"
+                : "bg-white/10 hover:bg-white/20 text-slate-200 hover:text-white border border-white/10 backdrop-blur-md"
+                }`}
+              title="Switch Junction"
+            >
+              <ArrowLeftRight size={18} />
+              {otherJunctions.some((j) => j.currentCount > 0) && (
+                <span className="absolute top-0.5 right-0.5 w-2.5 h-2.5 bg-emerald-400 rounded-full ring-2 ring-[#0E0F17] animate-pulse shadow-[0_0_8px_rgba(52,211,153,0.8)]" />
+              )}
+            </button>
+
+            <div className="h-6 w-px bg-gradient-to-b from-transparent via-white/25 to-transparent mx-0.5" />
+
+            {/* Disconnect & Leave Junction (Hero Circular End Call Button) */}
+            <button
+              onClick={() => setIsLeaveModalOpen(true)}
+              className="w-11 h-11 sm:w-12 sm:h-12 rounded-full bg-gradient-to-tr from-rose-600 via-rose-600 to-red-500 hover:from-rose-500 hover:to-red-400 text-white shadow-[0_4px_20px_rgba(244,63,94,0.45)] ring-2 ring-rose-400/30 flex items-center justify-center active:scale-90 hover:scale-105 transition-all duration-200 cursor-pointer"
+              title="Leave Junction"
+            >
+              <PhoneOff size={19} />
+            </button>
+          </div>
+        </div>
+
+
+        {/* Profile Preview Popover */}
+        <ProfilePreviewModal
+          isOpen={previewParticipant !== null}
+          onClose={() => setPreviewParticipant(null)}
+          participant={previewParticipant}
+          isBlockedInRoom={previewParticipant ? isBlockedInRoom(previewParticipant) : false}
+          onToggleBlockInRoom={previewParticipant ? () => handleToggleBlockUserInRoom(previewParticipant) : undefined}
+        />
+
+        {/* Anchored Participant Dropdown Menu */}
+        {menuAnchor && (() => {
+          const target = participants.find((p) => p.identity === menuAnchor.participantIdentity);
+          if (!target) return null;
+
+          // Never open dropdown menu for self
+          const isTargetLocal = isLocalParticipant(target);
+          if (isTargetLocal) return null;
+
+          const targetRole = target.userRole || "user";
+          const targetVolume = target
+            ? (participantVolumes[target.identity] ??
+              participantVolumes[target.identity?.toLowerCase()] ??
+              participantVolumes[target.username || ""] ??
+              participantVolumes[(target.username || "").toLowerCase()] ??
+              participantVolumes[target.name || ""] ??
+              participantVolumes[(target.name || "").toLowerCase()] ??
+              100)
+            : 100;
+
+          const canStaffKick = isStaff && (
+            isSuperAdmin ||
+            (isAdmin && targetRole !== "super_admin" && targetRole !== "admin") ||
+            (isManager && targetRole === "user")
+          );
+
+          const canHostKick = isPrivateRoom && isHost && targetRole !== "super_admin" && targetRole !== "admin";
+          const canKick = canStaffKick || canHostKick;
+
+          const canStaffBan = isStaff && targetRole !== "super_admin" && (
+            isSuperAdmin ||
+            (isAdmin && targetRole !== "admin") ||
+            (isManager && targetRole === "user")
+          );
+
+          const canStaffSuspendAccount = (isAdmin || isSuperAdmin) && targetRole !== "super_admin" && targetRole !== "admin";
+
+          const canMute = (isStaff && (
+            isSuperAdmin ||
+            (isAdmin && targetRole !== "super_admin") ||
+            (isManager && targetRole !== "super_admin" && targetRole !== "admin")
+          )) || (isPrivateRoom && isHost && targetRole !== "super_admin" && targetRole !== "admin");
+
+          const closeMenu = () => {
+            setMenuAnchor(null);
+            setActiveModMenuParticipant(null);
+          };
+
+          return (
+            <>
+              {/* Transparent backdrop overlay to dismiss on outside click */}
+              <div
+                className="fixed inset-0 z-[90] cursor-default bg-black/10 touch-manipulation"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  closeMenu();
+                }}
+                onTouchStart={(e) => {
+                  e.stopPropagation();
+                  closeMenu();
+                }}
+              />
+
+              {/* Anchored Dropdown Menu */}
+              <div
+                style={{
+                  top: menuAnchor.top !== undefined ? `${menuAnchor.top}px` : undefined,
+                  bottom: menuAnchor.bottom !== undefined ? `${menuAnchor.bottom}px` : undefined,
+                  left: `${menuAnchor.left}px`,
+                }}
+                onClick={(e) => e.stopPropagation()}
+                className="fixed w-[216px] max-w-[calc(100vw-20px)] rounded-2xl bg-[#12131F]/98 border border-white/20 shadow-2xl p-1.5 z-[100] flex flex-col gap-1 text-left animate-fadeIn backdrop-blur-2xl max-h-[min(80vh,420px)] overflow-y-auto overscroll-contain touch-manipulation"
+              >
+                {/* Header Info */}
+                <div className="px-2 py-1.5 border-b border-white/10 flex items-center justify-between gap-1.5">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <div className="w-5 h-5 rounded-full overflow-hidden shrink-0">
+                      <UserAvatar avatar={target.avatar} color={target.color} size="sm" className="!w-5 !h-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-white truncate">{target.name}</div>
+                      {target.username && target.username.toLowerCase() !== target.name.toLowerCase() && (
+                        <div className="text-[10px] text-slate-400 font-semibold truncate">@{target.username}</div>
+                      )}
+                    </div>
+                  </div>
+                  {isPrivateRoom && isParticipantHost(target) ? (
+                    <span className="px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-400/40 text-[9px] font-bold">Host</span>
+                  ) : (
+                    <RoleBadge role={targetRole} size="xs" showLabel={false} />
+                  )}
+                </div>
+
+                {/* Section 1: Room Voice Control */}
+                {canMute && (
                   <button
                     type="button"
                     onClick={() => {
-                      setReportingTarget(null);
-                      setReportReasonText("");
+                      handleModerateParticipant(target.identity, target.isMutedByMod ? "unmute" : "mute");
+                      closeMenu();
                     }}
-                    disabled={isSubmittingReport}
-                    className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+                    className="w-full px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-slate-200 hover:bg-white/10 flex items-center gap-2 transition-colors cursor-pointer"
                   >
-                    Cancel
+                    {target.isMutedByMod ? (
+                      <Mic size={13} className="text-emerald-400 shrink-0" />
+                    ) : (
+                      <MicOff size={13} className="text-amber-400 shrink-0" />
+                    )}
+                    <span>{target.isMutedByMod ? "Allow Mic (Remove Mod Mute)" : "Force Mute"}</span>
                   </button>
+                )}
+
+                {/* Kick from Room */}
+                {canKick && (
                   <button
                     type="button"
-                    disabled={isSubmittingReport || !reportReasonText.trim()}
                     onClick={() => {
-                      const fullReason = `[${reportCategory}] ${reportReasonText.trim()}`;
-                      handleReportParticipant(reportingTarget.identity, fullReason);
+                      const confirmed = window.confirm(
+                        `Kick @${target.name || target.identity} from this room?`
+                      );
+                      if (!confirmed) return;
+                      handleModerateParticipant(target.identity, "kick");
+                      closeMenu();
                     }}
-                    className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${!reportReasonText.trim() || isSubmittingReport
-                      ? "bg-rose-500/30 text-rose-300/50 border border-rose-500/20 cursor-not-allowed"
-                      : "bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-600/30 active:scale-95"
-                      }`}
+                    className="w-full px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-rose-400 hover:bg-rose-950/60 flex items-center gap-2 transition-colors cursor-pointer"
                   >
-                    {isSubmittingReport ? (
+                    <PhoneOff size={13} className="shrink-0" />
+                    <span>{isPrivateRoom ? "Kick from Room" : "Kick from Junction"}</span>
+                  </button>
+                )}
+
+                {/* Ban from Room - Official Staff Only (Admin/Super Admin only) */}
+                {canStaffBan && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const confirmed = window.confirm(
+                        `Ban @${target.identity} from this junction?\nThey will be disconnected and blocked from re-entering this room.`
+                      );
+                      if (!confirmed) return;
+                      handleModerateParticipant(target.identity, "ban");
+                      closeMenu();
+                    }}
+                    className="w-full px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-rose-300 hover:bg-rose-950/70 flex items-center gap-2 transition-colors cursor-pointer"
+                  >
+                    <UserX size={13} className="text-rose-400 shrink-0" />
+                    <span>Ban from Junction</span>
+                  </button>
+                )}
+
+                {/* Suspend Account - Admins & Super Admin Only */}
+                {canStaffSuspendAccount && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handlePlatformBanParticipant(target);
+                      closeMenu();
+                    }}
+                    className="w-full px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-rose-300 hover:bg-rose-950/80 flex items-center gap-2 transition-colors cursor-pointer border border-rose-500/20"
+                  >
+                    <Ban size={13} className="text-rose-400 shrink-0" />
+                    <span>Suspend Account</span>
+                  </button>
+                )}
+
+                {/* Section 2: Staff Hierarchy Management */}
+                {isAdmin && (
+                  <div className="pt-1 mt-0.5 border-t border-white/10 flex flex-col gap-0.5">
+                    <span className="px-2 py-0.5 text-[9px] font-extrabold uppercase tracking-wider text-slate-400">
+                      Staff Hierarchy
+                    </span>
+
+                    {/* Super Admin: Appoint Admin */}
+                    {isSuperAdmin && targetRole !== "admin" && targetRole !== "super_admin" && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          handleSetRoleParticipant(target, "admin");
+                          closeMenu();
+                        }}
+                        className="w-full px-2 py-1.5 rounded-lg text-[11px] font-semibold text-amber-300 hover:bg-amber-950/60 flex items-center gap-2 transition-colors cursor-pointer"
+                      >
+                        <Crown size={13} className="text-amber-400 shrink-0" />
+                        <span>Make Admin</span>
+                      </button>
+                    )}
+
+                    {/* Admin or Super Admin: Appoint Manager */}
+                    {isAdmin && targetRole === "user" && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          handleSetRoleParticipant(target, "manager");
+                          closeMenu();
+                        }}
+                        className="w-full px-2 py-1.5 rounded-lg text-[11px] font-semibold text-cyan-300 hover:bg-cyan-950/60 flex items-center gap-2 transition-colors cursor-pointer"
+                      >
+                        <Zap size={13} className="text-cyan-400 shrink-0" />
+                        <span>Make Manager</span>
+                      </button>
+                    )}
+
+                    {/* Super Admin: Demote Admin */}
+                    {isSuperAdmin && targetRole === "admin" && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          handleSetRoleParticipant(target, "user");
+                          closeMenu();
+                        }}
+                        className="w-full px-2 py-1.5 rounded-lg text-[11px] font-semibold text-rose-400 hover:bg-rose-950/60 flex items-center gap-2 transition-colors cursor-pointer"
+                      >
+                        <UserMinus size={13} className="shrink-0" />
+                        <span>Demote to User</span>
+                      </button>
+                    )}
+
+                    {/* Admin or Super Admin: Demote Manager */}
+                    {isAdmin && targetRole === "manager" && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          handleSetRoleParticipant(target, "user");
+                          closeMenu();
+                        }}
+                        className="w-full px-2 py-1.5 rounded-lg text-[11px] font-semibold text-rose-400 hover:bg-rose-950/60 flex items-center gap-2 transition-colors cursor-pointer"
+                      >
+                        <UserMinus size={13} className="shrink-0" />
+                        <span>Demote Manager</span>
+                      </button>
+                    )}
+
+                    {/* Super Admin: Delete Account Permanently */}
+                    {isSuperAdmin && targetRole !== "super_admin" && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          handleDeleteAccountParticipant(target);
+                          closeMenu();
+                        }}
+                        className="w-full px-2 py-1.5 rounded-lg text-[11px] font-semibold text-rose-400 hover:bg-rose-900/60 flex items-center gap-2 transition-colors cursor-pointer border border-rose-600/30"
+                      >
+                        <Trash2 size={13} className="shrink-0" />
+                        <span>Delete Account</span>
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {/* Section 4: Inline Volume Slider */}
+                <div className="px-2.5 py-2 border-t border-white/10 flex items-center gap-2">
+                  <button
+                    type="button"
+                    title={targetVolume === 0 ? "Unmute user" : "Mute user"}
+                    onClick={() => {
+                      handleVolumeChange(target, targetVolume === 0 ? 100 : 0);
+                    }}
+                    className="p-1 rounded-md text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer shrink-0"
+                  >
+                    {targetVolume === 0 ? (
+                      <VolumeX size={14} className="text-rose-400" />
+                    ) : targetVolume <= 50 ? (
+                      <Volume1 size={14} className="text-slate-300" />
+                    ) : (
+                      <Volume2 size={14} className="text-indigo-400" />
+                    )}
+                  </button>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="5"
+                    value={targetVolume}
+                    onChange={(e) => handleVolumeChange(target, Number(e.target.value))}
+                    className="w-full h-1.5 bg-white/20 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                  />
+                  <span className="text-[10px] text-slate-300 font-mono w-7 text-right shrink-0">
+                    {targetVolume}%
+                  </span>
+                </div>
+
+                {/* Section: Block / Unblock User Inside Room (Available to EVERY user) */}
+                <div className="pt-1 mt-0.5 border-t border-white/10 flex flex-col gap-0.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleToggleBlockUserInRoom(target);
+                      closeMenu();
+                    }}
+                    className={`w-full px-2.5 py-1.5 rounded-lg text-[11px] font-semibold flex items-center gap-2 transition-colors cursor-pointer ${isBlockedInRoom(target)
+                      ? "text-emerald-300 hover:bg-emerald-950/60 border border-emerald-500/25"
+                      : "text-rose-400 hover:bg-rose-950/60 border border-rose-500/25"
+                      }`}
+                    title={
+                      isBlockedInRoom(target)
+                        ? "Unblock this user in this room"
+                        : "Block this user inside room (mutes their voice, messages, and reactions)"
+                    }
+                  >
+                    {isBlockedInRoom(target) ? (
                       <>
-                        <Loader2 size={13} className="animate-spin" />
-                        <span>Submitting...</span>
+                        <ShieldCheck size={13} className="text-emerald-400 shrink-0" />
+                        <span>Unblock user inside room</span>
                       </>
                     ) : (
                       <>
-                        <AlertCircle size={13} />
-                        <span>Submit Report</span>
+                        <UserX size={13} className="text-rose-400 shrink-0" />
+                        <span>Block the user inside room</span>
                       </>
                     )}
                   </button>
                 </div>
-              </div>
-            </div>
-          )}
 
-          {/* Direct Room Invite to Friends Modal */}
-          {isInviteModalOpen && junction && (
-            <InviteFriendsModal
-              isOpen={isInviteModalOpen}
-              onClose={() => setIsInviteModalOpen(false)}
-              junctionId={junctionId}
-              junctionName={junction.name}
-              description={junction.description}
-              participantCount={participants.length}
-              maxParticipants={junction.maxParticipants || 10}
-              currentUserId={user?.id || guest?.id}
-              currentUsername={user?.name || guest?.name}
-            />
-          )}
-
-          {/* Junction Switching Transition Overlay */}
-          {isSwitchingRoomId && (
-            <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/85 backdrop-blur-md animate-in fade-in duration-200 select-none">
-              <div className="p-6 rounded-3xl bg-[#12131A] border border-white/10 shadow-2xl flex flex-col items-center text-center max-w-xs mx-4">
-                <div className="w-13 h-13 rounded-2xl bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center text-indigo-400 mb-4 shadow-inner">
-                  <ArrowLeftRight size={24} className="animate-pulse" />
+                {/* Section 5: Profile & Report */}
+                <div className="pt-1 mt-0.5 border-t border-white/10 flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPreviewParticipant(target);
+                      closeMenu();
+                    }}
+                    className="flex-1 px-2 py-1 rounded-lg text-[10px] font-semibold text-slate-300 hover:text-white hover:bg-white/10 flex items-center justify-center gap-1 transition-colors cursor-pointer"
+                  >
+                    <Users size={11} />
+                    <span>Profile</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setReportingTarget(target);
+                      setReportCategory("Inappropriate Audio");
+                      setReportReasonText("");
+                      closeMenu();
+                    }}
+                    className="px-2 py-1 rounded-lg text-[10px] font-semibold text-slate-400 hover:text-rose-400 hover:bg-white/10 flex items-center justify-center gap-1 transition-colors cursor-pointer"
+                  >
+                    <AlertCircle size={11} />
+                    <span>Report</span>
+                  </button>
                 </div>
-                <h3 className="text-base font-bold text-white mb-1">
-                  Switching Junction
-                </h3>
-                <p className="text-xs text-indigo-300 font-semibold truncate max-w-[220px] mb-2">
-                  {switchingRoomName || "Connecting..."}
-                </p>
-                <p className="text-[11px] text-slate-400 leading-relaxed">
-                  Disconnecting from current voice audio and entering the new junction...
-                </p>
+              </div>
+            </>
+          );
+        })()}
+
+        {/* Participant Report Modal with Required Reason */}
+        {reportingTarget && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-fadeIn">
+            <div className="w-full max-w-md bg-[#131522] border border-white/15 rounded-3xl p-5 shadow-2xl flex flex-col gap-4 text-left">
+              {/* Modal Header */}
+              <div className="flex items-center justify-between pb-3 border-b border-white/10">
+                <div className="flex items-center gap-2">
+                  <div className="w-9 h-9 rounded-xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-rose-400">
+                    <AlertCircle size={18} />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-white">Report Participant</h3>
+                    <p className="text-[11px] text-slate-400">Reporting <span className="font-semibold text-rose-300">@{reportingTarget.name || reportingTarget.identity}</span></p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReportingTarget(null);
+                    setReportReasonText("");
+                  }}
+                  className="w-8 h-8 rounded-full bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+
+              {/* Common Category Chips */}
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                  Reason Category
+                </label>
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    "Inappropriate Audio",
+                    "Harassment / Abuse",
+                    "Spam / Echo / Noise",
+                    "Hate Speech",
+                    "Underage Concern",
+                    "Other",
+                  ].map((cat) => (
+                    <button
+                      key={cat}
+                      type="button"
+                      onClick={() => setReportCategory(cat)}
+                      className={`px-2.5 py-1 rounded-full text-xs font-semibold transition-all cursor-pointer ${reportCategory === cat
+                        ? "bg-rose-500/25 text-rose-300 border border-rose-500/50 shadow-sm"
+                        : "bg-white/5 text-slate-400 border border-white/10 hover:bg-white/10 hover:text-slate-200"
+                        }`}
+                    >
+                      {cat}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Description Textarea (Required) */}
+              <div className="flex flex-col gap-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                    Detailed Reason <span className="text-rose-400">*</span>
+                  </label>
+                  <span className="text-[10px] text-slate-500 font-mono">Required</span>
+                </div>
+                <textarea
+                  value={reportReasonText}
+                  onChange={(e) => setReportReasonText(e.target.value)}
+                  placeholder="Please describe why you are reporting this participant (e.g. offensive language, loud disturbance)..."
+                  rows={3}
+                  className="w-full px-3 py-2.5 rounded-xl bg-black/40 border border-white/15 focus:border-rose-500/60 focus:ring-1 focus:ring-rose-500/50 text-white placeholder-slate-500 text-xs resize-none outline-none transition-all"
+                />
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-white/10">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReportingTarget(null);
+                    setReportReasonText("");
+                  }}
+                  disabled={isSubmittingReport}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={isSubmittingReport || !reportReasonText.trim()}
+                  onClick={() => {
+                    const fullReason = `[${reportCategory}] ${reportReasonText.trim()}`;
+                    handleReportParticipant(reportingTarget.identity, fullReason);
+                  }}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${!reportReasonText.trim() || isSubmittingReport
+                    ? "bg-rose-500/30 text-rose-300/50 border border-rose-500/20 cursor-not-allowed"
+                    : "bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-600/30 active:scale-95"
+                    }`}
+                >
+                  {isSubmittingReport ? (
+                    <>
+                      <Loader2 size={13} className="animate-spin" />
+                      <span>Submitting...</span>
+                    </>
+                  ) : (
+                    <>
+                      <AlertCircle size={13} />
+                      <span>Submit Report</span>
+                    </>
+                  )}
+                </button>
               </div>
             </div>
-          )}
-          {/* Floating Pop-up Notification (In-Room Whisper Chat Preview) - Positioned right above bottom controls dock */}
-          {!isChatOpen && showInRoomPopups && inRoomPopups.length > 0 && (
-            <div className="fixed bottom-20 left-3 right-3 sm:left-auto sm:right-6 sm:bottom-24 z-40 max-w-sm sm:max-w-[340px] mx-auto sm:mx-0 pointer-events-none flex flex-col gap-2 transition-all duration-200">
-              {inRoomPopups.map((popup) => (
-                <div
-                  key={popup.id}
-                  onClick={() => {
-                    setIsChatOpen(true);
-                    setRightPanelTab("chat");
-                    if (popup.isWhisper && popup.senderName) {
-                      setPrivateRecipient(popup.senderName);
-                    }
-                    setInRoomPopups([]);
-                  }}
-                  className="pointer-events-auto rounded-2xl p-3 sm:p-3.5 bg-[#12131C]/95 backdrop-blur-2xl border border-white/15 shadow-2xl shadow-black/80 transition-all duration-200 animate-in slide-in-from-bottom-3 sm:slide-in-from-right-3 fade-in group cursor-pointer hover:border-white/25 active:scale-[0.99]"
-                >
-                  {/* Top Header */}
-                  <div className="flex items-center justify-between gap-2 mb-1.5">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <div className="w-5 h-5 rounded-full overflow-hidden shrink-0 border border-white/15">
-                        <UserAvatar avatar={popup.avatar || "zap"} color={popup.color || "#8B5CF6"} size="sm" className="!w-full !h-full" />
-                      </div>
-                      <span className="text-xs font-bold text-white truncate max-w-[120px] sm:max-w-[150px]">
-                        {popup.senderName}
-                      </span>
-                      {popup.isWhisper && (
-                        <span className="text-[10px] text-slate-300 bg-white/10 px-1.5 py-0.2 rounded-full font-medium flex items-center gap-0.5 shrink-0">
-                          <Lock size={9} /> Whisper
-                        </span>
-                      )}
-                    </div>
+          </div>
+        )}
 
-                    <div className="flex items-center gap-1 shrink-0">
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setInRoomPopups([]);
-                        }}
-                        className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
-                        title="Dismiss"
-                      >
-                        <X size={13} />
-                      </button>
+        {/* Direct Room Invite to Friends Modal */}
+        {isInviteModalOpen && junction && (
+          <InviteFriendsModal
+            isOpen={isInviteModalOpen}
+            onClose={() => setIsInviteModalOpen(false)}
+            junctionId={junctionId}
+            junctionName={junction.name}
+            description={junction.description}
+            participantCount={participants.length}
+            maxParticipants={junction.maxParticipants || 10}
+            currentUserId={user?.id || guest?.id}
+            currentUsername={user?.name || guest?.name}
+          />
+        )}
+
+        {/* Junction Switching Transition Overlay */}
+        {isSwitchingRoomId && (
+          <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/85 backdrop-blur-md animate-in fade-in duration-200 select-none">
+            <div className="p-6 rounded-3xl bg-[#12131A] border border-white/10 shadow-2xl flex flex-col items-center text-center max-w-xs mx-4">
+              <div className="w-13 h-13 rounded-2xl bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center text-indigo-400 mb-4 shadow-inner">
+                <ArrowLeftRight size={24} className="animate-pulse" />
+              </div>
+              <h3 className="text-base font-bold text-white mb-1">
+                Switching Junction
+              </h3>
+              <p className="text-xs text-indigo-300 font-semibold truncate max-w-[220px] mb-2">
+                {switchingRoomName || "Connecting..."}
+              </p>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                Disconnecting from current voice audio and entering the new junction...
+              </p>
+            </div>
+          </div>
+        )}
+        {/* Floating Pop-up Notification (In-Room Whisper Chat Preview) - Positioned right above bottom controls dock */}
+        {!isChatOpen && showInRoomPopups && inRoomPopups.length > 0 && (
+          <div className="fixed bottom-20 left-3 right-3 sm:left-auto sm:right-6 sm:bottom-24 z-40 max-w-sm sm:max-w-[340px] mx-auto sm:mx-0 pointer-events-none flex flex-col gap-2 transition-all duration-200">
+            {inRoomPopups.map((popup) => (
+              <div
+                key={popup.id}
+                onClick={() => {
+                  setIsChatOpen(true);
+                  setRightPanelTab("chat");
+                  if (popup.isWhisper && popup.senderName) {
+                    setPrivateRecipient(popup.senderName);
+                  }
+                  setInRoomPopups([]);
+                }}
+                className="pointer-events-auto rounded-2xl p-3 sm:p-3.5 bg-[#12131C]/95 backdrop-blur-2xl border border-white/15 shadow-2xl shadow-black/80 transition-all duration-200 animate-in slide-in-from-bottom-3 sm:slide-in-from-right-3 fade-in group cursor-pointer hover:border-white/25 active:scale-[0.99]"
+              >
+                {/* Top Header */}
+                <div className="flex items-center justify-between gap-2 mb-1.5">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="w-5 h-5 rounded-full overflow-hidden shrink-0 border border-white/15">
+                      <UserAvatar avatar={popup.avatar || "zap"} color={popup.color || "#8B5CF6"} size="sm" className="!w-full !h-full" />
                     </div>
+                    <span className="text-xs font-bold text-white truncate max-w-[120px] sm:max-w-[150px]">
+                      {popup.senderName}
+                    </span>
+                    {popup.isWhisper && (
+                      <span className="text-[10px] text-slate-300 bg-white/10 px-1.5 py-0.2 rounded-full font-medium flex items-center gap-0.5 shrink-0">
+                        <Lock size={9} /> Whisper
+                      </span>
+                    )}
                   </div>
 
-                  {/* Message text */}
-                  <p className="text-xs text-slate-200 font-medium line-clamp-2 leading-relaxed break-words pl-0.5 mt-0.5">
-                    {popup.text}
-                  </p>
-
-                  {/* Action Footer */}
-                  <div className="mt-2 pt-1.5 border-t border-white/[0.08] flex items-center justify-between text-[11px] text-slate-400">
-                    <span className="text-indigo-400 font-semibold group-hover:text-indigo-300 transition-colors flex items-center gap-1">
-                      Tap to reply <span className="group-hover:translate-x-0.5 transition-transform">→</span>
-                    </span>
+                  <div className="flex items-center gap-1 shrink-0">
                     <button
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
-                        toggleShowInRoomPopups();
+                        setInRoomPopups([]);
                       }}
-                      className="text-[10px] text-slate-500 hover:text-slate-300 transition-colors cursor-pointer"
-                      title="Silence future pop-up messages"
+                      className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+                      title="Dismiss"
                     >
-                      Not show msgs
+                      <X size={13} />
                     </button>
                   </div>
                 </div>
-              ))}
-            </div>
-          )}
-        </div>
+
+                {/* Message text */}
+                <p className="text-xs text-slate-200 font-medium line-clamp-2 leading-relaxed break-words pl-0.5 mt-0.5">
+                  {popup.text}
+                </p>
+
+                {/* Action Footer */}
+                <div className="mt-2 pt-1.5 border-t border-white/[0.08] flex items-center justify-between text-[11px] text-slate-400">
+                  <span className="text-indigo-400 font-semibold group-hover:text-indigo-300 transition-colors flex items-center gap-1">
+                    Tap to reply <span className="group-hover:translate-x-0.5 transition-transform">→</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleShowInRoomPopups();
+                    }}
+                    className="text-[10px] text-slate-500 hover:text-slate-300 transition-colors cursor-pointer"
+                    title="Silence future pop-up messages"
+                  >
+                    Not show msgs
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* Leave Voice Junction Confirmation Modal - Rendered at Root (Works in Both Full & Minimized Mode) */}
       {isLeaveModalOpen && (
