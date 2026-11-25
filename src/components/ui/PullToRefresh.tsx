@@ -14,50 +14,71 @@ export function PullToRefresh({ onRefresh, children }: PullToRefreshProps) {
   const startY = useRef(0);
   const currentY = useRef(0);
   const isPulling = useRef(false);
+  const pullDistanceRef = useRef(0);
+  const isRefreshingRef = useRef(false);
+  const onRefreshRef = useRef(onRefresh);
+
+  useEffect(() => {
+    onRefreshRef.current = onRefresh;
+  }, [onRefresh]);
 
   useEffect(() => {
     // Prevent native pull-to-refresh on mobile browsers for this container
     document.body.style.overscrollBehaviorY = 'none';
-    
+
     const handleTouchStart = (e: TouchEvent) => {
-      if (window.scrollY <= 0) {
+      if (window.scrollY <= 0 && !isRefreshingRef.current) {
         startY.current = e.touches[0].clientY;
         isPulling.current = true;
       }
     };
 
     const handleTouchMove = (e: TouchEvent) => {
-      if (!isPulling.current) return;
+      if (!isPulling.current || isRefreshingRef.current) return;
       currentY.current = e.touches[0].clientY;
       const distance = currentY.current - startY.current;
-      
-      if (distance > 0 && window.scrollY <= 0) {
-        if (e.cancelable) e.preventDefault(); // prevent native scroll
-        setPullDistance(Math.min(distance * 0.4, 70)); // Add friction and max distance
+
+      if (distance > 6 && window.scrollY <= 0) {
+        if (e.cancelable) e.preventDefault();
+        const nextDistance = Math.min((distance - 6) * 0.4, 70);
+        pullDistanceRef.current = nextDistance;
+        setPullDistance(nextDistance);
+      } else if (distance < 0) {
+        // User is scrolling down normally; release pull tracking
+        isPulling.current = false;
+        if (pullDistanceRef.current !== 0) {
+          pullDistanceRef.current = 0;
+          setPullDistance(0);
+        }
       }
     };
 
     const handleTouchEnd = async () => {
       if (!isPulling.current) return;
       isPulling.current = false;
-      
-      if (pullDistance >= 50 && !isRefreshing) {
+
+      if (pullDistanceRef.current >= 50 && !isRefreshingRef.current) {
+        isRefreshingRef.current = true;
         setIsRefreshing(true);
-        setPullDistance(50); // Hold at threshold
+        pullDistanceRef.current = 50;
+        setPullDistance(50);
         try {
-          await onRefresh();
+          await onRefreshRef.current();
         } finally {
+          isRefreshingRef.current = false;
           setIsRefreshing(false);
+          pullDistanceRef.current = 0;
           setPullDistance(0);
         }
-      } else {
+      } else if (pullDistanceRef.current !== 0) {
+        pullDistanceRef.current = 0;
         setPullDistance(0);
       }
     };
 
     document.addEventListener('touchstart', handleTouchStart, { passive: true });
     document.addEventListener('touchmove', handleTouchMove, { passive: false });
-    document.addEventListener('touchend', handleTouchEnd);
+    document.addEventListener('touchend', handleTouchEnd, { passive: true });
 
     return () => {
       document.body.style.overscrollBehaviorY = 'auto';
@@ -65,26 +86,33 @@ export function PullToRefresh({ onRefresh, children }: PullToRefreshProps) {
       document.removeEventListener('touchmove', handleTouchMove);
       document.removeEventListener('touchend', handleTouchEnd);
     };
-  }, [pullDistance, isRefreshing, onRefresh]);
+  }, []);
+
+  const isActive = pullDistance > 0 || isRefreshing;
 
   return (
-    <div className="relative min-h-screen overflow-hidden">
+    <div className="relative min-h-screen overflow-x-clip">
        {/* Refresh Indicator */}
-       <div 
-         className="absolute top-0 left-0 right-0 flex justify-center items-start pt-4 transition-transform z-50 pointer-events-none"
-         style={{ transform: `translateY(${Math.max(pullDistance - 50, -50)}px)` }}
-       >
-          <div 
-            className={`w-10 h-10 rounded-full bg-card border border-white/10 shadow-xl flex items-center justify-center text-indigo-400 transition-opacity ${pullDistance > 0 || isRefreshing ? 'opacity-100' : 'opacity-0'}`}
-            style={{ transform: `rotate(${pullDistance * 5}deg)` }}
-          >
-             <Loader2 className={isRefreshing ? "animate-spin" : ""} size={20} />
-          </div>
-       </div>
+       {isActive && (
+         <div 
+           className="fixed top-0 left-0 right-0 flex justify-center items-start pt-4 z-50 pointer-events-none"
+           style={{ transform: `translate3d(0, ${Math.max(pullDistance - 40, 8)}px, 0)` }}
+         >
+            <div 
+              className="w-10 h-10 rounded-full bg-[#12141E] border border-white/15 shadow-xl flex items-center justify-center text-indigo-400"
+              style={{ transform: `rotate(${pullDistance * 5}deg)` }}
+            >
+               <Loader2 className={isRefreshing ? "animate-spin" : ""} size={20} />
+            </div>
+         </div>
+       )}
        
-       {/* Content */}
+       {/* Content - only promote/transform when actively pulling */}
        <div 
-         style={{ transform: `translateY(${pullDistance}px)`, transition: isPulling.current ? 'none' : 'transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1)' }}
+         style={isActive ? {
+           transform: `translate3d(0, ${pullDistance}px, 0)`,
+           transition: isPulling.current ? 'none' : 'transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1)',
+         } : undefined}
          className="min-h-screen"
        >
          {children}

@@ -109,32 +109,42 @@ export function CreateJunctionModal({ isOpen, onClose, guest, onCreated }: Creat
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/80 backdrop-blur-md animate-fadeIn">
-      <div className="relative w-full max-w-lg p-6 pb-10 sm:p-8 rounded-t-[2rem] sm:rounded-[2rem] bg-[#12131A] border-t sm:border border-white/10 shadow-2xl text-slate-100 max-h-[95vh] overflow-y-auto no-scrollbar animate-slideUp sm:animate-fadeIn">
-        <button
-          onClick={onClose}
-          className="absolute top-4 sm:top-5 right-4 sm:right-5 p-2 text-slate-500 hover:text-white rounded-xl hover:bg-white/10 transition-colors cursor-pointer"
-        >
-          <X size={18} />
-        </button>
-
-        <div className="flex items-center gap-3 sm:gap-4 mb-5 sm:mb-6 pr-8">
-          <div className="p-2.5 sm:p-3 rounded-xl sm:rounded-2xl bg-indigo-600 shadow-[0_0_20px_rgba(79,70,229,0.4)] text-white shrink-0">
-            <Plus className="w-5 h-5 sm:w-6 sm:h-6" />
+    <div
+      className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/80 backdrop-blur-md animate-fadeIn"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="relative w-full max-w-lg rounded-t-[2rem] sm:rounded-[2rem] bg-[#12131A] border-t sm:border border-white/10 shadow-2xl text-slate-100 max-h-[92dvh] sm:max-h-[88vh] flex flex-col overflow-hidden animate-slideUp sm:animate-fadeIn">
+        {/* Fixed Header */}
+        <div className="flex items-center justify-between gap-3 px-5 pt-5 pb-4 sm:px-7 sm:pt-6 sm:pb-4 border-b border-white/[0.07] shrink-0">
+          <div className="flex items-center gap-3 sm:gap-3.5 min-w-0">
+            <div className="p-2.5 sm:p-3 rounded-xl sm:rounded-2xl bg-indigo-600 shadow-[0_0_20px_rgba(79,70,229,0.4)] text-white shrink-0">
+              <Plus className="w-5 h-5" />
+            </div>
+            <div className="min-w-0">
+              <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight leading-tight truncate">Create Junction</h2>
+              <p className="text-[11px] sm:text-xs text-slate-400 font-light truncate">Launch an instant voice room for your topic</p>
+            </div>
           </div>
-          <div>
-            <h2 className="text-lg sm:text-2xl font-black text-white tracking-tight leading-tight mb-0.5">Create Junction</h2>
-            <p className="text-[10px] sm:text-sm text-slate-400 font-light">Launch an instant voice room for your topic</p>
-          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close modal"
+            className="p-2 text-slate-400 hover:text-white rounded-xl hover:bg-white/10 transition-colors cursor-pointer shrink-0"
+          >
+            <X size={18} />
+          </button>
         </div>
 
-        {error && (
-          <div className="mb-4 p-3 rounded-xl bg-rose-600/20 border border-rose-500/30 text-rose-300 text-xs">
-            {error}
-          </div>
-        )}
-
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form onSubmit={handleSubmit} className="flex-1 flex flex-col min-h-0">
+          {/* Scrollable Body */}
+          <div className="flex-1 overflow-y-auto px-5 py-4 sm:px-7 sm:py-5 space-y-4">
+            {error && (
+              <div className="p-3 rounded-xl bg-rose-600/20 border border-rose-500/30 text-rose-300 text-xs">
+                {error}
+              </div>
+            )}
           <div>
             <label className="block text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-2">
               Junction Name *
@@ -259,18 +269,21 @@ export function CreateJunctionModal({ isOpen, onClose, guest, onCreated }: Creat
             </div>
           </div>
 
-          <div className="flex gap-3 pt-4">
+          </div>
+
+          {/* Fixed Footer Actions */}
+          <div className="flex gap-3 px-5 py-4 sm:px-7 border-t border-white/[0.07] bg-[#0F1017] shrink-0">
             <button
               type="button"
               onClick={onClose}
-              className="flex-1 py-3 rounded-xl bg-white/5 border border-white/10 text-slate-300 hover:bg-white/10 hover:text-white font-medium text-sm transition-all cursor-pointer"
+              className="flex-1 py-2.5 sm:py-3 rounded-xl bg-white/5 border border-white/10 text-slate-300 hover:bg-white/10 hover:text-white font-medium text-sm transition-all cursor-pointer"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={isSubmitting}
-              className="flex-1 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-sm shadow-lg shadow-indigo-600/20 transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-70"
+              className="flex-1 py-2.5 sm:py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-sm shadow-lg shadow-indigo-600/20 transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-70"
             >
               {isSubmitting ? (
                 <>

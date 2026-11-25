@@ -335,3 +335,9 @@
 .animate-emoji-tap {
   animation: none;
 }
+
+/* Scroll-optimized card rendering (skips off-screen layout & paint) */
+.junction-card-perf {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 156px;
+}

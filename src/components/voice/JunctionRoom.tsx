@@ -6037,23 +6037,23 @@ export function JunctionRoom({
         {/* Slide-out In-Room Whisper Chat Drawer / Right Sidebar */}
         <div
           className={`
-          fixed inset-x-0 bottom-20 top-14 sm:inset-x-auto sm:right-0 sm:top-16 sm:bottom-24 z-40 bg-[#0B0C12]/95 backdrop-blur-3xl border-t sm:border-t-0 sm:border-l border-white/[0.08] flex flex-col shadow-2xl transition-all duration-300
+          fixed inset-x-2.5 bottom-20 top-14 sm:inset-x-auto sm:right-3 sm:top-16 sm:bottom-24 sm:w-[400px] rounded-3xl border border-white/[0.1] overflow-hidden z-40 bg-[#0C0D14] flex flex-col shadow-2xl transition-all duration-300
           ${isChatOpen ? "translate-y-0 translate-x-0 opacity-100" : "translate-y-[150%] sm:translate-y-0 sm:translate-x-full opacity-0 pointer-events-none"}
-          lg:relative lg:inset-auto lg:z-10 lg:w-[410px] xl:w-[450px] lg:bg-[#0B0C12]/95 lg:border-l lg:border-white/[0.08] lg:shadow-2xl lg:transform-none lg:transition-none lg:opacity-100 lg:pointer-events-auto
+          lg:relative lg:inset-auto lg:my-3 lg:mr-3 lg:rounded-3xl lg:border lg:border-white/[0.1] lg:z-10 lg:w-[410px] xl:w-[450px] lg:bg-[#0C0D14] lg:shadow-2xl lg:transform-none lg:transition-none lg:opacity-100 lg:pointer-events-auto
           ${!isChatOpen && 'lg:hidden'}
         `}
         >
           {/* Top Header & Tab Switcher */}
-          <div className="p-3 sm:p-4 border-b border-white/[0.08] bg-black/25 flex flex-col gap-2.5 shrink-0">
-            <div className="flex items-center justify-between">
+          <div className="px-3.5 py-3 border-b border-white/[0.07] bg-[#0F111A] flex flex-col gap-2.5 shrink-0">
+            <div className="flex items-center justify-between gap-2">
               {/* Tab Pill Buttons */}
-              <div className="flex items-center gap-1 p-1 bg-white/[0.05] border border-white/10 rounded-2xl">
+              <div className="flex items-center gap-1 p-1 bg-white/[0.04] border border-white/[0.08] rounded-xl">
                 <button
                   type="button"
                   onClick={() => setRightPanelTab("chat")}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${rightPanelTab === "chat"
-                    ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
-                    : "text-slate-400 hover:text-white hover:bg-white/5"
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${rightPanelTab === "chat"
+                    ? "bg-indigo-600 text-white shadow-sm shadow-indigo-600/30"
+                    : "text-slate-400 hover:text-white hover:bg-white/[0.05]"
                     }`}
                 >
                   <MessageSquare size={13} />
@@ -6068,15 +6068,15 @@ export function JunctionRoom({
                     setRightPanelTab("junctions");
                     fetchOtherJunctions();
                   }}
-                  className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${rightPanelTab === "junctions"
-                    ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
-                    : "text-slate-400 hover:text-white hover:bg-white/5"
+                  className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${rightPanelTab === "junctions"
+                    ? "bg-indigo-600 text-white shadow-sm shadow-indigo-600/30"
+                    : "text-slate-400 hover:text-white hover:bg-white/[0.05]"
                     }`}
                 >
                   <ArrowLeftRight size={13} />
                   <span><span className="hidden xs:inline">Switch </span>Junctions</span>
                   {otherJunctions.some((j) => j.currentCount > 0) && (
-                    <span className="flex items-center gap-0.5 px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px] font-bold">
+                    <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px] font-bold leading-none">
                       <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                       {otherJunctions.filter((j) => j.currentCount > 0).length}
                     </span>
@@ -6089,7 +6089,7 @@ export function JunctionRoom({
                   <button
                     type="button"
                     onClick={handleClearChat}
-                    className="px-2.5 py-1 rounded-xl text-[11px] font-medium text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
+                    className="px-2.5 py-1 rounded-lg text-[11px] font-medium text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
                     title="Clear chat"
                   >
                     Clear
@@ -6099,7 +6099,7 @@ export function JunctionRoom({
                   <button
                     type="button"
                     onClick={fetchOtherJunctions}
-                    className="p-1.5 rounded-full text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
                     title="Refresh junctions"
                   >
                     <RotateCw size={14} className={isLoadingJunctions ? "animate-spin text-indigo-400" : ""} />
@@ -6107,126 +6107,133 @@ export function JunctionRoom({
                 )}
                 <button
                   onClick={() => setIsChatOpen(false)}
-                  className="w-8 h-8 rounded-full text-slate-400 hover:text-white hover:bg-white/10 flex items-center justify-center transition-all cursor-pointer"
+                  className="w-7 h-7 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 flex items-center justify-center transition-colors cursor-pointer"
                   title="Close panel"
+                  aria-label="Close panel"
                 >
-                  <X size={16} />
+                  <X size={15} />
                 </button>
               </div>
             </div>
 
             {/* Subheader info depending on tab */}
             {rightPanelTab === "chat" ? (
-              <div className="flex flex-col gap-2">
-                <div className="flex items-center gap-2">
-                  {/* Private Message Recipient Selector - Custom Styled Glassmorphic Dropdown */}
-                  <div className="relative flex-1" ref={recipientMenuRef}>
-                    <button
-                      type="button"
-                      onClick={() => setIsRecipientMenuOpen(!isRecipientMenuOpen)}
-                      className="w-full flex items-center justify-between gap-2 bg-white/[0.04] hover:bg-white/[0.07] border border-white/10 hover:border-white/20 rounded-2xl px-3.5 py-2 transition-all cursor-pointer shadow-inner active:scale-[0.99]"
-                    >
-                      <div className="flex items-center gap-2 min-w-0">
-                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider shrink-0">
-                          To:
-                        </span>
-                        <span className="text-xs font-semibold text-white truncate">
-                          {privateRecipient === "all" ? "Everyone in Room" : privateRecipient}
-                        </span>
-                      </div>
-                      <ChevronDown
-                        size={14}
-                        className={`text-slate-400 shrink-0 transition-transform duration-200 ${isRecipientMenuOpen ? 'rotate-180 text-white' : ''}`}
-                      />
-                    </button>
-
-                    {/* Custom Dropdown Menu with Glassmorphic Styling */}
-                    {isRecipientMenuOpen && (
-                      <div className="absolute left-0 right-0 top-full mt-1.5 bg-[#141622]/95 border border-white/10 rounded-2xl shadow-2xl backdrop-blur-2xl p-1.5 z-50 flex flex-col gap-0.5 animate-in fade-in zoom-in-95 duration-150">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setPrivateRecipient("all");
-                            setIsRecipientMenuOpen(false);
-                          }}
-                          className={`w-full px-3 py-2 rounded-xl text-left text-xs font-semibold flex items-center justify-between transition-colors cursor-pointer ${privateRecipient === "all"
-                            ? "bg-indigo-600/20 text-indigo-300 border border-indigo-500/30"
-                            : "text-slate-300 hover:text-white hover:bg-white/5"
-                            }`}
-                        >
-                          <span>Everyone in Room</span>
-                          {privateRecipient === "all" && <Check size={14} className="text-indigo-400" />}
-                        </button>
-
-                        {participants
-                          .filter((p) => !isLocalParticipant(p) && !isBlockedInRoom(p))
-                          .map((p) => {
-                            const isSelected = privateRecipient === p.identity;
-                            return (
-                              <button
-                                key={p.identity}
-                                type="button"
-                                onClick={() => {
-                                  setPrivateRecipient(p.identity);
-                                  setIsRecipientMenuOpen(false);
-                                }}
-                                className={`w-full px-3 py-2 rounded-xl text-left text-xs font-semibold flex items-center justify-between transition-colors cursor-pointer ${isSelected
-                                  ? "bg-indigo-600/20 text-indigo-300 border border-indigo-500/30"
-                                  : "text-slate-300 hover:text-white hover:bg-white/5"
-                                  }`}
-                              >
-                                <span className="truncate">{p.name}</span>
-                                {isSelected && <Check size={14} className="text-indigo-400" />}
-                              </button>
-                            );
-                          })}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Feature: Show msgs / Not show msgs Toggle */}
+              <div className="flex items-center gap-2">
+                {/* Private Message Recipient Selector */}
+                <div className="relative flex-1 min-w-0" ref={recipientMenuRef}>
                   <button
                     type="button"
-                    onClick={toggleShowInRoomPopups}
-                    className={`flex items-center gap-1.5 px-3 py-2 rounded-2xl border text-xs font-medium transition-all cursor-pointer shrink-0 active:scale-95 ${showInRoomPopups
-                      ? "bg-white/10 text-white border-white/20 hover:bg-white/15"
-                      : "bg-transparent text-slate-400 border-white/10 hover:text-slate-200 hover:bg-white/5"
-                      }`}
-                    title={
-                      showInRoomPopups
-                        ? "Side pop-up messages are ON (Click to set Not show msgs)"
-                        : "Side pop-up messages are OFF (Click to set Show msgs)"
-                    }
+                    onClick={() => setIsRecipientMenuOpen(!isRecipientMenuOpen)}
+                    className={`w-full flex items-center justify-between gap-2 rounded-xl px-3 py-1.5 border transition-colors cursor-pointer active:scale-[0.99] ${
+                      privateRecipient !== "all"
+                        ? "bg-purple-500/12 hover:bg-purple-500/18 border-purple-500/35 text-purple-100"
+                        : "bg-white/[0.04] hover:bg-white/[0.07] border-white/[0.08] hover:border-white/15 text-white"
+                    }`}
                   >
-                    {showInRoomPopups ? (
-                      <>
-                        <Eye size={13} className="text-slate-200" />
-                        <span>Show msgs</span>
-                        <span className="w-1.5 h-1.5 rounded-full bg-white/70" />
-                      </>
-                    ) : (
-                      <>
-                        <EyeOff size={13} className="text-slate-500" />
-                        <span>Not show msgs</span>
-                        <span className="w-1.5 h-1.5 rounded-full bg-slate-600" />
-                      </>
-                    )}
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      {privateRecipient !== "all" ? (
+                        <Lock size={11} className="text-purple-400 shrink-0" />
+                      ) : (
+                        <Users size={11} className="text-indigo-400 shrink-0" />
+                      )}
+                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider shrink-0">
+                        To:
+                      </span>
+                      <span className="text-xs font-semibold truncate">
+                        {privateRecipient === "all" ? "Everyone" : privateRecipient}
+                      </span>
+                    </div>
+                    <ChevronDown
+                      size={13}
+                      className={`text-slate-400 shrink-0 transition-transform duration-200 ${isRecipientMenuOpen ? "rotate-180 text-white" : ""}`}
+                    />
                   </button>
+
+                  {/* Custom Dropdown Menu */}
+                  {isRecipientMenuOpen && (
+                    <div className="absolute left-0 right-0 top-full mt-1.5 bg-[#141622] border border-white/12 rounded-xl shadow-2xl p-1.5 z-50 flex flex-col gap-0.5 max-h-56 overflow-y-auto">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPrivateRecipient("all");
+                          setIsRecipientMenuOpen(false);
+                        }}
+                        className={`w-full px-2.5 py-2 rounded-lg text-left text-xs font-semibold flex items-center justify-between transition-colors cursor-pointer ${privateRecipient === "all"
+                          ? "bg-indigo-600/20 text-indigo-300 border border-indigo-500/30"
+                          : "text-slate-300 hover:text-white hover:bg-white/5"
+                          }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <Users size={13} className="text-indigo-400" />
+                          <span>Everyone in Room</span>
+                        </div>
+                        {privateRecipient === "all" && <Check size={14} className="text-indigo-400" />}
+                      </button>
+
+                      {participants
+                        .filter((p) => !isLocalParticipant(p) && !isBlockedInRoom(p))
+                        .map((p) => {
+                          const isSelected = privateRecipient === p.identity;
+                          return (
+                            <button
+                              key={p.identity}
+                              type="button"
+                              onClick={() => {
+                                setPrivateRecipient(p.identity);
+                                setIsRecipientMenuOpen(false);
+                              }}
+                              className={`w-full px-2.5 py-2 rounded-lg text-left text-xs font-semibold flex items-center justify-between transition-colors cursor-pointer ${isSelected
+                                ? "bg-purple-600/20 text-purple-200 border border-purple-500/30"
+                                : "text-slate-300 hover:text-white hover:bg-white/5"
+                                }`}
+                            >
+                              <div className="flex items-center gap-2 min-w-0">
+                                <UserAvatar avatar={p.avatar} color={p.color} size="sm" className="!w-5 !h-5 !rounded-full shrink-0" />
+                                <span className="truncate">{p.name}</span>
+                              </div>
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <Lock size={10} className="text-purple-400/70" />
+                                {isSelected && <Check size={14} className="text-purple-400" />}
+                              </div>
+                            </button>
+                          );
+                        })}
+                    </div>
+                  )}
                 </div>
 
-                {/* Status helper banner */}
-                <div className="flex items-center justify-between px-1 text-[10px] text-slate-400">
-                  <span className="truncate">
-                    {showInRoomPopups
-                      ? "Pop-up previews active when chat is closed"
-                      : "Pop-up previews hidden"}
-                  </span>
-                </div>
+                {/* Feature: Show msgs / Not show msgs Toggle */}
+                <button
+                  type="button"
+                  onClick={toggleShowInRoomPopups}
+                  className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border text-[11px] font-medium transition-colors cursor-pointer shrink-0 active:scale-95 ${showInRoomPopups
+                    ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/25 hover:bg-emerald-500/15"
+                    : "bg-white/[0.03] text-slate-400 border-white/[0.08] hover:text-slate-200 hover:bg-white/[0.06]"
+                    }`}
+                  title={
+                    showInRoomPopups
+                      ? "Pop-up message previews are ON when chat is closed (Click to hide)"
+                      : "Pop-up message previews are OFF (Click to show)"
+                  }
+                >
+                  {showInRoomPopups ? (
+                    <>
+                      <Eye size={12} className="text-emerald-400" />
+                      <span>Previews</span>
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                    </>
+                  ) : (
+                    <>
+                      <EyeOff size={12} className="text-slate-500" />
+                      <span>Hidden</span>
+                    </>
+                  )}
+                </button>
               </div>
             ) : (
-              <p className="text-[11px] text-slate-400 flex items-center justify-between">
+              <p className="text-[11px] text-slate-400 flex items-center justify-between px-0.5">
                 <span>Shift directly between active junctions</span>
-                <span className="text-indigo-300 font-semibold">{otherJunctions.length} available</span>
+                <span className="text-indigo-300 font-semibold tabular-nums">{otherJunctions.length} available</span>
               </p>
             )}
           </div>
@@ -6239,25 +6246,46 @@ export function JunctionRoom({
               <div
                 ref={chatScrollContainerRef}
                 onScroll={handleChatScroll}
-                className="flex-1 p-3 sm:p-4 overflow-y-auto space-y-3.5 scroll-smooth flex flex-col"
+                className="flex-1 p-3 sm:p-4 overflow-y-auto scroll-smooth flex flex-col"
               >
                 {visibleChatMessages.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center m-auto text-center py-8 px-4 select-none animate-in fade-in zoom-in-95 duration-200">
-                    <div className="w-12 h-12 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 mb-3 shadow-lg shadow-indigo-500/5">
-                      <MessageSquare size={22} />
+                  <div className="flex flex-col items-center justify-center m-auto text-center py-6 px-4 select-none animate-in fade-in zoom-in-95 duration-200">
+                    <div className="relative mb-3.5">
+                      <div className="absolute inset-0 rounded-2xl bg-indigo-500/20 blur-xl" />
+                      <div className="relative w-12 h-12 rounded-2xl bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center text-indigo-300 shadow-lg">
+                        <MessageSquare size={22} />
+                      </div>
                     </div>
-                    <span className="text-sm font-semibold text-slate-200">Start your conversation</span>
-                    <p className="text-xs text-slate-400 mt-1 max-w-[220px] leading-relaxed">
-                      Send a message to the room or whisper privately to any user.
+                    <span className="text-sm font-semibold text-white tracking-tight">
+                      {privateRecipient !== "all"
+                        ? `Whisper to ${privateRecipient}`
+                        : "Start the conversation"}
+                    </span>
+                    <p className="text-xs text-slate-400 mt-1 max-w-[240px] leading-relaxed">
+                      {privateRecipient !== "all"
+                        ? "Only you and them can see private whispers."
+                        : "Say hello to the room or switch \"To:\" above to whisper privately."}
                     </p>
+                    <div className="flex flex-wrap items-center justify-center gap-1.5 mt-4 max-w-[280px]">
+                      {["Hey everyone! 👋", "What's the vibe?", "Good to be here ✨"].map((starter) => (
+                        <button
+                          key={starter}
+                          type="button"
+                          onClick={() => setInputMessage(starter)}
+                          className="px-2.5 py-1 rounded-full bg-white/[0.04] hover:bg-indigo-500/15 border border-white/[0.08] hover:border-indigo-500/35 text-[11px] font-medium text-slate-300 hover:text-indigo-200 transition-colors cursor-pointer active:scale-95"
+                        >
+                          {starter}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                ) : visibleChatMessages.map((msg) => {
+                ) : visibleChatMessages.map((msg, idx) => {
                   // System Announcement Card
                   if (msg.senderId === "system") {
                     return (
-                      <div key={msg.id} className="w-full flex justify-center py-2 px-1">
-                        <div className="max-w-[95%] px-3.5 py-2.5 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-200 text-xs text-center flex items-center gap-2.5 shadow-sm">
-                          <Sparkles size={14} className="text-indigo-400 shrink-0" />
+                      <div key={msg.id} className="w-full flex justify-center py-2 px-1 my-1">
+                        <div className="max-w-[95%] px-3.5 py-2 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-200 text-xs text-center flex items-center gap-2 shadow-sm">
+                          <Sparkles size={13} className="text-indigo-400 shrink-0" />
                           <p className="leading-relaxed font-medium">{msg.text}</p>
                         </div>
                       </div>
@@ -6269,11 +6297,34 @@ export function JunctionRoom({
                   const senderParticipant = participants.find((p) => p.identity === msg.senderName);
                   const senderRole = isMe ? myPlatformRole : (senderParticipant?.userRole || undefined);
 
+                  const prevMsg = idx > 0 ? visibleChatMessages[idx - 1] : null;
+                  const isSameSenderAsPrev = Boolean(
+                    prevMsg &&
+                    prevMsg.senderId !== "system" &&
+                    prevMsg.senderName === msg.senderName &&
+                    prevMsg.targetIdentity === msg.targetIdentity &&
+                    Math.abs((msg.timestamp || 0) - (prevMsg.timestamp || 0)) < 2 * 60 * 1000
+                  );
+
+                  const nextMsg = idx < visibleChatMessages.length - 1 ? visibleChatMessages[idx + 1] : null;
+                  const isSameSenderAsNext = Boolean(
+                    nextMsg &&
+                    nextMsg.senderId !== "system" &&
+                    nextMsg.senderName === msg.senderName &&
+                    nextMsg.targetIdentity === msg.targetIdentity &&
+                    Math.abs((nextMsg.timestamp || 0) - (msg.timestamp || 0)) < 2 * 60 * 1000
+                  );
+
                   return (
-                    <div key={msg.id} className={`group/msg relative flex flex-col ${isMe ? 'items-end' : 'items-start'} py-1`}>
-                      {/* Sender Header for Incoming Messages */}
-                      {!isMe && (
-                        <div className="flex items-center gap-1.5 mb-1 pl-1">
+                    <div
+                      key={msg.id}
+                      className={`group/msg relative flex flex-col ${isMe ? 'items-end' : 'items-start'} ${
+                        isSameSenderAsPrev ? 'mt-0.5' : 'mt-3 first:mt-0'
+                      }`}
+                    >
+                      {/* Sender Header for Incoming Messages (only on first in group) */}
+                      {!isMe && !isSameSenderAsPrev && (
+                        <div className="flex items-center gap-1.5 mb-1 pl-0.5">
                           <div className="w-5 h-5 rounded-full overflow-hidden shrink-0 border border-white/10 bg-slate-800">
                             <UserAvatar avatar={msg.senderAvatar} size="sm" className="!w-full !h-full" badgeRole={senderRole} />
                           </div>
@@ -6294,9 +6345,9 @@ export function JunctionRoom({
                         </div>
                       )}
 
-                      {/* Header for own whisper */}
-                      {isMe && isPrivate && (
-                        <div className="flex items-center gap-1 mb-1 pr-1 text-[10px] font-bold text-purple-300 uppercase tracking-wider">
+                      {/* Header for own whisper (only on first in group) */}
+                      {isMe && isPrivate && !isSameSenderAsPrev && (
+                        <div className="flex items-center gap-1 mb-1 pr-0.5 text-[10px] font-bold text-purple-300 uppercase tracking-wider">
                           <Lock size={10} /> Whisper to {msg.targetIdentity}
                         </div>
                       )}
@@ -6304,8 +6355,8 @@ export function JunctionRoom({
                       {/* Quoted Message Preview if Reply */}
                       {msg.replyTo && (
                         <div className={`mb-1 px-3 py-1.5 rounded-xl border-l-2 max-w-[85%] text-xs flex flex-col ${isMe
-                          ? 'bg-indigo-950/40 border-indigo-400 text-indigo-200'
-                          : 'bg-black/30 border-purple-400 text-purple-200'
+                          ? 'bg-indigo-950/50 border-indigo-400 text-indigo-200'
+                          : 'bg-[#141622] border-purple-400 text-purple-200'
                           }`}>
                           <span className="text-[10px] font-bold opacity-80 flex items-center gap-1">
                             <Reply size={10} /> Replying to {msg.replyTo.senderName}
@@ -6320,7 +6371,7 @@ export function JunctionRoom({
                       <div className="relative group/bubble max-w-[85%] flex items-center">
                         {/* Action Bar for isMe: Placed to the LEFT of the bubble in open row space */}
                         {isMe && (
-                          <div className="absolute right-full mr-2.5 top-1/2 -translate-y-1/2 opacity-0 group-hover/msg:opacity-100 transition-all duration-150 flex items-center gap-1 bg-[#141622]/95 border border-white/10 rounded-full px-1.5 py-1 shadow-2xl backdrop-blur-xl z-20 pointer-events-none group-hover/msg:pointer-events-auto">
+                          <div className="absolute right-full mr-2 top-1/2 -translate-y-1/2 opacity-0 group-hover/msg:opacity-100 transition-opacity duration-150 flex items-center gap-0.5 bg-[#161826] border border-white/12 rounded-full px-1.5 py-1 shadow-xl z-20 pointer-events-none group-hover/msg:pointer-events-auto">
                             <button
                               type="button"
                               onClick={() => {
@@ -6363,14 +6414,14 @@ export function JunctionRoom({
 
                         {/* Message Bubble */}
                         <div className={`
-                    px-4 py-2.5 text-[13.5px] leading-relaxed shadow-lg backdrop-blur-md break-words transition-all
+                    px-3.5 py-2 text-[13.5px] leading-relaxed shadow-md break-words transition-colors
                     ${isMe
                             ? (isPrivate
-                              ? 'rounded-2xl rounded-tr-xs text-white bg-gradient-to-br from-purple-600 to-fuchsia-600 shadow-purple-600/25'
-                              : 'rounded-2xl rounded-tr-xs text-white bg-gradient-to-br from-indigo-600 to-indigo-500 shadow-indigo-600/25')
+                              ? `text-white bg-gradient-to-br from-purple-600 to-fuchsia-600 shadow-purple-600/20 ${isSameSenderAsPrev ? 'rounded-2xl rounded-r-md' : 'rounded-2xl rounded-tr-xs'}`
+                              : `text-white bg-gradient-to-br from-indigo-600 to-indigo-500 shadow-indigo-600/20 ${isSameSenderAsPrev ? 'rounded-2xl rounded-r-md' : 'rounded-2xl rounded-tr-xs'}`)
                             : (isPrivate
-                              ? 'rounded-2xl rounded-tl-xs border border-purple-500/30 bg-[#251532]/90 text-purple-100 shadow-purple-950/20'
-                              : 'rounded-2xl rounded-tl-xs border border-white/[0.08] bg-[#181924]/90 text-slate-100 shadow-black/20')
+                              ? `border border-purple-500/30 bg-[#231430] text-purple-100 shadow-purple-950/20 ${isSameSenderAsPrev ? 'rounded-2xl rounded-l-md' : 'rounded-2xl rounded-tl-xs'}`
+                              : `border border-white/[0.08] bg-[#161824] text-slate-100 shadow-black/20 ${isSameSenderAsPrev ? 'rounded-2xl rounded-l-md' : 'rounded-2xl rounded-tl-xs'}`)
                           }
                   `}>
                           <SafeMessageText text={msg.text} isMe={isMe} />
@@ -6383,7 +6434,7 @@ export function JunctionRoom({
 
                         {/* Action Bar for other users: Placed to the RIGHT of the bubble in open row space */}
                         {!isMe && (
-                          <div className="absolute left-full ml-2.5 top-1/2 -translate-y-1/2 opacity-0 group-hover/msg:opacity-100 transition-all duration-150 flex items-center gap-1 bg-[#141622]/95 border border-white/10 rounded-full px-1.5 py-1 shadow-2xl backdrop-blur-xl z-20 pointer-events-none group-hover/msg:pointer-events-auto">
+                          <div className="absolute left-full ml-2 top-1/2 -translate-y-1/2 opacity-0 group-hover/msg:opacity-100 transition-opacity duration-150 flex items-center gap-0.5 bg-[#161826] border border-white/12 rounded-full px-1.5 py-1 shadow-xl z-20 pointer-events-none group-hover/msg:pointer-events-auto">
                             <button
                               type="button"
                               onClick={() => {
@@ -6409,9 +6460,11 @@ export function JunctionRoom({
                         )}
                       </div>
 
-                      <span className="text-[9.5px] text-slate-500 mt-1 px-1 select-none">
-                        {new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                      </span>
+                      {!isSameSenderAsNext && (
+                        <span className="text-[9.5px] text-slate-500 mt-1 px-1 select-none tabular-nums">
+                          {new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                        </span>
+                      )}
                     </div>
                   );
                 })}
@@ -6555,8 +6608,20 @@ export function JunctionRoom({
               />
 
               {/* Chat Input Area */}
-              <form onSubmit={handleSendMessage} className="p-3 sm:p-4 border-t border-white/[0.08] bg-[#0E0F17]/90 backdrop-blur-xl shrink-0">
-                <div className="relative flex items-center bg-white/[0.04] border border-white/10 rounded-2xl p-1 focus-within:border-indigo-500/60 focus-within:bg-white/[0.07] focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all shadow-inner">
+              <form onSubmit={handleSendMessage} className="p-3 sm:p-3.5 border-t border-white/[0.07] bg-[#0F111A] shrink-0">
+                <div
+                  className={`relative flex items-center bg-white/[0.04] border rounded-2xl p-1 transition-colors shadow-inner ${
+                    privateRecipient !== "all"
+                      ? "border-purple-500/35 focus-within:border-purple-400/70 focus-within:bg-purple-500/[0.06] focus-within:ring-2 focus-within:ring-purple-500/20"
+                      : "border-white/[0.09] focus-within:border-indigo-500/60 focus-within:bg-white/[0.06] focus-within:ring-2 focus-within:ring-indigo-500/20"
+                  }`}
+                >
+                  {privateRecipient !== "all" && !editingMessage && (
+                    <span className="ml-2 px-1.5 py-0.5 rounded-md bg-purple-500/20 border border-purple-500/30 text-[10px] font-semibold text-purple-300 flex items-center gap-1 shrink-0 select-none">
+                      <Lock size={9} />
+                      <span className="hidden xs:inline">Whisper</span>
+                    </span>
+                  )}
                   <input
                     type="text"
                     value={inputMessage}
@@ -6575,16 +6640,29 @@ export function JunctionRoom({
                       editingMessage
                         ? "Edit message..."
                         : privateRecipient !== "all"
-                          ? `Whisper to ${privateRecipient}...`
+                          ? `Message ${privateRecipient}...`
                           : "Send a message..."
                     }
                     maxLength={200}
-                    className="flex-1 bg-transparent px-3.5 py-2 text-xs sm:text-sm text-white placeholder-slate-500 focus:outline-none"
+                    className="flex-1 min-w-0 bg-transparent px-3 py-2 text-xs sm:text-sm text-white placeholder-slate-500 focus:outline-none"
                   />
+                  {inputMessage.length >= 150 && (
+                    <span
+                      className={`text-[10px] font-medium tabular-nums mr-1.5 shrink-0 ${
+                        inputMessage.length >= 190 ? "text-amber-400" : "text-slate-500"
+                      }`}
+                    >
+                      {inputMessage.length}/200
+                    </span>
+                  )}
                   <button
                     type="submit"
                     disabled={!inputMessage.trim() || chatSafetyDetection?.severity === "block"}
-                    className="w-8 h-8 rounded-xl flex items-center justify-center bg-indigo-600 hover:bg-indigo-500 active:scale-95 disabled:bg-white/5 disabled:text-slate-600 text-white transition-all shadow-md shadow-indigo-600/20 cursor-pointer disabled:cursor-not-allowed"
+                    className={`w-8 h-8 rounded-xl flex items-center justify-center active:scale-95 disabled:bg-white/5 disabled:text-slate-600 text-white transition-colors shadow-md cursor-pointer disabled:cursor-not-allowed shrink-0 ${
+                      privateRecipient !== "all"
+                        ? "bg-purple-600 hover:bg-purple-500 shadow-purple-600/20"
+                        : "bg-indigo-600 hover:bg-indigo-500 shadow-indigo-600/20"
+                    }`}
                     aria-label="Send message"
                   >
                     <Send size={14} className={inputMessage.trim() ? "translate-x-0.5 -translate-y-0.5 transition-transform" : ""} />

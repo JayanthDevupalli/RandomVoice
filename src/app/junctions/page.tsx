@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { useGuestUser } from "@/hooks/useGuestUser";
@@ -26,6 +26,8 @@ import {
   MapPin,
   Compass,
   Shield,
+  X,
+  Flame,
 } from "lucide-react";
 
 const PUBLIC_FILTERS = [
@@ -65,6 +67,7 @@ export default function JunctionsPage() {
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [activeTab, setActiveTab] = useState<"public" | "private">("public");
+  const [showActiveOnly, setShowActiveOnly] = useState<boolean>(false);
 
   const userRef = useRef(user);
   const guestRef = useRef(guest);
@@ -314,16 +317,16 @@ export default function JunctionsPage() {
     setJunctions((prev) => prev.filter((j) => j.id !== id));
   };
 
-  const isPublicJunction = (j: Junction) => {
+  const isPublicJunction = useCallback((j: Junction) => {
     if (j.isCustom || j.creatorId || (typeof j.id === "string" && j.id.startsWith("junc_"))) {
       return false;
     }
     return (typeof j.id === "string" && j.id.startsWith("station_")) || (Array.isArray(j.tags) && j.tags.includes("Public"));
-  };
+  }, []);
 
   const isSuperAdmin = user?.role === "super_admin";
 
-  const isRoomCreator = (j: Junction) => {
+  const isRoomCreator = useCallback((j: Junction) => {
     const creatorIdentifier = (j.creatorId || j.moderatorIdentity || "").trim().toLowerCase();
     if (!creatorIdentifier) return false;
     const userAliases = [
@@ -339,44 +342,73 @@ export default function JunctionsPage() {
       .filter(Boolean)
       .map((a) => a!.trim().toLowerCase());
     return userAliases.includes(creatorIdentifier);
-  };
+  }, [user?.username, user?.displayName, user?.name, user?.id, guest?.name, guest?.displayName, guest?.username, guest?.id]);
 
-  const filteredJunctions = junctions
-    .filter((j) => {
-      const matchesCategory =
-        activeTab === "private"
-          ? selectedCategory === "all" || j.category === selectedCategory
-          : selectedCategory === "all" || (Array.isArray(j.tags) && j.tags.includes(selectedCategory)); // public filters match region tag
+  const { publicStations, userRooms, currentTabRooms, activeInTabCount } = useMemo(() => {
+    const now = Date.now();
+    const query = searchQuery.trim().toLowerCase();
 
-      const matchesSearch =
-        (j.name || "").toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (j.description || "").toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (Array.isArray(j.tags) && j.tags.some((t) => t.toLowerCase().includes(searchQuery.toLowerCase())));
-      return matchesCategory && matchesSearch;
-    })
-    .sort((a, b) => {
-      // Prioritize creator's own rooms (especially if locked) at top of private list so creator can immediately find their room
-      if (activeTab === "private") {
-        const aMine = isRoomCreator(a);
-        const bMine = isRoomCreator(b);
-        if (aMine && !bMine) return -1;
-        if (!aMine && bMine) return 1;
+    const filtered = junctions
+      .filter((j) => {
+        const matchesCategory =
+          activeTab === "private"
+            ? selectedCategory === "all" || j.category === selectedCategory
+            : selectedCategory === "all" || (Array.isArray(j.tags) && j.tags.includes(selectedCategory));
+
+        if (!matchesCategory) return false;
+
+        if (showActiveOnly) {
+          const count = typeof j.currentCount === "number" ? j.currentCount : (j.participants?.length || 0);
+          if (count === 0) return false;
+        }
+
+        if (!query) return true;
+
+        return (
+          (j.name || "").toLowerCase().includes(query) ||
+          (j.description || "").toLowerCase().includes(query) ||
+          (Array.isArray(j.tags) && j.tags.some((t) => t.toLowerCase().includes(query)))
+        );
+      })
+      .sort((a, b) => {
+        if (activeTab === "private") {
+          const aMine = isRoomCreator(a);
+          const bMine = isRoomCreator(b);
+          if (aMine && !bMine) return -1;
+          if (!aMine && bMine) return 1;
+        }
+        return (b.participants?.length ?? b.currentCount) - (a.participants?.length ?? a.currentCount);
+      });
+
+    const pub = filtered.filter(isPublicJunction);
+    const priv = filtered.filter((j) => {
+      if (isPublicJunction(j)) return false;
+      if (j.expiresAt && j.expiresAt <= now) return false;
+      if (j.isLocked) {
+        return isRoomCreator(j) || isSuperAdmin;
       }
-      return (b.participants?.length ?? b.currentCount) - (a.participants?.length ?? a.currentCount);
+      return true;
     });
 
-  const now = Date.now();
-  const publicStations = filteredJunctions.filter(isPublicJunction);
-  const userRooms = filteredJunctions.filter((j) => {
-    if (isPublicJunction(j)) return false;
-    if (j.expiresAt && j.expiresAt <= now) return false;
-    // Even if locked, ONLY the creator (and Super Admin) can see their created room!
-    if (j.isLocked) {
-      return isRoomCreator(j) || isSuperAdmin;
-    }
-    return true;
-  });
-  const currentTabRooms = activeTab === "public" ? publicStations : userRooms;
+    const current = activeTab === "public" ? pub : priv;
+    const activeCount = current.filter(
+      (j) => (typeof j.currentCount === "number" ? j.currentCount : (j.participants?.length || 0)) > 0
+    ).length;
+
+    return {
+      publicStations: pub,
+      userRooms: priv,
+      currentTabRooms: current,
+      activeInTabCount: activeCount,
+    };
+  }, [junctions, activeTab, selectedCategory, searchQuery, showActiveOnly, isPublicJunction, isRoomCreator, isSuperAdmin]);
+
+  const hasActiveFilters = Boolean(searchQuery.trim() || selectedCategory !== "all" || showActiveOnly);
+  const clearAllFilters = () => {
+    setSearchQuery("");
+    setSelectedCategory("all");
+    setShowActiveOnly(false);
+  };
 
   if (!isLoaded || !guest) {
     return (
@@ -419,25 +451,40 @@ export default function JunctionsPage() {
             )}
 
             {/* Sleek Top Header & Action Row */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3 sm:mb-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 sm:mb-5">
               <div className="flex items-center justify-between w-full sm:w-auto">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2.5">
                   <h1 className="text-xl sm:text-2xl font-light text-white tracking-tight">
-                    Live <span className="font-medium bg-clip-text text-transparent bg-gradient-to-r from-indigo-300 to-purple-300">Rooms</span>
+                    Live <span className="font-semibold bg-clip-text text-transparent bg-gradient-to-r from-indigo-300 via-purple-300 to-indigo-200">Rooms</span>
                   </h1>
-                  <span className="text-[11px] px-2.5 py-1 rounded-full bg-white/5 text-slate-300 font-medium border border-white/10 backdrop-blur-md">
+                  <span className="text-[11px] px-2.5 py-0.5 rounded-full bg-white/[0.05] text-slate-300 font-medium border border-white/[0.08] tabular-nums">
                     {currentTabRooms.length} <span className="hidden sm:inline">Rooms</span>
                   </span>
+                  {activeInTabCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowActiveOnly((prev) => !prev)}
+                      className={`hidden xs:inline-flex items-center gap-1.5 text-[11px] px-2.5 py-0.5 rounded-full font-medium border transition-colors cursor-pointer ${
+                        showActiveOnly
+                          ? "bg-emerald-500/20 border-emerald-500/40 text-emerald-300"
+                          : "bg-emerald-500/10 border-emerald-500/20 text-emerald-300/90 hover:bg-emerald-500/15"
+                      }`}
+                      title="Filter to rooms with active speakers"
+                    >
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                      <span className="tabular-nums">{activeInTabCount} Active</span>
+                    </button>
+                  )}
                 </div>
 
                 {/* Mobile Tab Switcher */}
-                <div className="flex sm:hidden bg-white/5 border border-white/10 rounded-xl p-1 ml-2">
+                <div className="flex sm:hidden bg-white/[0.04] border border-white/[0.08] rounded-xl p-1 ml-2">
                   <button
                     onClick={() => {
                       setActiveTab("public");
                       setSelectedCategory("all");
                     }}
-                    className={`px-3 py-1 rounded-lg text-[11px] font-medium transition-all ${activeTab === "public" ? "bg-white/10 text-white shadow-sm" : "text-slate-400"
+                    className={`px-3 py-1 rounded-lg text-[11px] font-medium transition-colors ${activeTab === "public" ? "bg-white/12 text-white shadow-sm" : "text-slate-400"
                       }`}
                   >
                     Public
@@ -447,7 +494,7 @@ export default function JunctionsPage() {
                       setActiveTab("private");
                       setSelectedCategory("all");
                     }}
-                    className={`px-3 py-1 rounded-lg text-[11px] font-medium transition-all ${activeTab === "private" ? "bg-white/10 text-white shadow-sm" : "text-slate-400"
+                    className={`px-3 py-1 rounded-lg text-[11px] font-medium transition-colors ${activeTab === "private" ? "bg-white/12 text-white shadow-sm" : "text-slate-400"
                       }`}
                   >
                     Private
@@ -455,27 +502,27 @@ export default function JunctionsPage() {
                 </div>
               </div>
 
-              <div className="hidden sm:flex sm:flex-row sm:items-center gap-2 w-full sm:w-auto">
-                <div className="flex bg-white/5 border border-white/10 rounded-xl p-1 mr-0 sm:mr-4">
+              <div className="hidden sm:flex sm:flex-row sm:items-center gap-2.5 w-full sm:w-auto">
+                <div className="flex bg-white/[0.04] border border-white/[0.08] rounded-xl p-1 mr-0 sm:mr-2">
                   <button
                     onClick={() => {
                       setActiveTab("public");
                       setSelectedCategory("all");
                     }}
-                    className={`flex-1 sm:flex-none px-4 py-1.5 rounded-lg text-[13px] font-medium transition-all ${activeTab === "public" ? "bg-white/10 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"
+                    className={`flex-1 sm:flex-none px-4 py-1.5 rounded-lg text-[13px] font-medium transition-colors cursor-pointer ${activeTab === "public" ? "bg-white/12 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"
                       }`}
                   >
-                    Public ({publicStations.length})
+                    Public <span className="text-slate-400 text-xs tabular-nums">({publicStations.length})</span>
                   </button>
                   <button
                     onClick={() => {
                       setActiveTab("private");
                       setSelectedCategory("all");
                     }}
-                    className={`flex-1 sm:flex-none px-4 py-1.5 rounded-lg text-[13px] font-medium transition-all ${activeTab === "private" ? "bg-white/10 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"
+                    className={`flex-1 sm:flex-none px-4 py-1.5 rounded-lg text-[13px] font-medium transition-colors cursor-pointer ${activeTab === "private" ? "bg-white/12 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"
                       }`}
                   >
-                    Private ({userRooms.length})
+                    Private <span className="text-slate-400 text-xs tabular-nums">({userRooms.length})</span>
                   </button>
                 </div>
 
@@ -485,7 +532,7 @@ export default function JunctionsPage() {
                     setIsCreateModalOpen(true);
                   }}
                   disabled={user?.isBanned}
-                  className={`w-full sm:w-auto px-4 py-2.5 rounded-xl text-white font-semibold text-[13px] shadow-md transition-all flex items-center justify-center gap-1.5 whitespace-nowrap ${user?.isBanned
+                  className={`w-full sm:w-auto px-4 py-2 rounded-xl text-white font-semibold text-[13px] shadow-md transition-colors flex items-center justify-center gap-1.5 whitespace-nowrap ${user?.isBanned
                       ? "bg-rose-500/10 border border-rose-500/20 text-rose-400 cursor-not-allowed opacity-60"
                       : "bg-indigo-600 hover:bg-indigo-500 shadow-indigo-600/20 cursor-pointer active:scale-95"
                     }`}
@@ -496,22 +543,45 @@ export default function JunctionsPage() {
               </div>
             </div>
 
-            {/* Minimal Search & Filters (Single Row on Desktop / Compact on Mobile) */}
-            <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-3 sm:mb-5">
+            {/* Search & Filters (Lightweight Surfaces for Smooth Scrolling) */}
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2.5 mb-4 sm:mb-6">
               {/* Search Box */}
-              <div className="relative flex-1">
-                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <div className="relative flex-1 sm:max-w-xs lg:max-w-sm">
+                <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
                 <input
                   type="text"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search rooms or tags..."
-                  className="w-full pl-9 pr-3.5 py-1.5 sm:py-2 rounded-xl bg-white/5 border border-white/10 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500/50 focus:bg-white/[0.07] backdrop-blur-md transition-all font-light"
+                  placeholder="Search rooms, cities, or tags..."
+                  className="w-full pl-9 pr-8 py-2 rounded-xl bg-[#12141E] border border-white/[0.08] text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500/50 focus:bg-[#151824] transition-colors"
                 />
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchQuery("")}
+                    aria-label="Clear search"
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 rounded-full text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+                  >
+                    <X size={13} />
+                  </button>
+                )}
               </div>
 
               {/* Quick Category Chips */}
-              <div className="flex items-center gap-1.5 overflow-x-auto pb-2 sm:pb-0 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+                <button
+                  type="button"
+                  onClick={() => setShowActiveOnly((prev) => !prev)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium whitespace-nowrap transition-colors border cursor-pointer active:scale-95 ${
+                    showActiveOnly
+                      ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/35 shadow-sm"
+                      : "bg-[#12141E] text-slate-400 border-white/[0.06] hover:text-slate-200 hover:border-white/15"
+                  }`}
+                >
+                  <Flame size={12} className={showActiveOnly ? "text-emerald-400" : "text-slate-500"} />
+                  <span>Live Now</span>
+                </button>
+
                 {(activeTab === "public" ? PUBLIC_FILTERS : CATEGORY_FILTERS).map((cat) => {
                   const Icon = cat.icon;
                   const isSelected = selectedCategory === cat.id;
@@ -519,9 +589,9 @@ export default function JunctionsPage() {
                     <button
                       key={cat.id}
                       onClick={() => setSelectedCategory(cat.id)}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium whitespace-nowrap transition-all border cursor-pointer backdrop-blur-md active:scale-95 ${isSelected
-                          ? "bg-white/10 text-white border-white/20 shadow-sm"
-                          : "bg-white/5 text-slate-400 border-white/5 hover:text-slate-200 hover:bg-white/10 hover:border-white/10"
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium whitespace-nowrap transition-colors border cursor-pointer active:scale-95 ${isSelected
+                          ? "bg-indigo-500/15 text-white border-indigo-500/35 shadow-sm"
+                          : "bg-[#12141E] text-slate-400 border-white/[0.06] hover:text-slate-200 hover:border-white/15"
                         }`}
                     >
                       <Icon size={12} className={isSelected ? "text-indigo-400" : "text-slate-500"} />
@@ -535,8 +605,21 @@ export default function JunctionsPage() {
             {/* Active Tab Content */}
             {isLoading ? (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4 mb-8">
-                {[1, 2, 3].map((i) => (
-                  <div key={i} className="h-32 sm:h-36 rounded-2xl bg-[#12131A]/40 border border-white/5 animate-pulse p-4" />
+                {[1, 2, 3, 4, 5, 6].map((i) => (
+                  <div key={i} className="h-[148px] rounded-2xl bg-[#11131B] border border-white/[0.06] animate-pulse p-4 flex flex-col justify-between">
+                    <div className="flex items-center justify-between">
+                      <div className="h-5 w-24 rounded-md bg-white/[0.05]" />
+                      <div className="h-5 w-12 rounded-full bg-white/[0.05]" />
+                    </div>
+                    <div className="space-y-2">
+                      <div className="h-4 w-3/5 rounded bg-white/[0.06]" />
+                      <div className="h-3 w-4/5 rounded bg-white/[0.04]" />
+                    </div>
+                    <div className="pt-2.5 border-t border-white/[0.05] flex items-center justify-between">
+                      <div className="h-4 w-20 rounded bg-white/[0.04]" />
+                      <div className="h-7 w-16 rounded-lg bg-white/[0.06]" />
+                    </div>
+                  </div>
                 ))}
               </div>
             ) : activeTab === "public" ? (
@@ -548,14 +631,27 @@ export default function JunctionsPage() {
                     ))}
                   </div>
                 ) : (
-                  <div className="p-8 sm:p-12 rounded-[2rem] bg-[#12131A]/60 backdrop-blur-xl border border-white/5 text-center max-w-md mx-auto shadow-2xl">
+                  <div className="p-8 sm:p-12 rounded-[2rem] bg-[#12141E] border border-white/[0.07] text-center max-w-md mx-auto shadow-2xl">
                     <div className="w-14 h-14 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center mx-auto mb-4 text-indigo-400">
                       <Radio className="w-6 h-6" />
                     </div>
-                    <h3 className="text-lg sm:text-xl font-medium text-white mb-2">No Public Stations</h3>
-                    <p className="text-sm text-slate-400 font-light">
-                      Public stations will appear here.
+                    <h3 className="text-lg sm:text-xl font-medium text-white mb-2">
+                      {hasActiveFilters ? "No Matching Stations" : "No Public Stations"}
+                    </h3>
+                    <p className="text-sm text-slate-400 font-light mb-5">
+                      {hasActiveFilters
+                        ? "Try clearing your search or filter selection."
+                        : "Public stations will appear here."}
                     </p>
+                    {hasActiveFilters && (
+                      <button
+                        type="button"
+                        onClick={clearAllFilters}
+                        className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-white text-xs font-medium transition-colors cursor-pointer"
+                      >
+                        Clear Filters
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -568,21 +664,36 @@ export default function JunctionsPage() {
                     ))}
                   </div>
                 ) : (
-                  <div className="p-8 sm:p-12 rounded-[2rem] bg-[#12131A]/60 backdrop-blur-xl border border-white/5 text-center max-w-md mx-auto shadow-2xl">
+                  <div className="p-8 sm:p-12 rounded-[2rem] bg-[#12141E] border border-white/[0.07] text-center max-w-md mx-auto shadow-2xl">
                     <div className="w-14 h-14 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center mx-auto mb-4 text-indigo-400">
                       <Radio className="w-6 h-6" />
                     </div>
-                    <h3 className="text-lg sm:text-xl font-medium text-white mb-2">No Private Rooms</h3>
+                    <h3 className="text-lg sm:text-xl font-medium text-white mb-2">
+                      {hasActiveFilters ? "No Matching Rooms" : "No Private Rooms"}
+                    </h3>
                     <p className="text-sm text-slate-400 mb-6 font-light">
-                      Start a custom voice room.
+                      {hasActiveFilters
+                        ? "Try adjusting your filters or start a new custom room."
+                        : "Start a custom voice room."}
                     </p>
-                    <button
-                      onClick={() => setIsCreateModalOpen(true)}
-                      className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow-md shadow-indigo-600/20 transition-all flex items-center justify-center gap-1.5 mx-auto cursor-pointer active:scale-95"
-                    >
-                      <Plus size={15} />
-                      <span>Create Room</span>
-                    </button>
+                    <div className="flex items-center justify-center gap-2">
+                      {hasActiveFilters && (
+                        <button
+                          type="button"
+                          onClick={clearAllFilters}
+                          className="px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/15 text-white text-xs font-medium transition-colors cursor-pointer"
+                        >
+                          Clear Filters
+                        </button>
+                      )}
+                      <button
+                        onClick={() => setIsCreateModalOpen(true)}
+                        className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow-md shadow-indigo-600/20 transition-colors flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
+                      >
+                        <Plus size={15} />
+                        <span>Create Room</span>
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
