@@ -233,20 +233,29 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
-    // Fetch device_sessions & banned_fingerprints gracefully (works even before SQL migration)
+    // Fetch device_sessions, banned_fingerprints & auth last_sign_in_at gracefully
     let deviceSessions: any[] = [];
     let bannedFingerprints: any[] = [];
+    const authLastSignInMap = new Map<string, string>();
     try {
-      const [devRes, banRes] = await Promise.all([
+      const [devRes, banRes, authUsersRes] = await Promise.all([
         adminClient
           .from("device_sessions")
           .select("*")
           .order("last_seen_at", { ascending: false })
           .limit(500),
         adminClient.from("banned_fingerprints").select("ban_type, hash_value, source_user_id, expires_at"),
+        adminClient.auth.admin.listUsers({ page: 1, perPage: 1000 }),
       ]);
       if (!devRes.error && Array.isArray(devRes.data)) deviceSessions = devRes.data;
       if (!banRes.error && Array.isArray(banRes.data)) bannedFingerprints = banRes.data;
+      if (!authUsersRes.error && Array.isArray(authUsersRes.data?.users)) {
+        for (const au of authUsersRes.data.users) {
+          if (au.id && (au.last_sign_in_at || au.created_at)) {
+            authLastSignInMap.set(au.id, (au.last_sign_in_at || au.created_at)!);
+          }
+        }
+      }
     } catch {}
 
     const nowIso = new Date().toISOString();
@@ -296,7 +305,13 @@ export async function GET(request: NextRequest) {
 
       const userDevs = devicesByUser.get(p.id) || [];
       const latestDev = userDevs[0];
-      const lastSeenAt = p.last_seen_at || p.social_links?.last_seen_at || latestDev?.last_seen_at || null;
+      const lastSeenAt =
+        p.last_seen_at ||
+        p.social_links?.last_seen_at ||
+        latestDev?.last_seen_at ||
+        authLastSignInMap.get(p.id) ||
+        p.created_at ||
+        null;
       const currentJunctionId =
         p.current_junction_id || p.social_links?.current_junction_id || latestDev?.current_junction_id || null;
 
