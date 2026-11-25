@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAllJunctions, createJunction, purgeUserFromAllJunctions } from "@/lib/junctions-store";
 import { supabaseAdmin as sbAdmin } from "@/lib/supabase-admin";
+import { getClientIp } from "@/lib/rate-limit";
+import { checkBanEvasion } from "@/lib/ban-evasion";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -54,23 +56,52 @@ export async function POST(request: NextRequest) {
     }
 
     const authHeader = request.headers.get("Authorization");
+    let isAuthedUser = false;
+    let isUserBanned = false;
+    let isSuperAdminUser = false;
     if (authHeader?.startsWith("Bearer ")) {
       const token = authHeader.replace("Bearer ", "");
       try {
         const { data: { user: authUser } } = await sbAdmin.auth.getUser(token);
         if (authUser) {
+          isAuthedUser = true;
           const { data: prof } = await sbAdmin
             .from("profiles")
             .select("*")
             .eq("id", authUser.id)
             .maybeSingle();
           if (prof) {
+            const role = prof.role || prof.social_links?.role || "user";
+            isSuperAdminUser = role === "super_admin";
+            isUserBanned = !isSuperAdminUser && Boolean(prof.is_banned ?? prof.social_links?.is_banned);
             creator.name = prof.username || creator.name;
             if (prof.avatar) creator.avatar = prof.avatar;
           }
         }
       } catch (e) {
         console.warn("Auth check error in POST /api/junctions:", e);
+      }
+    }
+
+    if (isUserBanned) {
+      return NextResponse.json(
+        { error: "Your account has been suspended and cannot create rooms." },
+        { status: 403 }
+      );
+    }
+
+    if (!isSuperAdminUser) {
+      const deviceHash = request.headers.get("x-device-id")?.trim() || body.deviceHash || null;
+      const evasion = await checkBanEvasion({
+        deviceHash,
+        ip: getClientIp(request),
+        isRegistered: isAuthedUser,
+      });
+      if (evasion.blocked) {
+        return NextResponse.json(
+          { error: evasion.reason || "Room creation is restricted from this device or network." },
+          { status: 403 }
+        );
       }
     }
 

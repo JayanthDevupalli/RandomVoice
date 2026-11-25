@@ -3,6 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import { supabase as anonSupabase } from "@/lib/supabase";
 import { UserRole } from "@/lib/types";
 import { kickLiveKitParticipant } from "@/lib/livekit-server";
+import { banUserFingerprints, unbanUserFingerprints } from "@/lib/ban-evasion";
 
 export const dynamic = "force-dynamic";
 
@@ -232,6 +233,54 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
+    // Fetch device_sessions & banned_fingerprints gracefully (works even before SQL migration)
+    let deviceSessions: any[] = [];
+    let bannedFingerprints: any[] = [];
+    try {
+      const [devRes, banRes] = await Promise.all([
+        adminClient
+          .from("device_sessions")
+          .select("*")
+          .order("last_seen_at", { ascending: false })
+          .limit(500),
+        adminClient.from("banned_fingerprints").select("ban_type, hash_value, source_user_id, expires_at"),
+      ]);
+      if (!devRes.error && Array.isArray(devRes.data)) deviceSessions = devRes.data;
+      if (!banRes.error && Array.isArray(banRes.data)) bannedFingerprints = banRes.data;
+    } catch {}
+
+    const nowIso = new Date().toISOString();
+    const activeBannedDevices = new Set(
+      bannedFingerprints
+        .filter((b: any) => b.ban_type === "device" && (!b.expires_at || b.expires_at > nowIso))
+        .map((b: any) => b.hash_value)
+    );
+    const activeBannedIps = new Set(
+      bannedFingerprints
+        .filter((b: any) => b.ban_type === "ip" && (!b.expires_at || b.expires_at > nowIso))
+        .map((b: any) => b.hash_value)
+    );
+
+    const devicesByUser = new Map<string, any[]>();
+    const guestSessions: any[] = [];
+    for (const ds of deviceSessions) {
+      if (ds.user_id) {
+        const arr = devicesByUser.get(ds.user_id) || [];
+        arr.push(ds);
+        devicesByUser.set(ds.user_id, arr);
+      } else {
+        guestSessions.push({
+          device_hash: ds.device_hash,
+          guest_id: ds.guest_id,
+          display_name: ds.display_name || "Guest",
+          current_junction_id: ds.current_junction_id || null,
+          is_banned: Boolean(ds.is_banned || activeBannedDevices.has(ds.device_hash)),
+          last_seen_at: ds.last_seen_at,
+          first_seen_at: ds.first_seen_at,
+        });
+      }
+    }
+
     const normalized = (profiles || []).map((p: any) => {
       const rawRole = p.role || p.social_links?.role || "user";
       const isMain = rawRole === "super_admin";
@@ -245,6 +294,19 @@ export async function GET(request: NextRequest) {
         ? p.card_bg_color
         : (p.social_links?.card_bg_color || p.card_bg_color || "#465B73");
 
+      const userDevs = devicesByUser.get(p.id) || [];
+      const latestDev = userDevs[0];
+      const lastSeenAt = p.last_seen_at || p.social_links?.last_seen_at || latestDev?.last_seen_at || null;
+      const currentJunctionId =
+        p.current_junction_id || p.social_links?.current_junction_id || latestDev?.current_junction_id || null;
+
+      const linkedBannedAlt =
+        !resolvedBanned &&
+        !isMain &&
+        userDevs.some(
+          (d: any) => activeBannedDevices.has(d.device_hash) || (d.ip_hash && activeBannedIps.has(d.ip_hash))
+        );
+
       return {
         id: p.id,
         username: p.username,
@@ -256,10 +318,14 @@ export async function GET(request: NextRequest) {
         role: resolvedRole,
         is_banned: resolvedBanned,
         banned_reason: p.banned_reason || p.social_links?.banned_reason,
+        last_seen_at: lastSeenAt,
+        current_junction_id: currentJunctionId,
+        device_count: userDevs.length,
+        linked_banned_alt: linkedBannedAlt,
       };
     });
 
-    return NextResponse.json({ users: normalized });
+    return NextResponse.json({ users: normalized, guestSessions: guestSessions.slice(0, 100) });
   } catch (err: any) {
     console.error("Admin users GET error:", err);
     return NextResponse.json({ error: err.message }, { status: 500 });
@@ -283,6 +349,8 @@ export async function PATCH(request: NextRequest) {
       role,
       isBanned,
       bannedReason,
+      blockDeviceAndIp = true,
+      deviceHash,
       requesterUsername,
       requesterRole,
     } = body;
@@ -521,6 +589,23 @@ export async function PATCH(request: NextRequest) {
         Boolean(isBanned),
         bannedReason
       );
+
+      // Ban or unban associated device & IP fingerprints to stop alt-account / guest evasion
+      if (isBanned) {
+        if (blockDeviceAndIp !== false) {
+          await banUserFingerprints({
+            userId: targetProfile.id,
+            username: targetProfile.username,
+            reason: bannedReason,
+            bannedBy: auth.username || requesterUsername || "admin",
+          });
+        }
+      } else {
+        await unbanUserFingerprints({
+          userId: targetProfile.id,
+          username: targetProfile.username,
+        });
+      }
 
       // If user is banned, immediately disconnect them from active voice rooms
       if (isBanned) {

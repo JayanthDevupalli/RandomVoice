@@ -38,6 +38,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useMaintenanceMode } from "@/hooks/useMaintenanceMode";
+import { useGlobalPresence } from "@/components/providers/GlobalPresenceProvider";
 import { UserReportRecord } from "@/lib/types";
 
 interface AdminUserRecord {
@@ -51,6 +52,10 @@ interface AdminUserRecord {
   is_banned: boolean;
   banned_reason?: string;
   created_at?: string;
+  last_seen_at?: string | null;
+  current_junction_id?: string | null;
+  device_count?: number;
+  linked_banned_alt?: boolean;
 }
 
 interface AdminRoomRecord {
@@ -95,7 +100,9 @@ export default function AdminPortalPage() {
   // Filters
   const [userSearch, setUserSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState<"all" | UserRole>("all");
-  const [statusFilter, setStatusFilter] = useState<"all" | "active" | "suspended">("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | "active" | "online" | "offline" | "suspended">("all");
+  const { onlineUserIds } = useGlobalPresence();
+  const [blockDeviceAndIp, setBlockDeviceAndIp] = useState(true);
   const [roomFilter, setRoomFilter] = useState<"all" | "active" | "locked" | "public">("all");
   const [roomSearch, setRoomSearch] = useState("");
   const [deskSubFilter, setDeskSubFilter] = useState<"all" | "platform" | "rooms" | "reports">("all");
@@ -335,6 +342,7 @@ export default function AdminPortalPage() {
           action: "toggle_ban",
           isBanned: shouldBan,
           bannedReason: reason,
+          blockDeviceAndIp: shouldBan ? blockDeviceAndIp : false,
         }),
       });
 
@@ -740,13 +748,36 @@ export default function AdminPortalPage() {
     };
   }, [users]);
 
+  const isUserActiveNow = (u: AdminUserRecord) => {
+    if (onlineUserIds.has(u.id)) return true;
+    if (u.last_seen_at) {
+      const diff = Date.now() - new Date(u.last_seen_at).getTime();
+      if (diff >= 0 && diff < 2 * 60 * 1000) return true;
+    }
+    return false;
+  };
+
+  const formatLastSeen = (ts?: string | null) => {
+    if (!ts) return "Never seen";
+    const diffSec = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
+    if (diffSec < 60) return "Just now";
+    const mins = Math.floor(diffSec / 60);
+    if (mins < 60) return `${mins}m ago`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
+  };
+
   const statusCounts = useMemo(() => {
     return {
       all: users.length,
       active: users.filter((u) => !u.is_banned).length,
+      online: users.filter((u) => isUserActiveNow(u)).length,
+      offline: users.filter((u) => !isUserActiveNow(u)).length,
       suspended: users.filter((u) => u.is_banned).length,
     };
-  }, [users]);
+  }, [users, onlineUserIds]);
 
   // Report Filter Live Counts
   const reportCounts = useMemo(() => {
@@ -781,11 +812,13 @@ export default function AdminPortalPage() {
       }
 
       if (statusFilter === "active" && u.is_banned) return false;
+      if (statusFilter === "online" && !isUserActiveNow(u)) return false;
+      if (statusFilter === "offline" && isUserActiveNow(u)) return false;
       if (statusFilter === "suspended" && !u.is_banned) return false;
 
       return true;
     });
-  }, [users, userSearch, roleFilter, statusFilter]);
+  }, [users, userSearch, roleFilter, statusFilter, onlineUserIds]);
 
   // Filtered Rooms with search and status filters
   const filteredRooms = useMemo(() => {
@@ -1294,16 +1327,45 @@ export default function AdminPortalPage() {
                   </button>
 
                   <button
-                    onClick={() => setStatusFilter("active")}
+                    onClick={() => setStatusFilter("online")}
                     className={`px-2.5 py-1 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${
-                      statusFilter === "active"
+                      statusFilter === "online"
                         ? "bg-emerald-600 text-white shadow-sm"
                         : "bg-black/30 text-slate-400 hover:text-emerald-300"
                     }`}
                   >
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                    <span>Active</span>
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    <span>Online</span>
                     <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-emerald-500/10 text-emerald-300">
+                      {statusCounts.online}
+                    </span>
+                  </button>
+
+                  <button
+                    onClick={() => setStatusFilter("offline")}
+                    className={`px-2.5 py-1 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${
+                      statusFilter === "offline"
+                        ? "bg-slate-600 text-white shadow-sm"
+                        : "bg-black/30 text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full bg-slate-500" />
+                    <span>Offline</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-white/5 text-slate-400">
+                      {statusCounts.offline}
+                    </span>
+                  </button>
+
+                  <button
+                    onClick={() => setStatusFilter("active")}
+                    className={`px-2.5 py-1 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${
+                      statusFilter === "active"
+                        ? "bg-indigo-600 text-white shadow-sm"
+                        : "bg-black/30 text-slate-400 hover:text-indigo-300"
+                    }`}
+                  >
+                    <span>Allowed</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-indigo-500/10 text-indigo-300">
                       {statusCounts.active}
                     </span>
                   </button>
@@ -1461,6 +1523,24 @@ export default function AdminPortalPage() {
                             <span>@{u.username}</span>
                             <ExternalLink size={10} className="text-slate-500 shrink-0" />
                           </Link>
+                          <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                            {isUserActiveNow(u) ? (
+                              <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-300">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                                Online{u.current_junction_id ? " • In Room" : ""}
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 text-[10px] text-slate-500">
+                                <span className="w-1.5 h-1.5 rounded-full bg-slate-600" />
+                                Offline • {formatLastSeen(u.last_seen_at)}
+                              </span>
+                            )}
+                            {u.linked_banned_alt && (
+                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                                ⚠ Linked Alt
+                              </span>
+                            )}
+                          </div>
                         </div>
                       </div>
 
@@ -1634,9 +1714,27 @@ export default function AdminPortalPage() {
                                     </span>
                                   )}
                                 </div>
-                                <p className="text-[11px] text-slate-400 truncate max-w-[240px]">
-                                  {u.bio || "No bio set"}
-                                </p>
+                                <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                                  <p className="text-[11px] text-slate-400 truncate max-w-[180px]">
+                                    {u.bio || "No bio set"}
+                                  </p>
+                                  {isUserActiveNow(u) ? (
+                                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/25 text-[10px] font-semibold text-emerald-300">
+                                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                                      Online
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-white/[0.04] border border-white/[0.06] text-[10px] text-slate-400">
+                                      <span className="w-1.5 h-1.5 rounded-full bg-slate-500" />
+                                      {formatLastSeen(u.last_seen_at)}
+                                    </span>
+                                  )}
+                                  {u.linked_banned_alt && (
+                                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                                      ⚠ Linked Alt
+                                    </span>
+                                  )}
+                                </div>
                               </div>
                             </div>
                           </td>
@@ -2604,16 +2702,34 @@ export default function AdminPortalPage() {
             </p>
 
             {pendingAction.type === "toggle_ban" && pendingAction.newBanState && (
-              <div className="mb-4">
-                <label className="text-[11px] font-semibold text-slate-300 block mb-1">
-                  Reason for Suspension:
+              <div className="mb-4 space-y-3">
+                <div>
+                  <label className="text-[11px] font-semibold text-slate-300 block mb-1">
+                    Reason for Suspension:
+                  </label>
+                  <input
+                    type="text"
+                    value={banReasonInput}
+                    onChange={(e) => setBanReasonInput(e.target.value)}
+                    className="w-full px-3 py-2 bg-black/40 border border-white/10 rounded-xl text-xs text-white focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+                <label className="flex items-start gap-2.5 p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/25 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={blockDeviceAndIp}
+                    onChange={(e) => setBlockDeviceAndIp(e.target.checked)}
+                    className="mt-0.5 accent-rose-500"
+                  />
+                  <div className="text-xs">
+                    <span className="font-semibold text-rose-200 block">
+                      Block Device &amp; IP (Prevent Alt / Guest Evasion)
+                    </span>
+                    <span className="text-[10.5px] text-rose-300/80">
+                      Blocks this device from creating new accounts or joining as a guest.
+                    </span>
+                  </div>
                 </label>
-                <input
-                  type="text"
-                  value={banReasonInput}
-                  onChange={(e) => setBanReasonInput(e.target.value)}
-                  className="w-full px-3 py-2 bg-black/40 border border-white/10 rounded-xl text-xs text-white focus:outline-none focus:border-indigo-500"
-                />
               </div>
             )}
 

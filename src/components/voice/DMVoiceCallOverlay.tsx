@@ -261,15 +261,20 @@ export function DMVoiceCallOverlay() {
       (async () => {
         try {
           const { data: { session } } = await supabase.auth.getSession();
+          const headers: Record<string, string> = {};
+          if (session?.access_token) {
+            headers["Authorization"] = `Bearer ${session.access_token}`;
+          }
+          try {
+            const { getDeviceFingerprint } = await import("@/lib/device-fingerprint");
+            const dId = await getDeviceFingerprint();
+            if (dId) headers["x-device-id"] = dId;
+          } catch {}
           const res = await fetch(
             `/api/token?room=${encodeURIComponent(roomName)}&username=${encodeURIComponent(
               uniqueIdentity
             )}&displayName=${encodeURIComponent(displayLabel)}&avatar=${encodeURIComponent(user.avatar || "zap")}`,
-            {
-              headers: session?.access_token
-                ? { Authorization: `Bearer ${session.access_token}` }
-                : {},
-            }
+            { headers }
           );
           const data = await res.json();
           if (!cancelled && data.token) {

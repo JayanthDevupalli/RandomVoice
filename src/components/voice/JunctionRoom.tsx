@@ -3179,6 +3179,11 @@ export function JunctionRoom({
         };
 
         const authHeaders = await getAuthHeaders();
+        try {
+          const { getDeviceFingerprint } = await import("@/lib/device-fingerprint");
+          const dId = await getDeviceFingerprint();
+          if (dId) (authHeaders as Record<string, string>)["x-device-id"] = dId;
+        } catch {}
         const joinPromise = fetch(`/api/junctions/${junctionId}`, {
           method: "POST",
           headers: authHeaders,

@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from "react";
 import { useUser } from "@/hooks/useUser";
 import { supabase } from "@/lib/supabase";
+import { getDeviceFingerprint } from "@/lib/device-fingerprint";
 
 interface GlobalPresenceContextType {
   onlineUserIds: Set<string>;
@@ -148,6 +149,66 @@ export function GlobalPresenceProvider({ children }: { children: React.ReactNode
       channelRef.current = null;
     };
   }, [user?.id, isRegistered, showOnline]);
+
+  // Persistent heartbeat for ALL users (Registered + Guests) to power Active/Offline tracking & device binding
+  useEffect(() => {
+    if (!user?.id) return;
+
+    let cancelled = false;
+    let intervalId: NodeJS.Timeout | null = null;
+
+    const sendHeartbeat = async () => {
+      if (cancelled) return;
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      try {
+        const deviceHash = await getDeviceFingerprint();
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (deviceHash) headers["x-device-id"] = deviceHash;
+        if (isRegistered) {
+          try {
+            const { data: { session } } = await supabase.auth.getSession();
+            if (session?.access_token) {
+              headers["Authorization"] = `Bearer ${session.access_token}`;
+            }
+          } catch {}
+        }
+
+        const currentJunctionId =
+          typeof window !== "undefined" && window.location.pathname.startsWith("/junction/")
+            ? window.location.pathname.split("/junction/")[1]?.split("/")[0] || null
+            : null;
+
+        await fetch("/api/presence/heartbeat", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            userId: isRegistered ? user.id : null,
+            guestId: !isRegistered ? user.id : null,
+            displayName: user.displayName || user.name || user.username,
+            deviceHash,
+            isRegistered,
+            currentJunctionId,
+          }),
+        });
+      } catch {}
+    };
+
+    sendHeartbeat();
+    intervalId = setInterval(sendHeartbeat, 60_000);
+
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        sendHeartbeat();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+
+    return () => {
+      cancelled = true;
+      if (intervalId) clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [user?.id, user?.name, user?.displayName, user?.username, isRegistered]);
 
   const isUserOnline = (userId?: string) => {
     if (!userId) return false;

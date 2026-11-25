@@ -3,6 +3,7 @@ import { AccessToken } from "livekit-server-sdk";
 import { supabase } from "@/lib/supabase";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { checkBanEvasion, recordDeviceSession } from "@/lib/ban-evasion";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -107,6 +108,37 @@ export async function GET(request: NextRequest) {
   if (hasAuthHeader && !authedProfile) {
     return NextResponse.json({ error: "Invalid or expired session token." }, { status: 401 });
   }
+
+  // --- 0.5 Ban Evasion Gate (Device & IP check for both Guests and Registered users) ---
+  const deviceHash =
+    request.headers.get("x-device-id")?.trim() ||
+    searchParams.get("deviceId")?.trim() ||
+    null;
+
+  if (authedProfile?.userRole !== "super_admin") {
+    const evasionCheck = await checkBanEvasion({
+      deviceHash,
+      ip,
+      isRegistered: Boolean(authedProfile),
+    });
+    if (evasionCheck.blocked) {
+      return NextResponse.json(
+        { error: evasionCheck.reason || "Access suspended from this device or network." },
+        { status: 403 }
+      );
+    }
+  }
+
+  // Record/update device session with current room
+  recordDeviceSession({
+    deviceHash,
+    ip,
+    userId: authedProfile?.id || null,
+    guestId: !authedProfile ? (searchParams.get("userId") || requestedUsername) : null,
+    displayName,
+    userAgent: request.headers.get("user-agent"),
+    currentJunctionId: room.startsWith("dm_call_") ? null : room,
+  }).catch(() => {});
 
   // --- 1. Private 1-on-1 DM Voice Call Authorization ---
   if (room.startsWith("dm_call_")) {
