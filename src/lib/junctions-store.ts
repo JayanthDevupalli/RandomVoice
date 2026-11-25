@@ -922,7 +922,7 @@ export async function addParticipantToJunction(
     ? (isCreator ? "moderator" : "speaker")
     : "speaker";
   const newMuted = shouldKeepModMute ? true : (existing?.isMuted !== undefined ? existing.isMuted : (participant.isMuted !== undefined ? participant.isMuted : true));
-  const joinedAtTime = existing?.joinedAt || (participant as any).joinedAt || (participant as any).joined_at || Date.now();
+  const joinedAtTime = existing?.joinedAt || Date.now();
   const newCount = isAlreadyPresent ? junction.participants.length : junction.participants.length + 1;
 
   // Execute database writes concurrently: upsert participant, remove duplicate records from other rooms
@@ -1542,6 +1542,160 @@ export async function toggleRoomLock(
   const updated = await fetchJunctionWithParticipants(junctionId);
   invalidateJunctionsCache();
   return { success: true, junction: updated };
+}
+
+export async function extendJunctionDuration(
+  junctionId: string,
+  requesterIdentity: string,
+  extraMinutes: number,
+  callerRoleParam?: string,
+  requesterUserId?: string
+): Promise<{ success: boolean; error?: string; expiresAt?: number; junction?: Junction }> {
+  const validMinutes = Math.round(Number(extraMinutes));
+  if (!validMinutes || isNaN(validMinutes) || validMinutes < 5 || validMinutes > 1440) {
+    return { success: false, error: "Invalid extension duration (must be between 5 and 1440 minutes)." };
+  }
+
+  const { data: jRow, error: jErr } = await supabase
+    .from("junctions")
+    .select("*")
+    .eq("id", junctionId)
+    .single();
+
+  if (jErr || !jRow) {
+    return { success: false, error: "Junction not found or expired" };
+  }
+
+  const junction = await fetchJunctionWithParticipants(junctionId);
+  if (!junction) {
+    return { success: false, error: "Junction not found or expired" };
+  }
+
+  const isPrivate = Boolean(
+    junction.isCustom ||
+    junction.creatorId ||
+    (typeof junction.id === "string" && junction.id.startsWith("junc_"))
+  );
+
+  if (!isPrivate) {
+    return { success: false, error: "Duration extension is only available for private rooms." };
+  }
+
+  if (junction.expiresAt === null || junction.expiresAt === undefined) {
+    return { success: false, error: "This room is permanent and does not expire." };
+  }
+
+  // Determine platform role of the caller
+  let callerRole: UserRole = resolvePlatformRole(requesterIdentity, callerRoleParam);
+  if (callerRole === "user" && (requesterUserId || requesterIdentity)) {
+    try {
+      let query = supabase.from("profiles").select("*");
+      if (requesterUserId && isUUID(requesterUserId)) {
+        query = query.or(`id.eq.${requesterUserId},username.ilike.${requesterIdentity}`);
+      } else {
+        query = query.ilike("username", requesterIdentity);
+      }
+      const { data: callerProf } = await query.maybeSingle();
+      if (callerProf) {
+        callerRole = resolvePlatformRole(callerProf.username, callerProf.role || callerProf.social_links?.role);
+      }
+    } catch (e) {
+      console.error("Error resolving caller platform role in extendJunctionDuration:", e);
+    }
+  }
+
+  const isSuperAdmin = callerRole === "super_admin";
+  const isAdmin = isSuperAdmin || callerRole === "admin";
+
+  const cleanReqId = (requesterIdentity || "").trim().toLowerCase();
+  const cleanUserId = (requesterUserId || "").trim().toLowerCase();
+  const cleanCreator = (junction.creatorId || "").trim().toLowerCase();
+  const cleanModIdentity = (junction.moderatorIdentity || "").trim().toLowerCase();
+
+  const isCreator = Boolean(
+    (cleanCreator && (cleanReqId === cleanCreator || (cleanUserId && cleanUserId === cleanCreator))) ||
+    (cleanModIdentity && (cleanReqId === cleanModIdentity || (cleanUserId && cleanUserId === cleanModIdentity)))
+  );
+
+  let isMod = false;
+  if (!isCreator && !isAdmin && cleanReqId) {
+    const { data: modParticipant } = await supabase
+      .from("junction_participants")
+      .select("role")
+      .eq("junction_id", junctionId)
+      .ilike("identity", cleanReqId)
+      .maybeSingle();
+    isMod = modParticipant?.role === "moderator";
+  }
+
+  if (!isCreator && !isMod && !isAdmin) {
+    return { success: false, error: "Unauthorized: Only the room host can extend room duration." };
+  }
+
+  const now = Date.now();
+  const baseExpiry = junction.expiresAt > now ? junction.expiresAt : now;
+  const newExpiresAt = baseExpiry + validMinutes * 60 * 1000;
+
+  const existingTags = Array.isArray((jRow as JunctionRow).tags) ? (jRow as JunctionRow).tags : [];
+  const filteredTags = existingTags.filter(
+    (t) => typeof t === "string" && !t.startsWith("__expires:")
+  );
+  if (!filteredTags.some((t) => t.startsWith("__duration:"))) {
+    filteredTags.push(`__duration:${junction.durationType || "1h"}__`);
+  }
+  filteredTags.push(`__expires:${newExpiresAt}__`);
+
+  const updatePayload: Record<string, any> = {
+    expires_at: newExpiresAt,
+    tags: filteredTags,
+  };
+
+  let { error: updateErr } = await supabase
+    .from("junctions")
+    .update(updatePayload)
+    .eq("id", junctionId);
+
+  // Graceful fallback if expires_at column doesn't exist in Supabase
+  if (updateErr && (updateErr.message?.includes("expires_at") || (updateErr as any).details?.includes("expires_at"))) {
+    delete updatePayload.expires_at;
+    const retry = await supabase
+      .from("junctions")
+      .update(updatePayload)
+      .eq("id", junctionId);
+    updateErr = retry.error;
+  }
+
+  if (updateErr) {
+    console.error("Failed to extend junction duration:", updateErr);
+    return { success: false, error: "Failed to extend room duration." };
+  }
+
+  // Broadcast realtime event so all active participants update countdown immediately
+  try {
+    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+    const sb = (serviceKey && url)
+      ? createClient(url, serviceKey, { auth: { autoRefreshToken: false, persistSession: false } })
+      : supabase;
+    sb.channel(`room_realtime_${junctionId}`).send({
+      type: "broadcast",
+      event: "room_updated",
+      payload: {
+        type: "room_duration_extended",
+        payload: {
+          expiresAt: newExpiresAt,
+          addedMinutes: validMinutes,
+          extendedBy: requesterIdentity,
+        },
+      },
+    }).then();
+  } catch (broadcastErr) {
+    console.warn("Failed to broadcast room_duration_extended:", broadcastErr);
+  }
+
+  const updated = await fetchJunctionWithParticipants(junctionId);
+  invalidateJunctionsCache();
+  return { success: true, expiresAt: newExpiresAt, junction: updated };
 }
 
 export async function deleteJunction(

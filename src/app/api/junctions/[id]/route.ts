@@ -11,6 +11,7 @@ import {
   updateParticipantProfile,
   reportParticipant,
   updateJunctionDetails,
+  extendJunctionDuration,
   touchParticipantHeartbeat,
   toggleRoomLock,
   knockWaitingRoom,
@@ -413,6 +414,51 @@ export async function POST(
         return NextResponse.json({ error: result.error }, { status: 400 });
       }
       return NextResponse.json({ junction: result.junction, success: true });
+    }
+
+    if (action === "extend_duration") {
+      let callerRole = requesterRole;
+      let callerUserId = moderatorUserId;
+      let effectiveIdentity = moderatorIdentity || identity || "";
+
+      const authHeader = request.headers.get("Authorization");
+      if (authHeader?.startsWith("Bearer ")) {
+        const token = authHeader.replace("Bearer ", "");
+        try {
+          const sbAdmin = getSbAdmin();
+          const { data: { user: authUser } } = await sbAdmin.auth.getUser(token);
+          if (authUser) {
+            callerUserId = authUser.id;
+            const { data: prof } = await sbAdmin
+              .from("profiles")
+              .select("*")
+              .eq("id", authUser.id)
+              .maybeSingle();
+            if (prof) {
+              callerRole = prof.role || prof.social_links?.role || callerRole;
+              effectiveIdentity = prof.username || effectiveIdentity;
+            }
+          }
+        } catch (e) {
+          console.warn("Auth check error in extend_duration action:", e);
+        }
+      }
+
+      const result = await extendJunctionDuration(
+        params.id,
+        effectiveIdentity,
+        Number(body.extraMinutes),
+        callerRole,
+        callerUserId
+      );
+      if (!result.success) {
+        return NextResponse.json({ error: result.error }, { status: 400 });
+      }
+      return NextResponse.json({
+        junction: result.junction,
+        expiresAt: result.expiresAt,
+        success: true,
+      });
     }
 
     if (action === "claim_mod") {

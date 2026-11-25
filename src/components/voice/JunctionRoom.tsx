@@ -306,7 +306,7 @@ function LiveKitDataSync({
         isMutedByMod: Boolean(meta.isMutedByMod),
         isSpeaking: rp.isSpeaking,
         connectionQuality: rp.connectionQuality === "poor" ? "poor" : "excellent",
-        joinedAt: meta.joinedAt || Date.now(),
+        joinedAt: typeof meta.joinedAt === "number" && meta.joinedAt > 0 ? meta.joinedAt : 0,
       };
     });
     onRemoteParticipantsChange(list);
@@ -1021,6 +1021,11 @@ export function JunctionRoom({
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [rightPanelTab, setRightPanelTab] = useState<"chat" | "junctions">("chat");
   const [chatMessages, setChatMessages] = useState<RoomChatMessage[]>([]);
+  const chatMessagesRef = useRef<RoomChatMessage[]>(chatMessages);
+  chatMessagesRef.current = chatMessages;
+  const hasSyncedChatHistoryRef = useRef<boolean>(false);
+  const pendingChatSyncTimersRef = useRef<Map<string, NodeJS.Timeout>>(new Map());
+  const [syncedHistoryCount, setSyncedHistoryCount] = useState<number>(0);
   const visibleChatMessages = useMemo(() => {
     return chatMessages.filter((msg) => {
       if (msg.senderId === "system") return true;
@@ -1126,13 +1131,17 @@ export function JunctionRoom({
   // Host knock management queue
   const [waitingKnocks, setWaitingKnocks] = useState<WaitingGuest[]>([]);
 
-  // Room Expiration Countdown (1s tick)
+  // Room Expiration Countdown (1s tick) & Duration Extension
   const [timeLeftMs, setTimeLeftMs] = useState<number | null>(null);
   const hasWarnedExpirationRef = useRef(false);
+  const [isExpirationWarningOpen, setIsExpirationWarningOpen] = useState(false);
+  const [isExtendMenuOpen, setIsExtendMenuOpen] = useState(false);
+  const [isExtendingDuration, setIsExtendingDuration] = useState(false);
 
   useEffect(() => {
     if (!junction?.expiresAt) {
       setTimeLeftMs(null);
+      setIsExpirationWarningOpen(false);
       return;
     }
     const updateTime = () => {
@@ -1140,14 +1149,17 @@ export function JunctionRoom({
       const diff = junction.expiresAt! - now;
       if (diff <= 0) {
         setTimeLeftMs(0);
+        setIsExpirationWarningOpen(false);
         setKickedNotice("This room's scheduled duration has ended. Returning to lobby...");
         return;
       }
       setTimeLeftMs(diff);
-      // 5-minute warning
-      if (diff <= 5 * 60 * 1000 && diff > 4 * 60 * 1000 && !hasWarnedExpirationRef.current) {
+      if (diff > 5 * 60 * 1000) {
+        hasWarnedExpirationRef.current = false;
+        setIsExpirationWarningOpen(false);
+      } else if (diff <= 5 * 60 * 1000 && !hasWarnedExpirationRef.current) {
         hasWarnedExpirationRef.current = true;
-        setModNoticeToast("⏳ This room will automatically close in 5 minutes.");
+        setIsExpirationWarningOpen(true);
       }
     };
     updateTime();
@@ -1160,6 +1172,9 @@ export function JunctionRoom({
     if (!junction) return "";
     if (timeLeftMs !== null) {
       if (timeLeftMs <= 0) return "Ending...";
+      if (timeLeftMs < 60 * 1000) {
+        return `${Math.max(1, Math.ceil(timeLeftMs / 1000))}s left`;
+      }
       const hours = Math.floor(timeLeftMs / 3600000);
       const mins = Math.floor((timeLeftMs % 3600000) / 60000);
       return hours > 0 ? `${hours}h ${mins}m left` : `${mins}m left`;
@@ -1527,6 +1542,10 @@ export function JunctionRoom({
   const isHost = Boolean(
     isPrivateRoom && !isWaitingRoom && isRoomCreator
   );
+  const isHostRef = useRef(isHost);
+  isHostRef.current = isHost;
+  const isWaitingRoomRef = useRef(isWaitingRoom);
+  isWaitingRoomRef.current = isWaitingRoom;
 
   const canLockUnlock = Boolean(
     isPrivateRoom && (isHost || isSuperAdmin)
@@ -2080,6 +2099,65 @@ export function JunctionRoom({
     }
   };
 
+  const handleExtendDuration = async (extraMinutes: 30 | 60) => {
+    if (isExtendingDuration || !isPrivateRoom || (!isHost && !isSuperAdmin) || !junction?.expiresAt) {
+      return;
+    }
+    setIsExtendingDuration(true);
+    try {
+      const authHeaders = await getAuthHeaders();
+      const res = await fetch(`/api/junctions/${junctionId}`, {
+        method: "POST",
+        headers: {
+          ...authHeaders,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          action: "extend_duration",
+          extraMinutes,
+          moderatorIdentity: myIdentity,
+          moderatorUserId: user?.id,
+          requesterRole: myPlatformRole,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || "Failed to extend room duration");
+      }
+
+      const newExpiresAt = Number(data.expiresAt || data.junction?.expiresAt);
+      if (data.junction) {
+        setJunction(data.junction);
+      } else if (newExpiresAt && !isNaN(newExpiresAt)) {
+        setJunction((prev) => (prev ? { ...prev, expiresAt: newExpiresAt } : prev));
+      }
+
+      if (newExpiresAt && newExpiresAt - Date.now() > 5 * 60 * 1000) {
+        hasWarnedExpirationRef.current = false;
+        setIsExpirationWarningOpen(false);
+      }
+      setIsExtendMenuOpen(false);
+
+      broadcastRoomUpdate({
+        type: "room_duration_extended",
+        payload: {
+          expiresAt: newExpiresAt,
+          addedMinutes: extraMinutes,
+          extendedBy: myDisplayName,
+        },
+      });
+
+      setModNoticeToast(
+        `⏳ Room extended by ${extraMinutes === 60 ? "+1 hour" : "+30 minutes"}!`
+      );
+    } catch (err: any) {
+      console.error("Error extending room duration:", err);
+      setModNoticeToast(err.message || "Failed to extend room duration");
+    } finally {
+      setIsExtendingDuration(false);
+    }
+  };
+
   const handleClaimModerator = async () => {
     if (isClaimingMod || isCurrentModerator) return;
     try {
@@ -2202,6 +2280,9 @@ export function JunctionRoom({
 
           let updated = serverParticipants.map((sp: JunctionParticipant) => {
             if (isLocalParticipant(sp)) {
+              if (typeof sp.joinedAt === "number" && sp.joinedAt > 0) {
+                localJoinedAtRef.current = sp.joinedAt;
+              }
               return {
                 ...sp,
                 isMuted: isMutedRef.current,
@@ -2502,7 +2583,111 @@ export function JunctionRoom({
         }, (resolvedDuration + 0.3) * 1000);
       } else if (type === "clear_chat") {
         setChatMessages([]);
+        setSyncedHistoryCount(0);
         setTypingUsers({});
+      } else if (type === "chat_sync_request" && payload?.requesterIdentity) {
+        const requester = String(payload.requesterIdentity).trim();
+        if (!requester || isLocalIdentity(requester) || isWaitingRoomRef.current || !hasJoinedSuccessfullyRef.current) {
+          return;
+        }
+        const publicMessages = chatMessagesRef.current
+          .filter((m) => !m.targetIdentity && m.senderId !== "system")
+          .slice(-15);
+        if (publicMessages.length === 0) return;
+
+        const cleanReq = requester.toLowerCase();
+        const existingTimer = pendingChatSyncTimersRef.current.get(cleanReq);
+        if (existingTimer) {
+          clearTimeout(existingTimer);
+          pendingChatSyncTimersRef.current.delete(cleanReq);
+        }
+
+        // Elect host or earliest-joined non-requester peer to respond immediately;
+        // other peers wait briefly as fault-tolerant fallback if no sync is observed.
+        const activePeers = participantsRef.current
+          .filter((p) => {
+            const pId = (p.identity || p.id || "").toLowerCase().trim();
+            return pId && pId !== cleanReq && !isDeparted(p);
+          })
+          .sort((a, b) => {
+            const ta = typeof a.joinedAt === "number" ? a.joinedAt : Number(a.joinedAt) || 0;
+            const tb = typeof b.joinedAt === "number" ? b.joinedAt : Number(b.joinedAt) || 0;
+            if (ta !== tb) return ta - tb;
+            return (a.identity || a.id || "").localeCompare(b.identity || b.id || "");
+          });
+
+        const isPrimaryResponder =
+          isHostRef.current ||
+          (activePeers.length > 0 && isLocalParticipant(activePeers[0]));
+
+        const sendChatSync = () => {
+          broadcastRoomUpdate({
+            type: "chat_sync",
+            payload: {
+              targetIdentity: requester,
+              messages: publicMessages,
+              senderIdentity: myIdentity,
+            },
+          });
+        };
+
+        if (isPrimaryResponder) {
+          sendChatSync();
+        } else {
+          const fallbackTimer = setTimeout(() => {
+            pendingChatSyncTimersRef.current.delete(cleanReq);
+            if (!isWaitingRoomRef.current && hasJoinedSuccessfullyRef.current) {
+              sendChatSync();
+            }
+          }, 450);
+          pendingChatSyncTimersRef.current.set(cleanReq, fallbackTimer);
+        }
+      } else if (type === "chat_sync" && payload) {
+        // Cancel any fallback timer if another peer already fulfilled this requester's sync
+        const targetIdent = String(payload.targetIdentity || "").trim();
+        if (targetIdent) {
+          const cleanTarget = targetIdent.toLowerCase();
+          const pendingTimer = pendingChatSyncTimersRef.current.get(cleanTarget);
+          if (pendingTimer) {
+            clearTimeout(pendingTimer);
+            pendingChatSyncTimersRef.current.delete(cleanTarget);
+          }
+        }
+
+        if (!targetIdent || !isLocalIdentity(targetIdent) || !Array.isArray(payload.messages) || isWaitingRoomRef.current) {
+          return;
+        }
+
+        hasSyncedChatHistoryRef.current = true;
+        const incomingPublic: RoomChatMessage[] = payload.messages
+          .filter(
+            (m: any) =>
+              m &&
+              typeof m.id === "string" &&
+              typeof m.text === "string" &&
+              !m.targetIdentity &&
+              m.senderId !== "system" &&
+              !isBlockedInRoom(m.senderId, m.senderIdentity, m.identity)
+          )
+          .slice(-15);
+
+        if (incomingPublic.length === 0) return;
+
+        incomingPublic.forEach((m) => {
+          if (m.id) seenIncomingMessageIdsRef.current.add(m.id);
+        });
+
+        setChatMessages((prev) => {
+          const byId = new Map<string, RoomChatMessage>();
+          for (const m of incomingPublic) {
+            byId.set(m.id, m);
+          }
+          for (const m of prev) {
+            byId.set(m.id, m);
+          }
+          return Array.from(byId.values()).sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+        });
+        setSyncedHistoryCount((prev) => (prev > 0 ? prev : incomingPublic.length));
       } else if (type === "moderation_event" && payload) {
         const { targetIdentity, action } = payload;
 
@@ -2622,6 +2807,19 @@ export function JunctionRoom({
           setJunction((prev) => (prev ? { ...prev, maxParticipants: newCap } : prev));
         }
         pollJunction();
+      } else if (type === "room_duration_extended" && payload?.expiresAt) {
+        const nextExpiresAt = Number(payload.expiresAt);
+        if (nextExpiresAt && !isNaN(nextExpiresAt)) {
+          setJunction((prev) => (prev ? { ...prev, expiresAt: nextExpiresAt } : prev));
+          if (nextExpiresAt - Date.now() > 5 * 60 * 1000) {
+            hasWarnedExpirationRef.current = false;
+            setIsExpirationWarningOpen(false);
+          }
+          if (!payload.extendedBy || !isLocalIdentity(payload.extendedBy)) {
+            const label = payload.addedMinutes === 60 ? "+1 hour" : `+${payload.addedMinutes || 30} minutes`;
+            setModNoticeToast(`⏳ Room extended by ${label}`);
+          }
+        }
       } else if (type === "room_lock_updated" && payload) {
         const locked = Boolean(payload.isLocked);
         setJunction((prev) => (prev ? { ...prev, isLocked: locked } : prev));
@@ -3014,10 +3212,16 @@ export function JunctionRoom({
     setConnectionProgress(100);
     setTimeout(() => {
       setIsConnectingOverlayOpen(false);
-      // Ask peers for current room music state upon connecting
+      // Ask peers for current room music state and recent chat context upon connecting
       broadcastRoomUpdate({ type: "music_sync_request" });
+      if (!hasSyncedChatHistoryRef.current && !isWaitingRoomRef.current) {
+        broadcastRoomUpdate({
+          type: "chat_sync_request",
+          payload: { requesterIdentity: myIdentity },
+        });
+      }
     }, 100);
-  }, [broadcastRoomUpdate]);
+  }, [broadcastRoomUpdate, myIdentity]);
 
   const pollJunctionRef = useRef(pollJunction);
   pollJunctionRef.current = pollJunction;
@@ -3258,8 +3462,18 @@ export function JunctionRoom({
         setConnectionStep("handshaking");
         setConnectionProgress(85);
 
+        const myJoinedParticipant = joinData.junction.participants?.find((p: any) => isLocalParticipant(p));
+        if (typeof myJoinedParticipant?.joinedAt === "number" && myJoinedParticipant.joinedAt > 0) {
+          localJoinedAtRef.current = myJoinedParticipant.joinedAt;
+        }
+        // Clear any stale cached arrival timestamps before hydrating from live server state
+        joinedAtMapRef.current.clear();
+
         setJunction(joinData.junction);
         setParticipants(joinData.junction.participants || []);
+        setChatMessages([]);
+        setSyncedHistoryCount(0);
+        hasSyncedChatHistoryRef.current = false;
         setLiveKitToken(lkData.token);
         setLiveKitUrl(lkData.serverUrl);
         setKickedNotice(null);
@@ -3267,11 +3481,21 @@ export function JunctionRoom({
         hasJoinedSuccessfullyRef.current = true;
         hasSentUnloadBeacon.current = false;
 
-        // Broadcast join across both channels
+        // Broadcast join across both channels using the authoritative server participant record
         broadcastRoomUpdate({
           type: "room_participant_joined",
-          payload: { participant: selfParticipant },
+          payload: { participant: myJoinedParticipant || selfParticipant },
         });
+
+        // Fallback catch-up request over Supabase Realtime if LiveKit takes longer
+        setTimeout(() => {
+          if (isMounted && hasJoinedSuccessfullyRef.current && !hasSyncedChatHistoryRef.current && !isWaitingRoomRef.current) {
+            broadcastRoomUpdate({
+              type: "chat_sync_request",
+              payload: { requesterIdentity: joinIdentity },
+            });
+          }
+        }, 550);
 
         // Sync local state if participant is mod-muted or has specific role in DB or session
         const myParticipant = joinData.junction.participants?.find((p: any) => isLocalParticipant(p));
@@ -3285,8 +3509,6 @@ export function JunctionRoom({
         if (myParticipant?.role && typeof window !== "undefined") {
           sessionStorage.setItem(`junction_role_${junctionId}`, myParticipant.role);
         }
-
-        setChatMessages([]);
 
         // Fast fallback timer: if LiveKit connects slower than 650ms or in test mode, ensure overlay closes
         setTimeout(() => {
@@ -3320,6 +3542,9 @@ export function JunctionRoom({
       isRealUnmount.current = true;
       isJoiningRef.current = false;
       hasJoinedSuccessfullyRef.current = false;
+
+      pendingChatSyncTimersRef.current.forEach((t) => clearTimeout(t));
+      pendingChatSyncTimersRef.current.clear();
 
       // Emergency hardware & connection release if unmounted without handleLeave
       if (liveKitRoomRef.current) {
@@ -3953,6 +4178,7 @@ export function JunctionRoom({
 
   const handleClearChat = () => {
     setChatMessages([]);
+    setSyncedHistoryCount(0);
     broadcastRoomUpdate({ type: "clear_chat" });
   };
 
@@ -4536,38 +4762,48 @@ export function JunctionRoom({
   const isSomeoneSpeaking = activeSpeakers.length > 0;
   const isLocalInParticipants = participants.some((p) => isLocalParticipant(p)) || liveKitRemoteParticipants.some((p) => isLocalParticipant(p));
   const effectiveParticipants: JunctionParticipant[] = useMemo(() => {
-    const list: JunctionParticipant[] = [];
+    type TaggedParticipant = { data: JunctionParticipant; isAuthoritative: boolean };
+    const list: TaggedParticipant[] = [];
 
     // 1. Add local participant if joined and not yet present in server list
     if (hasJoinedSuccessfullyRef.current && !isLocalInParticipants && !isDeparted({ id: myId, identity: myIdentity, username: (isRegistered && user?.username) || guest?.username || myId })) {
       list.push({
-        id: myId,
-        identity: myIdentity,
-        name: myDisplayName,
-        displayName: myDisplayName,
-        username: (isRegistered && user?.username) || guest?.username || myIdentity,
-        avatar: user?.avatar || guest?.avatar || "zap",
-        color: user?.color || guest?.color || "#6366F1",
-        cardBgColor: user?.cardBgColor || guest?.cardBgColor || "#465B73",
-        role: "speaker",
-        userRole: myEffectiveRole,
-        isMuted: isMuted,
-        isMutedByMod: isMutedByMod,
-        isSpeaking: isLocalSpeaking,
-        joinedAt: localJoinedAtRef.current,
-        connectionQuality: "excellent",
+        isAuthoritative: false,
+        data: {
+          id: myId,
+          identity: myIdentity,
+          name: myDisplayName,
+          displayName: myDisplayName,
+          username: (isRegistered && user?.username) || guest?.username || myIdentity,
+          avatar: user?.avatar || guest?.avatar || "zap",
+          color: user?.color || guest?.color || "#6366F1",
+          cardBgColor: user?.cardBgColor || guest?.cardBgColor || "#465B73",
+          role: "speaker",
+          userRole: myEffectiveRole,
+          isMuted: isMuted,
+          isMutedByMod: isMutedByMod,
+          isSpeaking: isLocalSpeaking,
+          joinedAt: localJoinedAtRef.current,
+          connectionQuality: "excellent",
+        },
       });
     }
 
-    // 2. Add database participants (excluding any departed identities)
-    list.push(...participants.filter((p) => !isDeparted(p)));
+    // 2. Add database participants (authoritative server joinedAt)
+    participants.filter((p) => !isDeparted(p)).forEach((p) => {
+      list.push({ isAuthoritative: true, data: p });
+    });
 
-    // 3. Add LiveKit real-time remote participants (guarantees voice peers have immediate cards!)
-    list.push(...liveKitRemoteParticipants.filter((p) => !isDeparted(p)));
+    // 3. Add LiveKit real-time remote participants (provisional fallback until DB syncs)
+    liveKitRemoteParticipants.filter((p) => !isDeparted(p)).forEach((p) => {
+      list.push({ isAuthoritative: false, data: p });
+    });
 
-    // 4. Deduplicate and merge by canonical identity with richest field retention
+    // 4. Deduplicate and merge by canonical identity with authoritative server joinedAt
     const map = new Map<string, JunctionParticipant>();
-    for (const p of list) {
+    const authoritativeKeys = new Set<string>();
+    for (const entry of list) {
+      const p = entry.data;
       if (isDeparted(p)) continue;
 
       const isLocal = isLocalParticipant(p);
@@ -4598,13 +4834,20 @@ export function JunctionRoom({
       const key = matchedKey || rawKey;
       const existing = map.get(key);
 
-      // Stable arrival timestamp pinned in joinedAtMapRef to eliminate all seat shuffling
+      // Authoritative DB/broadcast joinedAt always supersedes provisional LiveKit/local fallback timestamps
+      const parsedTime = typeof p.joinedAt === "number" && p.joinedAt > 0 ? p.joinedAt : Number(p.joinedAt);
+      const hasValidTime = Boolean(parsedTime && !isNaN(parsedTime) && parsedTime > 0);
       let stableJoinedAt: number;
-      if (joinedAtMapRef.current.has(key)) {
+      if (entry.isAuthoritative && hasValidTime) {
+        stableJoinedAt = parsedTime;
+        joinedAtMapRef.current.set(key, stableJoinedAt);
+        authoritativeKeys.add(key);
+      } else if (authoritativeKeys.has(key) && joinedAtMapRef.current.has(key)) {
+        stableJoinedAt = joinedAtMapRef.current.get(key)!;
+      } else if (joinedAtMapRef.current.has(key)) {
         stableJoinedAt = joinedAtMapRef.current.get(key)!;
       } else {
-        const parsedTime = typeof p.joinedAt === "number" && p.joinedAt > 0 ? p.joinedAt : Number(p.joinedAt);
-        stableJoinedAt = parsedTime && !isNaN(parsedTime) && parsedTime > 0
+        stableJoinedAt = hasValidTime
           ? parsedTime
           : (isLocal ? localJoinedAtRef.current : Date.now());
         joinedAtMapRef.current.set(key, stableJoinedAt);
@@ -4625,7 +4868,7 @@ export function JunctionRoom({
             isMuted: isMuted || isMutedByMod,
             isMutedByMod,
             isSpeaking: isLocalSpeaking,
-            joinedAt: localJoinedAtRef.current,
+            joinedAt: stableJoinedAt,
           });
         } else {
           map.set(key, {
@@ -4649,7 +4892,7 @@ export function JunctionRoom({
             isMuted: isMuted || isMutedByMod,
             isMutedByMod,
             isSpeaking: isLocalSpeaking,
-            joinedAt: localJoinedAtRef.current,
+            joinedAt: stableJoinedAt,
           });
         } else {
           map.set(key, {
@@ -5145,6 +5388,57 @@ export function JunctionRoom({
           </div>
         )}
 
+        {/* 5-Minute Expiration Warning Toast with 1-Click Extend */}
+        {isPrivateRoom && !isWaitingRoom && isExpirationWarningOpen && timeLeftMs !== null && timeLeftMs > 0 && timeLeftMs <= 5 * 60 * 1000 && (
+          <div className="fixed top-16 sm:top-20 inset-x-3 sm:inset-x-auto sm:right-6 max-w-md mx-auto sm:mx-0 bg-[#1B1308]/95 border border-amber-500/50 text-amber-100 px-3.5 py-2.5 rounded-2xl text-xs font-semibold flex items-center justify-between gap-2.5 shadow-2xl backdrop-blur-2xl z-[125] animate-fadeIn pointer-events-auto">
+            <div className="flex items-center gap-2 min-w-0">
+              <Clock size={15} className="text-amber-400 shrink-0 animate-pulse" />
+              <div className="min-w-0">
+                <div className="truncate font-bold text-amber-200">
+                  Closing in {formatTimerMinutes(Math.ceil(timeLeftMs / 1000))}
+                </div>
+                <div className="text-[10px] text-amber-300/80 font-normal truncate">
+                  {isHost || isSuperAdmin
+                    ? "Extend room time to keep the conversation going"
+                    : "Room will close automatically when timer hits zero"}
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              {(isHost || isSuperAdmin) && (
+                <>
+                  <button
+                    type="button"
+                    disabled={isExtendingDuration}
+                    onClick={() => handleExtendDuration(30)}
+                    className="px-2.5 py-1 rounded-lg bg-amber-500/25 hover:bg-amber-500/40 border border-amber-400/50 text-amber-200 text-[11px] font-bold transition-all active:scale-95 cursor-pointer disabled:opacity-50"
+                    title="Extend room by 30 minutes"
+                  >
+                    {isExtendingDuration ? "..." : "+30m"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isExtendingDuration}
+                    onClick={() => handleExtendDuration(60)}
+                    className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-[11px] font-bold transition-all active:scale-95 cursor-pointer disabled:opacity-50"
+                    title="Extend room by 1 hour"
+                  >
+                    {isExtendingDuration ? "..." : "+1h"}
+                  </button>
+                </>
+              )}
+              <button
+                type="button"
+                onClick={() => setIsExpirationWarningOpen(false)}
+                className="text-amber-400/70 hover:text-amber-200 p-1 rounded-lg hover:bg-amber-800/40 shrink-0 transition-colors cursor-pointer"
+                title="Dismiss warning"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Toast notice for Mod claim / info */}
         {modNoticeToast && (
           <div
@@ -5295,6 +5589,48 @@ export function JunctionRoom({
               </>
             )}
 
+            {/* Shared Extend Duration Dropdown / Modal (Desktop & Mobile) */}
+            {isExtendMenuOpen && isPrivateRoom && (isHost || isSuperAdmin) && junction?.expiresAt && (
+              <>
+                <div
+                  className="fixed inset-0 z-40 bg-black/60 sm:bg-black/30 backdrop-blur-sm"
+                  onClick={() => setIsExtendMenuOpen(false)}
+                />
+                <div className="fixed sm:absolute top-20 sm:top-14 left-4 right-4 sm:left-auto sm:right-6 max-w-xs w-full mx-auto sm:mx-0 p-3.5 rounded-2xl bg-[#12131F]/98 border border-white/20 shadow-2xl z-50 animate-fadeIn backdrop-blur-2xl">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <Clock size={13} className="text-indigo-400" />
+                      <span>Extend Room Duration</span>
+                    </span>
+                    <span className="text-[10px] text-slate-400 font-mono">
+                      {new Date(junction.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-slate-400 mb-3">
+                    Add extra time so active conversations stay live.
+                  </p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      disabled={isExtendingDuration}
+                      onClick={() => handleExtendDuration(30)}
+                      className="py-2 px-3 rounded-xl bg-white/10 hover:bg-indigo-600/30 border border-white/10 hover:border-indigo-400/40 text-white text-xs font-bold transition-all cursor-pointer disabled:opacity-50"
+                    >
+                      {isExtendingDuration ? "..." : "Extend +30m"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isExtendingDuration}
+                      onClick={() => handleExtendDuration(60)}
+                      className="py-2 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-all cursor-pointer disabled:opacity-50"
+                    >
+                      {isExtendingDuration ? "..." : "Extend +1h"}
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+
             {/* DESKTOP HEADER (sm:flex hidden) */}
             <div className="hidden sm:flex items-center justify-between gap-4">
               {/* Left: Title / Occupant Count / Role in one compact, clean row */}
@@ -5393,32 +5729,90 @@ export function JunctionRoom({
 
                 {/* Duration / Expiration Countdown Pill (Private Rooms Only) */}
                 {isPrivateRoom && junction && (
-                  <div
-                    className={`h-8 sm:h-9 px-2.5 sm:px-3 rounded-full flex items-center gap-1.5 border text-xs font-medium shrink-0 transition-all ${timeLeftMs !== null && timeLeftMs < 10 * 60 * 1000
-                      ? "bg-amber-500/15 border-amber-500/30 text-amber-300 animate-pulse"
-                      : junction.expiresAt
-                        ? "bg-white/[0.04] border-white/10 text-slate-200"
-                        : "bg-purple-500/10 border-purple-500/20 text-purple-300"
-                      }`}
-                    title={
-                      junction.expiresAt
-                        ? `Room closes at ${new Date(junction.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
-                        : "Permanent Room (Does not auto-expire)"
-                    }
-                  >
-                    <Clock
-                      size={12}
-                      className={
-                        timeLeftMs !== null && timeLeftMs < 10 * 60 * 1000
-                          ? "text-amber-400"
+                  <div className="relative shrink-0 flex items-center gap-1">
+                    {isHost || isSuperAdmin ? (
+                      junction.expiresAt ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => setIsExtendMenuOpen((prev) => !prev)}
+                            className={`h-8 sm:h-9 px-2.5 sm:px-3 rounded-full flex items-center gap-1.5 border text-xs font-medium shrink-0 transition-all cursor-pointer active:scale-95 ${timeLeftMs !== null && timeLeftMs < 10 * 60 * 1000
+                              ? "bg-amber-500/15 hover:bg-amber-500/25 border-amber-500/40 text-amber-300 animate-pulse"
+                              : "bg-white/[0.04] hover:bg-white/[0.08] border-white/10 text-slate-200"
+                              }`}
+                            title={`Room closes at ${new Date(junction.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} — Click to extend`}
+                          >
+                            <Clock
+                              size={12}
+                              className={timeLeftMs !== null && timeLeftMs < 10 * 60 * 1000 ? "text-amber-400" : "text-indigo-400"}
+                            />
+                            <span className="font-semibold text-xs">
+                              {formattedDurationRemaining}
+                            </span>
+                            <ChevronDown size={11} className={`transition-transform duration-200 ${isExtendMenuOpen ? "rotate-180" : ""}`} />
+                          </button>
+
+                          {timeLeftMs !== null && timeLeftMs > 0 && timeLeftMs <= 5 * 60 * 1000 && (
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                type="button"
+                                disabled={isExtendingDuration}
+                                onClick={() => handleExtendDuration(30)}
+                                className="h-8 px-2 rounded-full bg-amber-500/20 hover:bg-amber-500/35 border border-amber-400/50 text-amber-200 text-[11px] font-bold transition-all active:scale-95 cursor-pointer disabled:opacity-50"
+                                title="Extend room by 30 minutes"
+                              >
+                                +30m
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isExtendingDuration}
+                                onClick={() => handleExtendDuration(60)}
+                                className="h-8 px-2 rounded-full bg-amber-500 hover:bg-amber-400 text-slate-950 text-[11px] font-bold transition-all active:scale-95 cursor-pointer disabled:opacity-50"
+                                title="Extend room by 1 hour"
+                              >
+                                +1h
+                              </button>
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <div
+                          className="h-8 sm:h-9 px-2.5 sm:px-3 rounded-full flex items-center gap-1.5 border text-xs font-medium shrink-0 bg-purple-500/10 border-purple-500/20 text-purple-300"
+                          title="Permanent Room (Does not auto-expire)"
+                        >
+                          <Clock size={12} className="text-purple-400" />
+                          <span className="font-semibold text-xs">{formattedDurationRemaining}</span>
+                        </div>
+                      )
+                    ) : (
+                      <div
+                        className={`h-8 sm:h-9 px-2.5 sm:px-3 rounded-full flex items-center gap-1.5 border text-xs font-medium shrink-0 transition-all ${timeLeftMs !== null && timeLeftMs < 10 * 60 * 1000
+                          ? "bg-amber-500/15 border-amber-500/30 text-amber-300 animate-pulse"
                           : junction.expiresAt
-                            ? "text-indigo-400"
-                            : "text-purple-400"
-                      }
-                    />
-                    <span className="font-semibold text-xs">
-                      {formattedDurationRemaining}
-                    </span>
+                            ? "bg-white/[0.04] border-white/10 text-slate-200"
+                            : "bg-purple-500/10 border-purple-500/20 text-purple-300"
+                          }`}
+                        title={
+                          junction.expiresAt
+                            ? `Room closes at ${new Date(junction.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+                            : "Permanent Room (Does not auto-expire)"
+                        }
+                      >
+                        <Clock
+                          size={12}
+                          className={
+                            timeLeftMs !== null && timeLeftMs < 10 * 60 * 1000
+                              ? "text-amber-400"
+                              : junction.expiresAt
+                                ? "text-indigo-400"
+                                : "text-purple-400"
+                          }
+                        />
+                        <span className="font-semibold text-xs">
+                          {formattedDurationRemaining}
+                        </span>
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -5616,33 +6010,77 @@ export function JunctionRoom({
 
                 {/* Duration / Expiration Countdown Pill */}
                 {isPrivateRoom && junction && (
-                  <div
-                    className={`h-6 px-2 rounded-full flex items-center gap-1 border text-[10px] font-medium shrink-0 transition-all ${timeLeftMs !== null && timeLeftMs < 10 * 60 * 1000
-                      ? "bg-amber-500/15 border-amber-500/30 text-amber-300 animate-pulse"
-                      : junction.expiresAt
-                        ? "bg-white/[0.04] border-white/10 text-slate-200"
-                        : "bg-purple-500/10 border-purple-500/20 text-purple-300"
-                      }`}
-                    title={
-                      junction.expiresAt
-                        ? `Closes at ${new Date(junction.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
-                        : "Permanent Room"
-                    }
-                  >
-                    <Clock
-                      size={10}
-                      className={
-                        timeLeftMs !== null && timeLeftMs < 10 * 60 * 1000
-                          ? "text-amber-400"
-                          : junction.expiresAt
-                            ? "text-indigo-400"
-                            : "text-purple-400"
+                  (isHost || isSuperAdmin) && junction.expiresAt ? (
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setIsExtendMenuOpen((prev) => !prev)}
+                        className={`h-6 px-2 rounded-full flex items-center gap-1 border text-[10px] font-medium shrink-0 transition-all cursor-pointer active:scale-95 ${timeLeftMs !== null && timeLeftMs < 10 * 60 * 1000
+                          ? "bg-amber-500/15 border-amber-500/40 text-amber-300 animate-pulse"
+                          : "bg-white/[0.04] border-white/10 text-slate-200"
+                          }`}
+                        title={`Closes at ${new Date(junction.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} — Tap to extend`}
+                      >
+                        <Clock
+                          size={10}
+                          className={timeLeftMs !== null && timeLeftMs < 10 * 60 * 1000 ? "text-amber-400" : "text-indigo-400"}
+                        />
+                        <span className="font-semibold text-[10px]">
+                          {formattedDurationRemaining}
+                        </span>
+                        <ChevronDown size={9} className={`transition-transform duration-200 ${isExtendMenuOpen ? "rotate-180" : ""}`} />
+                      </button>
+
+                      {timeLeftMs !== null && timeLeftMs > 0 && timeLeftMs <= 5 * 60 * 1000 && (
+                        <>
+                          <button
+                            type="button"
+                            disabled={isExtendingDuration}
+                            onClick={() => handleExtendDuration(30)}
+                            className="h-6 px-2 rounded-full bg-amber-500/20 hover:bg-amber-500/35 border border-amber-400/50 text-amber-200 text-[10px] font-bold active:scale-95 cursor-pointer disabled:opacity-50"
+                          >
+                            +30m
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isExtendingDuration}
+                            onClick={() => handleExtendDuration(60)}
+                            className="h-6 px-2 rounded-full bg-amber-500 hover:bg-amber-400 text-slate-950 text-[10px] font-bold active:scale-95 cursor-pointer disabled:opacity-50"
+                          >
+                            +1h
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  ) : (
+                    <div
+                      className={`h-6 px-2 rounded-full flex items-center gap-1 border text-[10px] font-medium shrink-0 transition-all ${timeLeftMs !== null && timeLeftMs < 10 * 60 * 1000
+                        ? "bg-amber-500/15 border-amber-500/30 text-amber-300 animate-pulse"
+                        : junction.expiresAt
+                          ? "bg-white/[0.04] border-white/10 text-slate-200"
+                          : "bg-purple-500/10 border-purple-500/20 text-purple-300"
+                        }`}
+                      title={
+                        junction.expiresAt
+                          ? `Closes at ${new Date(junction.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+                          : "Permanent Room"
                       }
-                    />
-                    <span className="font-semibold text-[10px]">
-                      {formattedDurationRemaining}
-                    </span>
-                  </div>
+                    >
+                      <Clock
+                        size={10}
+                        className={
+                          timeLeftMs !== null && timeLeftMs < 10 * 60 * 1000
+                            ? "text-amber-400"
+                            : junction.expiresAt
+                              ? "text-indigo-400"
+                              : "text-purple-400"
+                        }
+                      />
+                      <span className="font-semibold text-[10px]">
+                        {formattedDurationRemaining}
+                      </span>
+                    </div>
+                  )
                 )}
 
                 {/* Role Badge */}
@@ -6253,6 +6691,13 @@ export function JunctionRoom({
                 onScroll={handleChatScroll}
                 className="flex-1 p-3 sm:p-4 overflow-y-auto scroll-smooth flex flex-col"
               >
+                {visibleChatMessages.length > 0 && syncedHistoryCount > 0 && (
+                  <div className="flex items-center justify-center mb-2.5 select-none">
+                    <span className="px-2.5 py-0.5 rounded-full bg-white/[0.04] border border-white/[0.08] text-[10px] font-medium text-slate-400">
+                      Caught up on last {syncedHistoryCount} message{syncedHistoryCount === 1 ? "" : "s"}
+                    </span>
+                  </div>
+                )}
                 {visibleChatMessages.length === 0 ? (
                   <div className="flex flex-col items-center justify-center m-auto text-center py-6 px-4 select-none animate-in fade-in zoom-in-95 duration-200">
                     <div className="relative mb-3.5">
