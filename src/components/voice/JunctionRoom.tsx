@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import { GuestUser, Junction, JunctionParticipant, RoomChatMessage, UserRole, WaitingGuest } from "@/lib/types";
 import { useAudioVisualizer } from "@/hooks/useAudioVisualizer";
@@ -4898,6 +4899,12 @@ export function JunctionRoom({
           map.set(key, {
             ...existing,
             ...p,
+            id: existing.id || p.id,
+            identity: existing.identity || p.identity,
+            username: existing.username || p.username,
+            name: existing.name || p.name,
+            displayName: existing.displayName || p.displayName,
+            role: existing.role && existing.role !== "speaker" ? existing.role : (p.role || existing.role),
             isMuted: p.isMuted !== undefined ? p.isMuted : existing.isMuted,
             isMutedByMod: p.isMutedByMod ?? existing.isMutedByMod,
             isSpeaking: activeSpeakers.some(s => s.toLowerCase() === key || s.toLowerCase() === (p.identity || "").toLowerCase()) || p.isSpeaking || existing.isSpeaking,
@@ -6288,7 +6295,9 @@ export function JunctionRoom({
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     if (isLocal) return;
-                                    if (menuAnchor?.participantIdentity === participant.identity) {
+                                    const targetActionId = participant.identity || participant.id || participant.username || "";
+                                    if (!targetActionId) return;
+                                    if (menuAnchor?.participantIdentity?.toLowerCase() === targetActionId.toLowerCase()) {
                                       setMenuAnchor(null);
                                       setActiveModMenuParticipant(null);
                                       return;
@@ -6320,11 +6329,11 @@ export function JunctionRoom({
                                       top: isUpward ? undefined : Math.round(rect.bottom + 6),
                                       bottom: isUpward ? Math.round(screenH - rect.top + 6) : undefined,
                                       left: Math.round(calculatedLeft),
-                                      participantIdentity: participant.identity,
+                                      participantIdentity: targetActionId,
                                     });
-                                    setActiveModMenuParticipant(participant.identity);
+                                    setActiveModMenuParticipant(targetActionId);
                                   }}
-                                  className={`p-1 sm:p-1.5 rounded-lg border backdrop-blur-md transition-all active:scale-95 cursor-pointer shrink-0 touch-manipulation ${menuAnchor?.participantIdentity === participant.identity
+                                  className={`p-1 sm:p-1.5 rounded-lg border backdrop-blur-md transition-all active:scale-95 cursor-pointer shrink-0 touch-manipulation ${menuAnchor?.participantIdentity?.toLowerCase() === (participant.identity || participant.id || participant.username || "").toLowerCase()
                                     ? "bg-indigo-600 text-white border-indigo-400 shadow-md"
                                     : "text-slate-400 hover:text-white bg-black/30 hover:bg-black/50 border-white/10"
                                     }`}
@@ -7399,8 +7408,17 @@ export function JunctionRoom({
         />
 
         {/* Anchored Participant Dropdown Menu */}
-        {menuAnchor && (() => {
-          const target = participants.find((p) => p.identity === menuAnchor.participantIdentity);
+        {menuAnchor && typeof document !== "undefined" && (() => {
+          const anchorKey = (menuAnchor.participantIdentity || "").trim().toLowerCase();
+          const matchesAnchor = (p: JunctionParticipant) => {
+            if (!anchorKey) return false;
+            return (
+              (p.identity || "").trim().toLowerCase() === anchorKey ||
+              (p.id || "").trim().toLowerCase() === anchorKey ||
+              (p.username || "").trim().toLowerCase() === anchorKey
+            );
+          };
+          const target = effectiveParticipants.find(matchesAnchor) || participants.find(matchesAnchor);
           if (!target) return null;
 
           // Never open dropdown menu for self
@@ -7446,11 +7464,11 @@ export function JunctionRoom({
             setActiveModMenuParticipant(null);
           };
 
-          return (
+          return createPortal(
             <>
               {/* Transparent backdrop overlay to dismiss on outside click */}
               <div
-                className="fixed inset-0 z-[90] cursor-default bg-black/10 touch-manipulation"
+                className="fixed inset-0 z-[140] cursor-default bg-black/10 touch-manipulation"
                 onClick={(e) => {
                   e.stopPropagation();
                   closeMenu();
@@ -7469,7 +7487,7 @@ export function JunctionRoom({
                   left: `${menuAnchor.left}px`,
                 }}
                 onClick={(e) => e.stopPropagation()}
-                className="fixed w-[216px] max-w-[calc(100vw-20px)] rounded-2xl bg-[#12131F]/98 border border-white/20 shadow-2xl p-1.5 z-[100] flex flex-col gap-1 text-left animate-fadeIn backdrop-blur-2xl max-h-[min(80vh,420px)] overflow-y-auto overscroll-contain touch-manipulation"
+                className="fixed w-[216px] max-w-[calc(100vw-20px)] rounded-2xl bg-[#12131F]/98 border border-white/20 shadow-2xl p-1.5 z-[145] flex flex-col gap-1 text-left animate-fadeIn backdrop-blur-2xl max-h-[min(80vh,420px)] overflow-y-auto overscroll-contain touch-manipulation"
               >
                 {/* Header Info */}
                 <div className="px-2 py-1.5 border-b border-white/10 flex items-center justify-between gap-1.5">
@@ -7478,8 +7496,8 @@ export function JunctionRoom({
                       <UserAvatar avatar={target.avatar} color={target.color} size="sm" className="!w-5 !h-5" />
                     </div>
                     <div className="min-w-0">
-                      <div className="text-xs font-bold text-white truncate">{target.name}</div>
-                      {target.username && target.username.toLowerCase() !== target.name.toLowerCase() && (
+                      <div className="text-xs font-bold text-white truncate">{target.name || target.identity}</div>
+                      {target.username && target.username.toLowerCase() !== (target.name || "").toLowerCase() && (
                         <div className="text-[10px] text-slate-400 font-semibold truncate">@{target.username}</div>
                       )}
                     </div>
@@ -7739,7 +7757,8 @@ export function JunctionRoom({
                   </button>
                 </div>
               </div>
-            </>
+            </>,
+            document.body
           );
         })()}
 
