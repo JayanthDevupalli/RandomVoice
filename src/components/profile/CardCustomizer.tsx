@@ -1,13 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { PRESET_COLORS, getCardThemeStyle } from "@/lib/card-themes";
 import { UserAvatar, AVATAR_ICON_MAP } from "@/components/ui/UserAvatar";
 import { Crown, MicOff, Check, Palette, Sparkles, Loader2 } from "lucide-react";
 
 interface CardCustomizerProps {
   username: string;
-  avatar: string;
+  displayName?: string;
+  avatar?: string;
   initialColor?: string;
   onSave: (color: string) => Promise<void> | void;
   isSaving?: boolean;
@@ -15,14 +16,22 @@ interface CardCustomizerProps {
 
 export function CardCustomizer({
   username,
-  avatar,
+  displayName,
+  avatar = "sparkles",
   initialColor = "#465B73",
   onSave,
   isSaving = false,
 }: CardCustomizerProps) {
   const [selectedColor, setSelectedColor] = useState(initialColor);
   const [savedSuccess, setSavedSuccess] = useState(false);
-  const [colorCategory, setColorCategory] = useState<"gradient" | "solid">("gradient");
+  const [colorCategory, setColorCategory] = useState<"gradient" | "solid">(
+    initialColor.includes("gradient") ? "gradient" : "solid"
+  );
+
+  useEffect(() => {
+    setSelectedColor(initialColor);
+    setColorCategory(initialColor.includes("gradient") ? "gradient" : "solid");
+  }, [initialColor]);
 
   const cardStyle = getCardThemeStyle(selectedColor);
 
@@ -123,8 +132,8 @@ export function CardCustomizer({
                   border: "1.5px solid rgba(255, 255, 255, 0.12)",
                 }}
               >
-                {avatar?.includes("http") ? (
-                  <img src={avatar} alt={username} className="w-full h-full object-cover rounded-2xl sm:rounded-[1.4rem]" />
+                {avatar?.startsWith("http") || avatar?.startsWith("data:") ? (
+                  <img src={avatar} alt={displayName || username} className="w-full h-full object-cover rounded-2xl sm:rounded-[1.4rem]" />
                 ) : (
                   (() => {
                     const normalizedKey = avatar?.toLowerCase().replace(/[^a-z0-9]/g, "") || "zap";
@@ -145,7 +154,7 @@ export function CardCustomizer({
             {/* User Details */}
             <div className="w-full flex flex-col items-center gap-1 z-10 px-1">
               <span className="font-bold text-xs sm:text-sm text-white tracking-tight truncate max-w-[180px]">
-                {username}
+                {displayName || username}
               </span>
               <div className="h-5 flex items-center justify-center">
                 <span className="px-2 py-0.5 rounded-full bg-black/40 border border-white/10 text-[9px] text-slate-400 font-medium backdrop-blur-md flex items-center gap-1">

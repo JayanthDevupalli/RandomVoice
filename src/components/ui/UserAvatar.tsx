@@ -95,8 +95,8 @@ export function UserAvatar({
 
   const isFullSize = className.includes("w-full");
 
-  // If the avatar is an uploaded image URL, render it directly
-  if (avatar?.startsWith("http")) {
+  // If the avatar is an uploaded image URL or base64 data URI, render it directly
+  if (avatar?.startsWith("http") || avatar?.startsWith("data:")) {
     return (
       <div className={`relative inline-flex items-center justify-center ${isFullSize ? "w-full h-full" : ""}`}>
         <div

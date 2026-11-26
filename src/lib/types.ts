@@ -54,10 +54,13 @@ export interface GuestUser {
   id: string;
   name: string; // Shown Name (e.g. "Jay")
   username?: string; // Unique handle (e.g. "devdallii")
-  displayName?: string;
+  displayName?: string; // Display Name (e.g. "Jay")
   avatar: string;
   color: string;
   cardBgColor?: string;
+  bio?: string;
+  interests?: string[];
+  vibeStatus?: string;
   profileChangesLeft?: number;
 }
 
